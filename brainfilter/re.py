@@ -1,5 +1,3 @@
-
-
 alphanum = r"[a-zA-Z0-9]"
 bids_label = r"[a-zA-Z0-9\+]+"
 bids_index = r"[0-9]+"
@@ -7,3 +5,5 @@ ext_nii = r"\.nii(\.gz)?$"
 ext_json = r"\.json$"
 ext_tsv = r"\.tsv$"
 ext_tsvgz = r"\.tsv\.gz$"
+ext_bval = r"\.bval$"
+ext_bvec = r"\.bvec$"

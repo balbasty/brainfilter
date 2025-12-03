@@ -16,7 +16,7 @@ SubjectDirSchemaWithSessions = DirectorySchema({
         SessionDir,
         Required,
     ],
-    "sub-{subject_label}_sessions.tsv": Annotated[
+    re.compile(f"sub-{bids_label}_sessions.tsv"): Annotated[
         SessionFile,
         Optional,
     ],

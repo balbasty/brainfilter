@@ -1,4 +1,5 @@
 # stdlib
+import csv
 import json
 import logging
 import re
@@ -978,7 +979,27 @@ class JSONFileValidator(FileValidator, HintValidator):
         return HintValidator.__call__(self, content, prefix)
 
 
-class TSVFileValidator(FileValidator):
+class TSVFileValidator(FileValidator, HintValidator):
     """A validator that validates a TSV file."""
 
-    ...
+    def __init__(self, schema: type | dict | JSONSchema | None = None) -> None:
+        if isinstance(schema, dict):
+            schema = JSONSchema(schema)
+        if isinstance(schema, JSONSchema):
+            schema = Annotated[dict[str, T], schema]
+        schema = schema or dict[str, T]
+        super().__init__(schema)
+
+    def __call__(self, value: T, prefix: str = "") -> bool:
+        value = ensure_path(value)
+        result = FileValidator.__call__(self, value, prefix)
+
+        if not value.is_file():
+            return result
+
+        prefix += f"In file {value!s}: "
+
+        content = [row for row in csv.DictReader(value.open(), delimiter="\t")]
+        for row in content:
+            result &= HintValidator.__call__(self, row, prefix)
+        return result
