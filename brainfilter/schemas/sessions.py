@@ -8,16 +8,16 @@ from brainfilter.schemas.mri import (
     AnatDirectory, FuncDirectory, FmapDirectory,
     DwiDirectory, PerfDirectory,
 )
-from brainfilter.validation import DirectorySchema, Optional
+from brainfilter.validators import DirectorySchema, optional
 
 prefix = f"sub-{bids_label}_ses-{bids_label}"
 
 SessionDirSchema = DirectorySchema({
-    "anat": Annotated[AnatDirectory, Optional],
-    "func": Annotated[FuncDirectory, Optional],
-    "dwi": Annotated[DwiDirectory, Optional],
-    "perf": Annotated[PerfDirectory, Optional],
-    "fmap": Annotated[FmapDirectory, Optional],
+    "anat": Annotated[AnatDirectory, optional],
+    "func": Annotated[FuncDirectory, optional],
+    "dwi": Annotated[DwiDirectory, optional],
+    "perf": Annotated[PerfDirectory, optional],
+    "fmap": Annotated[FmapDirectory, optional],
 })
 
 SessionDir = Annotated[Directory, SessionDirSchema]

@@ -2,17 +2,17 @@
 from typing import Annotated, Literal, T
 
 # internals
-from brainfilter.validation import (
+from brainfilter.validators import (
     JSONSchema,
-    Required,
-    Recommended,
-    Optional,
+    required,
+    recommended,
+    optional,
     # RecommendedIf,
     # NotRecommendedIf,
     # ProscribedIf,
 )
 from brainfilter.schemas.utils import URI, File
-from brainfilter.validation import JSONFileValidator
+from brainfilter.validators import JSONFileValidator
 from brainfilter.versioning import VersionSpecifier, VersionSwitch
 
 
@@ -24,20 +24,20 @@ SourceDatasetKey = Annotated[
 Container = Annotated[
     dict[str, T],
     JSONSchema({
-        "Type": Annotated[str, Required],
-        "Tag": Annotated[str, Required],
-        "URI": Annotated[URI, Recommended],
+        "Type": Annotated[str, required],
+        "Tag": Annotated[str, required],
+        "URI": Annotated[URI, recommended],
     })
 ]
 
 GeneratedBy = Annotated[
     dict[str, T],
     JSONSchema({
-        "Name": Annotated[str, Required],
-        "Version": Annotated[str, Recommended],
-        "Description": Annotated[str, Optional],
-        "CodeURL": Annotated[URI, Optional],
-        "Container": Annotated[Container, Optional],
+        "Name": Annotated[str, required],
+        "Version": Annotated[str, recommended],
+        "Description": Annotated[str, optional],
+        "CodeURL": Annotated[URI, optional],
+        "Container": Annotated[Container, optional],
     })
 ]
 
@@ -46,20 +46,20 @@ DatasetDescription = Annotated[
     JSONSchema({
         "Name": Annotated[
             str,
-            Required
+            required
         ],
         "BIDSVersion": Annotated[
             str,
-            Required
+            required
         ],
         "HEDVersion": Annotated[
             str | list[str],
-            Recommended,
+            recommended,
             VersionSpecifier[">=1.4.1"]
         ],
         "DatasetLinks": Annotated[
             dict[str, str],
-            Optional,
+            optional,
             VersionSpecifier[">=1.8.0"]
         ],
         "DatasetType": Annotated[
@@ -69,12 +69,12 @@ DatasetDescription = Annotated[
                 Literal["raw", "derivative", "study"],
                 Literal["raw", "derivative"]
             ],
-            Recommended,
+            recommended,
             VersionSpecifier[">=1.4.0"]
         ],
         "License": Annotated[
             str,
-            Recommended,
+            recommended,
             # RecommendedIf[
             #     (lambda schema: not (schema["CITATION.cff"]).exists())
             # ],
@@ -84,7 +84,7 @@ DatasetDescription = Annotated[
         ],
         "Authors": Annotated[
             list[str],
-            Optional,
+            optional,
             # VersionSwitch[
             #     VersionSpecifier[">=1.10.1"],
             #     RecommendedIf[
@@ -97,32 +97,32 @@ DatasetDescription = Annotated[
         ],
         "Keywords": Annotated[
             list[str],
-            Optional,
+            optional,
             VersionSpecifier[">=1.10.1"],
         ],
         "Acknowledgements": Annotated[
             str,
-            Optional,
+            optional,
         ],
         "HowToAcknowledge": Annotated[
             str,
-            Optional,
+            optional,
             # NotRecommendedIf[
             #     (lambda schema: (schema["CITATION.cff"]).exists())
             # ],
         ],
         "Funding": Annotated[
             list[str],
-            Optional,
+            optional,
         ],
         "EthicsApprovals": Annotated[
             list[str],
-            Optional,
+            optional,
             VersionSpecifier[">=1.3.0"],
         ],
         "ReferencesAndLinks": Annotated[
             list[str],
-            Optional,
+            optional,
             # NotRecommendedIf[
             #     (lambda schema: (schema["CITATION.cff"]).exists())
             # ],
@@ -133,16 +133,16 @@ DatasetDescription = Annotated[
                 URI,
                 str
             ],
-            Optional,
+            optional,
         ],
         "GeneratedBy": Annotated[
             list[GeneratedBy],
-            Optional,
+            optional,
             VersionSpecifier[">=1.7.0"],
         ],
         "SourceDatasets": Annotated[
             list[dict[SourceDatasetKey, T]],
-            Optional,
+            optional,
             VersionSpecifier[">=1.7.0"],
         ],
     })

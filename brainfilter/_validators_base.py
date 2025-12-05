@@ -9,13 +9,18 @@ from fnmatch import fnmatch
 from os import PathLike
 from types import GenericAlias, UnionType
 from typing import (
-    Annotated, Any, Callable, Literal, T, TypeVar, Union,
+    Annotated, Any, Callable, Literal, T, Union,
     get_origin, get_args
 )
 
 # internals
 from brainfilter.versioning import (
     Version, VersionSpecifier, VersionSwitch, version_is_satisfied
+)
+from ._validators_req import (
+    RequirementLevel,
+    required, recommended, optional, proscribed, not_recommended,
+    RequiredIf, RecommendedIf, ProscribedIf, NotRecommendedIf
 )
 
 # optionals
@@ -29,37 +34,8 @@ except ImportError:
 lg = logging.getLogger(__name__)
 
 
-PathType = UPath | PathLike if UPath else PathLike
+PathType = (UPath | PathLike) if UPath else PathLike
 PathTypes = (UPath, PathLike) if UPath else (PathLike,)
-
-# ----------------------------------------------------------------------
-#  Requirement levels
-# ----------------------------------------------------------------------
-
-RequirementLevel = type("RequirementLevel", (), {})
-Required = type("Required", (RequirementLevel,), {})
-Recommended = type("Recommended", (RequirementLevel,), {})
-Optional = type("Optional", (RequirementLevel,), {})
-Deprecated = type("Deprecated", (RequirementLevel,), {})
-NotRecommended = type("NotRecommended", (RequirementLevel,), {})
-Proscribed = type("Proscribed", (RequirementLevel,), {})
-
-RequiredIf = GenericAlias(
-    type("RequiredIf", (RequirementLevel,), {}),
-    (TypeVar("Cond"), )
-)
-RecommendedIf = GenericAlias(
-    type("RecommendedIf", (RequirementLevel,), {}),
-    (TypeVar("Cond"), )
-)
-ProscribedIf = GenericAlias(
-    type("ProscribedIf", (RequirementLevel,), {}),
-    (TypeVar("Cond"), )
-)
-NotRecommendedIf = GenericAlias(
-    type("NotRecommendedIf", (RequirementLevel,), {}),
-    (TypeVar("Cond"), )
-)
 
 
 # ----------------------------------------------------------------------
@@ -781,40 +757,40 @@ class Schema(_dict, Validator):
 
     @classmethod
     def _requirement(cls, annotations: tuple, value: T) -> RequirementLevel:
-        requirement = Optional
+        requirement = optional
         for annot in annotations:
             # Required
-            if annot is Required:
-                return Required
+            if annot is required:
+                return required
             if get_origin(annot) is RequiredIf:
                 cond = ensure_validator(get_args(annot)[0])
                 with ValidationContext(value="ignore"):
                     if cond(value):
-                        return Required
+                        return required
             # Proscribed
-            if annot is Proscribed:
-                return Proscribed
+            if annot is proscribed:
+                return proscribed
             if get_origin(annot) is ProscribedIf:
                 cond = ensure_validator(get_args(annot)[0])
                 with ValidationContext(value="ignore"):
                     if cond(value):
-                        return Proscribed
+                        return proscribed
             # Recommended
-            if annot is Recommended:
-                requirement = Recommended
+            if annot is recommended:
+                requirement = recommended
             if get_origin(annot) is RecommendedIf:
                 cond = ensure_validator(get_args(annot)[0])
                 with ValidationContext(value="ignore"):
                     if cond(value):
-                        requirement = Recommended
+                        requirement = recommended
             # NotRecommended
-            if annot is NotRecommended:
-                requirement = NotRecommended
+            if annot is not_recommended:
+                requirement = not_recommended
             if get_origin(annot) is NotRecommendedIf:
                 cond = ensure_validator(get_args(annot)[0])
                 with ValidationContext(value="ignore"):
                     if cond(value):
-                        requirement = NotRecommended
+                        requirement = not_recommended
         return requirement
 
 
@@ -848,7 +824,7 @@ class JSONSchema(Schema):
 
             annotations = get_args(schema_hint)[1:]
             requirement = self._requirement(annotations, obj)
-            if requirement is Optional:
+            if requirement is optional:
                 continue
 
             present = False
@@ -860,16 +836,16 @@ class JSONSchema(Schema):
                         break
 
             if present:
-                if requirement is NotRecommended:
+                if requirement is recommended:
                     result &= self._fail_recommended(
                         f"{prefix}Unrecommended item {key!r} is present."
                     )
-                elif requirement is Proscribed:
+                elif requirement is proscribed:
                     result &= self._fail_required(
                         f"{prefix}Proscribed item {key!r} is present."
                     )
             else:
-                if requirement is Recommended:
+                if requirement is recommended:
                     result &= self._fail_recommended(
                         f"{prefix}Recommended item {schema_key!r} is missing."
                     )
@@ -921,7 +897,7 @@ class DirectorySchema(Schema, DirectoryValidator):
 
             annotations = get_args(schema)[1:]
             requirement = self._requirement(annotations, value)
-            if requirement is Optional:
+            if requirement is optional:
                 continue
 
             present = False
@@ -933,20 +909,20 @@ class DirectorySchema(Schema, DirectoryValidator):
                         break
 
             if present:
-                if requirement is NotRecommended:
+                if requirement is recommended:
                     result &= self._fail_recommended(
                         f"{prefix_dir}Unrecommended file {key!r} is present."
                     )
-                elif requirement is Proscribed:
+                elif requirement is proscribed:
                     result &= self._fail_required(
                         f"{prefix_dir}Proscribed file {key!r} is present."
                     )
             else:
-                if requirement is Recommended:
+                if requirement is recommended:
                     result &= self._fail_recommended(
                         f"{prefix_dir}Recommended file {key!r} is missing."
                     )
-                elif requirement is Required:
+                elif requirement is required:
                     result &= self._fail_required(
                         f"{prefix_dir}Required file {key!r} is missing."
                     )

@@ -497,7 +497,7 @@ REGISTERED_PATH_TYPES.update({
         BidsParticipantsFile,
     "sessions.json":
         BidsSessionsSidecarFile,
-    "*essions.tsv":
+    "sessions.tsv":
         BidsSessionsFile,
     "*_sessions.tsv":
         BidsSessionsFile,

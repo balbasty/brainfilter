@@ -2,7 +2,7 @@
 from typing import T
 
 # internals
-from brainfilter.validation import Validator, WrappedValidator
+from brainfilter.validators import Validator, WrappedValidator
 
 # optional
 try:

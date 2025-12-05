@@ -4,7 +4,7 @@ from typing import Annotated
 
 # internals
 from brainfilter.re import bids_label
-from brainfilter.validation import DirectorySchema, Optional, Required
+from brainfilter.validators import DirectorySchema, optional, required
 from brainfilter.schemas.sessions import (
     SessionDir, SessionFile, SessionDirSchema
 )
@@ -14,11 +14,11 @@ from brainfilter.schemas.utils import Directory, TSVFile, JSONFile
 SubjectDirSchemaWithSessions = DirectorySchema({
     re.compile(f"ses-{bids_label}"): Annotated[
         SessionDir,
-        Required,
+        required,
     ],
     re.compile(f"sub-{bids_label}_sessions.tsv"): Annotated[
         SessionFile,
-        Optional,
+        optional,
     ],
 })
 SubjectDirSchema = SubjectDirSchemaWithSessions | SessionDirSchema

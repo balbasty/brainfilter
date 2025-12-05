@@ -8,13 +8,13 @@ system.
 Instead, a concrete `PathLike` implementation is wrapped inside this class.
 """
 import csv
-from io import TextIOWrapper
 import json
 import gzip
 import os
 import shutil
 import warnings
 from collections.abc import MutableMapping, Mapping
+from io import TextIOWrapper
 from os import PathLike, stat_result
 from typing import \
     Any, Callable, IO, Iterator, Literal, TYPE_CHECKING, overload
@@ -212,7 +212,7 @@ class FancyPath(SnifferMixin, PathLike):
     # Additional methods and properties
     # ------------------------------------------------------------------
 
-    # --- remove, whether file or dir ----------------------------------
+    # --- remove, whether file, link or dir ----------------------------
 
     def remove(
         self, missing_ok: bool = False, recursive: bool = True

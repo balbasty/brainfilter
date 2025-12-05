@@ -1,7 +1,7 @@
 # stdlib
 from numbers import Number as number
 from re import compile as _p    # -> re.Pattern
-from typing import Annotated, Literal, T
+from typing import Annotated, Literal
 
 # internals
 from brainfilter.re import (
@@ -9,16 +9,18 @@ from brainfilter.re import (
     ext_json, ext_nii, ext_tsv, ext_tsvgz, ext_bval, ext_bvec
 )
 from brainfilter.schemas.utils import (
-    URI, Positive, Directory, File,
+    Positive, Directory, File, URI,
     BvalFile, BvecFile, NiftiFile, JSONFile, TSVFile, TSVGZFile
 )
-from brainfilter.validation import (
-    DirectorySchema, JSONSchema, JSONFileValidator, Required, TSVFileValidator,
-    Recommended, Optional, Deprecated,
-    # RequiredIf, RecommendedIf
+from brainfilter.sdict import SDict
+from brainfilter.validators import (
+    DirectorySchema, JSONSchema, JSONFileValidator, TSVFileValidator,
+    required, recommended, optional, deprecated,
+    # RequiredIf, RecommendedIf,
 )
-from brainfilter.validator_zoo import Maximum, Minimum
 from brainfilter.versioning import VersionSpecifier
+from brainfilter.adaptors import ValueInRange
+
 
 # ======================================================================
 #                         J S O N   S C H E M A S
@@ -27,68 +29,68 @@ from brainfilter.versioning import VersionSpecifier
 ScannerHardwareSchema = JSONSchema({
     "Manufacturer": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "ManufacturersModelName": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "DeviceSerialNumber": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "StationName": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "SoftwareVersions": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "HardcopyDeviceSoftwareVersion": Annotated[
         str,
-        Deprecated,
+        deprecated,
     ],
     "MagneticFieldStrength": Annotated[
         number,
-        Recommended,
+        recommended,
         # RequiredIf["Is under perf/"],
     ],
     "ReceiveCoilName": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "ReceiveCoilActiveElements": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "NumberReceiveCoilActiveElements": Annotated[
         int,
-        Optional,
+        optional,
     ],
     "GradientSetType": Annotated[
         str,
-        Optional,
+        optional,
     ],
     "MRTransmitCoilSequence": Annotated[
         str,
-        Optional,
+        optional,
     ],
     "MatrixCoilMode": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "CoilCombinationMethod": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "NumberTransmitCoilActiveElements": Annotated[
         int,
-        Optional,
+        optional,
     ],
     "TablePosition": Annotated[
         tuple[number, number, number],
-        Optional,
+        optional,
         # RecommendedIf["has chunk-*"],
     ],
 })
@@ -96,70 +98,70 @@ ScannerHardwareSchema = JSONSchema({
 InstitutionInformationSchema = JSONSchema({
     "InstitutionName": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "InstitutionAddress": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "InstitutionalDepartmentName": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
 })
 
 SequenceSpecificsSchema = JSONSchema({
     "PulseSequenceType": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "ScanningSequence": Annotated[
         str | list[str],
-        Recommended,
+        recommended,
     ],
     "SequenceVariant": Annotated[
         str | list[str],
-        Recommended,
+        recommended,
     ],
     "ScanOptions": Annotated[
         str | list[str],
-        Optional,
+        optional,
     ],
     "SequenceName": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "PulseSequenceDetails": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "NonlinearGradientCorrection": Annotated[
         bool,
-        Optional,
+        optional,
         # RecommendedIf["has associated pet data"],
     ],
     "MRAcquisitionType": Annotated[
         str,
         Literal["1D, 2D, 3D"],
-        Recommended,
+        recommended,
         # RequiredIf["is under perf/"],
     ],
     "MTState": Annotated[
         bool,
-        Optional,
+        optional,
         # RequiredIf["has mt-*"],
     ],
     "MTOffsetFrequency": Annotated[
         number,
-        Optional,
+        optional,
     ],
     "MTPulseBandwidth": Annotated[
         number,
-        Optional,
+        optional,
     ],
     "MTNumberOfPulses": Annotated[
         int,
-        Optional,
+        optional,
     ],
     "MTPulseShape": Annotated[
         str,
@@ -172,99 +174,99 @@ SequenceSpecificsSchema = JSONSchema({
             "SINCGAUSS",
             "FERMI",
         ],
-        Optional,
+        optional,
     ],
     "MTPulseDuration": Annotated[
         number,
-        Optional,
+        optional,
     ],
     "NumberShots": Annotated[
         int | tuple[int, int],
-        Optional,
+        optional,
         # RequiredIf["is _MP2RAGE"],
     ],
     "SpoilingState": Annotated[
         bool,
-        Optional,
+        optional,
     ],
     "SpoilingType": Annotated[
         str,
         Literal["RF", "GRADIENT", "COMBINED"],
-        Optional,
+        optional,
     ],
     "SpoilingRFPhaseIncrement": Annotated[
         number,
-        Optional,
+        optional,
     ],
     "SpoilingGradientMoment": Annotated[
         number,
-        Optional,
+        optional,
     ],
     "SpoilingGradientDuration": Annotated[
         number,
-        Optional,
+        optional,
     ],
     "WaterSuppression": Annotated[
         bool,
-        Optional,
+        optional,
     ],
     "WaterSuppressionTechnique": Annotated[
         str,
-        Optional,
+        optional,
     ],
     "B0ShimmingTechnique": Annotated[
         str,
-        Optional,
+        optional,
     ],
     "B1ShimmingTechnique": Annotated[
         str,
-        Optional,
+        optional,
     ],
 })
 
 SpatialEncodingSchema = JSONSchema({
     "ParallelReductionFactorInPlane": Annotated[
         int | number,
-        Optional,
+        optional,
         # RecommendedIf["has ParallelAcquisitionTechnique"],
     ],
     "ParallelReductionFactorOutOfPlane": Annotated[
         int | number,
-        Optional,
+        optional,
         # RecommendedIf["has ParallelAcquisitionTechnique"],
     ],
     "ParallelAcquisitionTechnique": Annotated[
         str,
-        Optional,
+        optional,
     ],
     "PartialFourier": Annotated[
         number,
-        Optional,
+        optional,
     ],
     "PartialFourierDirection": Annotated[
         str,
-        Optional,
+        optional,
         # RecommendedIf["has PartialFourier"],
     ],
     "EffectiveEchoSpacing": Annotated[
         number,
-        Optional,
+        optional,
         # RecommendedIf["has associated fmap data"],
     ],
     "MixingTime": Annotated[
         number,
-        Optional,
+        optional,
         # RequiredIf["qMRI sequence needs this"],
     ],
     "PhaseEncodingDirection": Annotated[
         str,
         Literal["i", "i-", "j", "j-", "k", "k-"],
-        Recommended,
+        recommended,
         # RequiredIf["has associated fmap data"],
     ],
     "TotalReadoutTime": Annotated[
         number,
-        Recommended,
+        recommended,
         # RequiredIf["has blip-up/down fmap"],
     ],
 })
@@ -272,116 +274,120 @@ SpatialEncodingSchema = JSONSchema({
 TimingSchema = JSONSchema({
     "EchoTime": Annotated[
         number | list[number],
-        Recommended,
+        recommended,
         # RequiredIf["has associated fmap or is ME-ASL"],
     ],
     "InversionTime": Annotated[
         number,
-        Optional,
+        optional,
         # RequiredIf["has inv-*"],
     ],
     "DwellTime": Annotated[
         number,
-        Recommended,
+        recommended,
     ],
     "AcquisitionDuration": Annotated[
         Positive[number],
-        Optional,
+        optional,
     ],
     "SliceTiming": Annotated[
         list[number],
-        Recommended,
+        recommended,
         # RequiredIf["is ASL-2D + other"],
     ],
     "SliceEncodingDirection": Annotated[
         str,
         Literal["i", "i-", "j", "j-", "k", "k-"],
-        Optional,
+        optional,
     ],
 })
 
 ContrastSchema = JSONSchema({
     "FlipAngle": Annotated[
         number,
-        Recommended,
+        recommended,
         # RequiredIf["LookLocker is True"]
     ],
     "NegativeContrast": Annotated[
         bool,
-        Optional,
+        optional,
     ],
 })
 
 SliceAccelerationSchema = JSONSchema({
     "MultibandAccelerationFactor": Annotated[
         int,
-        Optional,
+        optional,
     ],
 })
 
 AnatomicalLandmarksSchema = JSONSchema({
     "AnatomicalLandmarkCoordinates": Annotated[
         dict[str, tuple[number, number, number]],
-        Recommended,
+        recommended,
     ],
 })
 
 B0Schema = JSONSchema({
     "B0FieldIdentifier": Annotated[
         str | list[str],
-        Recommended,
+        recommended,
     ],
     "B0FieldSource": Annotated[
         str | list[str],
-        Recommended,
+        recommended,
     ],
 })
 
 TissueSchema = JSONSchema({
     "BodyPart": Annotated[
         str,
-        Optional,
+        optional,
     ],
     "BodyPartDetails": Annotated[
         str,
-        Optional,
+        optional,
     ],
     "BodyPartDetailsOntology": Annotated[
         URI,
-        Optional,
+        optional,
     ],
 })
 
 DeidentificationMethodCodeSequenceSchema = JSONSchema({
     "CodeValue": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "CodeMeaning": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "CodingSchemeDesignator": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "CodingSchemeVersion": Annotated[
         str,
-        Recommended,
+        recommended,
     ]
 })
+
+
+class DeidentificationMethodCodeSequence(
+    SDict, schema=DeidentificationMethodCodeSequenceSchema
+):
+    ...
+
 
 DeidentificationSchema = JSONSchema({
     "DeidentificationMethod": Annotated[
         list[str],
-        Optional,
+        optional,
     ],
     "DeidentificationMethodCodeSequence": Annotated[
-        list[Annotated[
-            dict[str, T],
-            DeidentificationMethodCodeSequenceSchema
-        ]],
-        Optional,
+        list[DeidentificationMethodCodeSequence],
+        optional,
     ],
 })
 
@@ -406,17 +412,17 @@ MRISchema = JSONSchema({
 TaskAnatSchema = JSONSchema({
     "TaskName": Annotated[
         str,
-        Optional,
+        optional,
         # RecommendedIf["task- in filename"],
     ],
     "TaskDescription": Annotated[
         str,
-        Optional,
+        optional,
         # RecommendedIf["task- in filename"],
     ],
     "Instructions": Annotated[
         str,
-        Optional,
+        optional,
         # RecommendedIf["task- in filename"],
     ],
 })
@@ -424,15 +430,15 @@ TaskAnatSchema = JSONSchema({
 ExtraAnatSchema = JSONSchema({
     "ContrastBolusAgent": Annotated[
         str,
-        Optional,
+        optional,
     ],
-    "RepetitionTimeExitation": Annotated[
+    "RepetitionTimeExcitation": Annotated[
         Positive[number],
-        Optional,
+        optional,
     ],
     "RepetitionTimePreparation": Annotated[
         Positive[number] | list[Positive[number]],
-        Optional,
+        optional,
     ],
 })
 
@@ -449,64 +455,64 @@ AnatSchema = JSONSchema({
 RequiredFuncSchema = JSONSchema({
     "RepetitionTime": Annotated[
         Positive[number],
-        Required,
+        required,
         # MutuallyExclusive["VolumeTiming"],
     ],
     "VolumeTiming": Annotated[
         list[Positive[number]],
-        Required,
+        required,
         # MutuallyExclusive["RepetitionTime"],
     ],
     "TaskName": Annotated[
         str,
-        Required,
+        required,
     ],
 })
 
 RecommendedFuncSchema = JSONSchema({
     "NumberOfVolumesDiscardedByScanner": Annotated[
         Positive[int],
-        Recommended,
+        recommended,
     ],
     "NumberOfVolumesDiscardedByUser": Annotated[
         Positive[int],
-        Recommended,
+        recommended,
     ],
     "DelayTime": Annotated[
         Positive[number],
-        Optional,
+        optional,
     ],
     "FrameAcquisitionDuration": Annotated[
         Positive[number],
-        Optional,
+        optional,
         # RequiredIf["VolumeTiming but not SliceTiming"]
     ],
     "DelayAfterTrigger": Annotated[
         Positive[number],
-        Optional,
+        optional,
     ],
     "AcquisitionDuration": Annotated[
         Positive[number],
-        Deprecated,
+        deprecated,
     ],
 })
 
 TaskFuncSchema = JSONSchema({
     "Instructions": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "TaskDescription": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "CogAtlasID": Annotated[
         URI,
-        Recommended,
+        recommended,
     ],
     "CogPOID": Annotated[
         URI,
-        Recommended,
+        recommended,
     ],
 })
 
@@ -524,7 +530,7 @@ FuncSchema = JSONSchema({
 MultipartDWISchema = JSONSchema({
     "MultipartID": Annotated[
         str,
-        Optional,
+        optional,
     ],
 })
 
@@ -541,73 +547,72 @@ CommonASLSchema = JSONSchema({
     "ArterialSpinLabelingType": Annotated[
         str,
         Literal["CASL", "PCASL", "PASL"],
-        Required,
+        required,
     ],
     "PostLabelingDelay": Annotated[
         Positive[number],
-        Required,
+        required,
     ],
     "BackgroundSuppression": Annotated[
         bool,
-        Required,
+        required,
     ],
     "M0Type": Annotated[
         str,
         Literal["Separate", "Included", "Estimate", "Absent"],
-        Required,
+        required,
     ],
     "TotalAcquiredPairs": Annotated[
         Positive[int],
-        Recommended,
+        recommended,
     ],
     "VascularCrushing": Annotated[
         bool,
-        Recommended,
+        recommended,
     ],
     "AcquisitionVoxelSize": Annotated[
         tuple[Positive[number], Positive[number], Positive[number]],
-        Recommended,
+        recommended,
     ],
     "LabelingOrientation": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "LabelingDistance": Annotated[
         number,
-        Recommended,
+        recommended,
     ],
     "LabelingLocationDescription": Annotated[
         str,
-        Recommended,
+        recommended,
     ],
     "LookLocker": Annotated[
         bool,
-        Optional,
+        optional,
     ],
     "LabelingEfficiency": Annotated[
         number,
-        Minimum(0),
-        Maximum(1),
-        Optional,
+        ValueInRange(0, 1),
+        optional,
     ],
     "M0Estimate": Annotated[
         Positive[number],
-        Optional,
+        optional,
         # RequiredIf["M0Type is 'Estimate'"],
     ],
     "BackgroundSuppressionNumberPulses": Annotated[
         Positive[int],
-        Optional,
+        optional,
         # RecommendedIf["BackgroundSuppression is True"],
     ],
     "BackgroundSuppressionPulseTimes": Annotated[
         list[Positive[number]],
-        Optional,
+        optional,
         # RecommendedIf["BackgroundSuppression is True"],
     ],
     "VascularCrushingVENC": Annotated[
         Positive[number] | list[Positive[number]],
-        Optional,
+        optional,
         # RecommendedIf["VascularCrushing is True"],
     ],
 })
@@ -616,68 +621,68 @@ ExtraPCASLSchema = JSONSchema({
     "PCASLType": Annotated[
         str,
         Literal["balanced", "unbalanced"],
-        Optional,
+        optional,
         # RecommendedIf["ArterialSpinLabelingType is 'PCASL'"],
     ],
     "CASLType": Annotated[
         str,
         Literal["single-coil", "double-coil"],
-        Optional,
+        optional,
         # RecommendedIf["ArterialSpinLabelingType is 'CASL'"],
     ],
     "LabelingDuration": Annotated[
         Positive[number],
-        Required,
+        required,
     ],
     "LabelingPulseAverageGradient": Annotated[
         Positive[number],
-        Recommended,
+        recommended,
     ],
     "LabelingPulseMaximumGradient": Annotated[
         Positive[number],
-        Recommended,
+        recommended,
     ],
     "LabelingPulseAverageB1": Annotated[
         Positive[number],
-        Recommended,
+        recommended,
     ],
     "LabelingPulseDuration": Annotated[
         Positive[number],
-        Recommended,
+        recommended,
     ],
     "LabelingPulseFlipAngle": Annotated[
         Positive[number],
-        Maximum(360),
-        Recommended,
+        ValueInRange(0, 360),
+        recommended,
     ],
     "LabelingPulseInterval": Annotated[
         Positive[number],
-        Recommended,
+        recommended,
     ],
 })
 
 ExtraPASLSchema = JSONSchema({
     "BolusCutOffFlag": Annotated[
         bool,
-        Required,
+        required,
     ],
     "PASLType": Annotated[
         str,
         Literal["FAIR", "EPISTAR", "PICORE"],
-        Recommended,
+        recommended,
     ],
     "LabelingSlabThickness": Annotated[
         Positive[number],
-        Recommended,
+        recommended,
     ],
     "BolusCutOffDelayTime": Annotated[
         Positive[number],
-        Optional,
+        optional,
         # RequiredIf["BolusCutOffFlag is True"],
     ],
     "BolusCutOffTechnique": Annotated[
         str,
-        Optional,
+        optional,
         # RequiredIf["BolusCutOffFlag is True"],
     ],
 })
@@ -685,11 +690,11 @@ ExtraPASLSchema = JSONSchema({
 ExtraM0ASLSchema = JSONSchema({
     "IntendedFor": Annotated[
         str | list[str],
-        Required,
+        required,
     ],
     "AcquisitionVoxelSize": Annotated[
         tuple[Positive[number], Positive[number], Positive[number]],
-        Recommended,
+        recommended,
     ],
 })
 
@@ -703,7 +708,7 @@ B0fmapSchema = JSONSchema({
     **MRISchema,
     "IntendedFor": Annotated[
         str | list[str],
-        Optional,
+        optional,
     ],
 })
 
@@ -711,25 +716,25 @@ PhaseDiffB0fmapSchema = JSONSchema({
     **B0fmapSchema,
     "EchoTime1": Annotated[
         Positive[number],
-        Required,
+        required,
     ],
     "EchoTime2": Annotated[
         Positive[number],
-        Required,
+        required,
     ],
 })
 
 TwoPhaseB0fmapSchema = B0fmapSchema.copy()
 TwoPhaseB0fmapSchema["EchoTime"] = Annotated[
     TwoPhaseB0fmapSchema["EchoTime"],
-    Required
+    required
 ]
 
 DirectB0fmapSchema = JSONSchema({
     **B0fmapSchema,
     "Units": Annotated[
         str,                # TODO: CMIXF validator
-        Required,
+        required,
     ],
 })
 
@@ -737,16 +742,16 @@ DirectB0fmapSchema = JSONSchema({
 PepolarB0fmapSchema = B0fmapSchema.copy()
 PepolarB0fmapSchema["PhaseEncodingDirection"] = Annotated[
     PepolarB0fmapSchema["PhaseEncodingDirection"],
-    Required
+    required
 ]
 PepolarB0fmapSchema["TotalReadoutTime"] = Annotated[
     PepolarB0fmapSchema["TotalReadoutTime"],
-    Optional,
+    optional,
     # RequiredIf["other methods for calculating readout time are not present"]
 ]
 PepolarB0fmapSchema["EffectiveEchoSpacing"] = Annotated[
     PepolarB0fmapSchema["EffectiveEchoSpacing"],
-    Optional,
+    optional,
     # RequiredIf["other methods for calculating readout time are not present"]
 ]
 
@@ -755,58 +760,58 @@ PepolarB0fmapSchema["EffectiveEchoSpacing"] = Annotated[
 #                             B1 Field maps
 # ======================================================================
 
-TB1TFLSchema = TB1RFMSchema = TB1Schema = MRISchema
+TB1TFLSchema = TB1RFMSchema = TB1Schema = AnatSchema
 
 TB1DAMSchema = TB1Schema.copy()
 TB1DAMSchema["FlipAngle"] = Annotated[
     TB1DAMSchema["FlipAngle"],
-    Required
+    required
 ]
 
 TB1EPISchema = TB1Schema.copy()
 TB1EPISchema["EchoTime"] = Annotated[
     TB1EPISchema["EchoTime"],
-    Required
+    required
 ]
 TB1EPISchema["FlipAngle"] = Annotated[
     TB1EPISchema["FlipAngle"],
-    Required
+    required
 ]
 TB1EPISchema["TotalReadoutTime"] = Annotated[
     TB1EPISchema["TotalReadoutTime"],
-    Required
+    required
 ]
 TB1EPISchema["MixingTime"] = Annotated[
     TB1EPISchema["MixingTime"],
-    Required
+    required
 ]
 
 TB1AFISchema = TB1Schema.copy()
 TB1AFISchema["RepetitionTimeExcitation"] = Annotated[
     TB1AFISchema["RepetitionTimeExcitation"],
-    Required
+    required
 ]
 
 TB1SRGESchema = TB1Schema.copy()
 TB1SRGESchema["FlipAngle"] = Annotated[
     TB1SRGESchema["FlipAngle"],
-    Required
+    required
 ]
 TB1SRGESchema["InversionTime"] = Annotated[
     TB1SRGESchema["InversionTime"],
-    Required
+    required
 ]
 TB1SRGESchema["RepetitionTimeExcitation"] = Annotated[
     TB1SRGESchema["RepetitionTimeExcitation"],
-    Required
+    required
 ]
 TB1SRGESchema["RepetitionTimePreperation"] = Annotated[
-    TB1SRGESchema["RepetitionTimePreperation"],
-    Required
+    Positive[number],
+    required
 ]
 TB1SRGESchema["NumberShots"] = Annotated[
     TB1SRGESchema["NumberShots"],
-    Required
+    required
 ]
 
 
@@ -828,12 +833,12 @@ def make_schema(
     for pattern in patterns:
         schema_dict[_p(pattern + ext_nii)] = Annotated[
             NiftiFile,
-            Optional,
+            optional,
         ]
         schema_dict[_p(pattern + ext_json)] = Annotated[
             JSONFile,
             JSONFileValidator(schema),
-            Optional,
+            optional,
         ]
     return DirectorySchema(schema_dict)
 
@@ -973,13 +978,13 @@ deprecated_anat_file_pattern = (
 DeprecatedAnatDirectorySchema = DirectorySchema({
     _p(deprecated_anat_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
         VersionSpecifier["<1.5.0"]
     ],
     _p(deprecated_anat_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(AnatSchema),
-        Optional,
+        optional,
         VersionSpecifier["<1.5.0"]
     ],
 })
@@ -1052,46 +1057,46 @@ physio_func_file_pattern = func_prefix_pattern + (
 FuncDirectorySchema = DirectorySchema({
     _p(func_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(func_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(FuncSchema),
-        Optional,
+        optional,
     ],
     _p(norf_func_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(norf_func_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(FuncSchema),
-        Optional,
+        optional,
     ],
     _p(phase_func_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(phase_func_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(FuncSchema),
-        Optional,
+        optional,
     ],
     _p(events_func_file_pattern + ext_tsv): Annotated[
         TSVFile,
-        Optional,
+        optional,
     ],
     _p(events_func_file_pattern + ext_json): Annotated[
         JSONFile,
-        Optional,
+        optional,
     ],
     _p(physio_func_file_pattern + ext_tsvgz): Annotated[
         TSVGZFile,
-        Optional,
+        optional,
     ],
     _p(physio_func_file_pattern + ext_json): Annotated[
         JSONFile,
-        Optional,
+        optional,
     ],
 })
 FuncDirectory = Annotated[Directory, FuncDirectorySchema]
@@ -1150,46 +1155,46 @@ dwi_physio_file_pattern = dwi_prefix_pattern + (
 DwiDirectorySchema = DirectorySchema({
     _p(dwi_file_pattern + ext_bval): Annotated[
         BvalFile,
-        Optional,
+        optional,
     ],
     _p(dwi_file_pattern + ext_bvec): Annotated[
         BvecFile,
-        Optional,
+        optional,
     ],
     _p(dwi_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(dwi_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(DWISchema),
-        Optional,
+        optional,
     ],
     _p(dwi_sbref_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(dwi_sbref_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(DWISchema),
-        Optional,
+        optional,
     ],
     _p(dwi_scanner_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(dwi_scanner_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(DWISchema),
-        Optional,
+        optional,
     ],
     _p(dwi_physio_file_pattern + ext_tsvgz): Annotated[
         TSVGZFile,
-        Optional,
+        optional,
     ],
     _p(dwi_physio_file_pattern + ext_json): Annotated[
         JSONFile,
-        Optional,
+        optional,
     ],
 })
 DwiDirectory = Annotated[Directory, DwiDirectorySchema]
@@ -1263,45 +1268,45 @@ AslContextSchema = JSONSchema({
             "noRF",
             "n/a",
         ],
-        Optional,
+        optional,
     ],
 })
 
 PerfDirectorySchema = DirectorySchema({
     _p(asl_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(asl_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(CommonASLSchema),
-        Optional,
+        optional,
     ],
     _p(asl_context_pattern): Annotated[
         TSVFile,
         TSVFileValidator(AslContextSchema),
-        Optional,
+        optional,
     ],
     _p(asl_labeling_pattern): Annotated[
         File,
-        Optional,
+        optional,
     ],
     _p(asl_norf_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(asl_norf_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(CommonASLSchema),
-        Optional,
+        optional,
     ],
     _p(asl_physio_pattern + ext_tsvgz): Annotated[
         TSVGZFile,
-        Optional,
+        optional,
     ],
     _p(asl_physio_pattern + ext_json): Annotated[
         JSONFile,
-        Optional,
+        optional,
     ],
 })
 PerfDirectory = Annotated[Directory, PerfDirectorySchema]
@@ -1339,60 +1344,60 @@ B0DirectorySchema = DirectorySchema({
     # Magnitude image(s)
     _p(b0_prefix_pattern + "_magnitude(1|2)?" + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(b0_prefix_pattern + "_magnitude(1|2)?" + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(B0fmapSchema),
-        Optional,
+        optional,
     ],
     # Phase difference image
     _p(b0_prefix_pattern + "_phasediff" + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(b0_prefix_pattern + "_phasediff" + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(PhaseDiffB0fmapSchema),
-        Optional,
+        optional,
     ],
     # Two phase images
     _p(b0_prefix_pattern + "_phase(1|2)" + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(b0_prefix_pattern + "_phase(1|2)" + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(TwoPhaseB0fmapSchema),
-        Optional,
+        optional,
     ],
     # Direct field map
     _p(b0_prefix_pattern + "_fieldmap" + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(b0_prefix_pattern + "_fieldmap" + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(DirectB0fmapSchema),
-        Optional,
+        optional,
     ],
     # PEPOLAR
     _p(b0_pepolar_prefix_pattern + ext_bval): Annotated[
         BvalFile,
-        Optional,
+        optional,
     ],
     _p(b0_pepolar_prefix_pattern + ext_bvec): Annotated[
         BvecFile,
-        Optional,
+        optional,
     ],
     _p(b0_pepolar_prefix_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(b0_pepolar_prefix_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(PepolarB0fmapSchema),
-        Optional,
+        optional,
     ],
 })
 
@@ -1451,66 +1456,66 @@ tb1_other_prefix_pattern = tb1_prefix_pattern + (
 TB1DirectorySchema = DirectorySchema({
     _p(tb1_dam_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(tb1_dam_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(TB1DAMSchema),
-        Optional,
+        optional,
     ],
     _p(tb1_epi_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(tb1_epi_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(TB1EPISchema),
-        Optional,
+        optional,
     ],
     _p(tb1_srgm_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(tb1_srgm_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(TB1SRGESchema),
-        Optional,
+        optional,
     ],
     _p(tb1_other_prefix_pattern + "_TB1AFI" + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(tb1_other_prefix_pattern + "_TB1AFI" + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(TB1AFISchema),
-        Optional,
+        optional,
     ],
     _p(tb1_other_prefix_pattern + "_TB1TFL" + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(tb1_other_prefix_pattern + "_TB1TFL" + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(TB1TFLSchema),
-        Optional,
+        optional,
     ],
     _p(tb1_other_prefix_pattern + "_TB1RFM" + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(tb1_other_prefix_pattern + "_TB1RFM" + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(TB1RFMSchema),
-        Optional,
+        optional,
     ],
     _p(tb1_other_prefix_pattern + "_TB1map" + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(tb1_other_prefix_pattern + "_TB1map" + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(TB1Schema),
-        Optional,
+        optional,
     ],
 })
 
@@ -1546,21 +1551,21 @@ rb1_map_file_pattern = rb1_prefix_pattern + (
 RB1DirectorySchema = DirectorySchema({
     _p(rb1_cor_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(rb1_cor_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(RB1CORSchema),
-        Optional,
+        optional,
     ],
     _p(rb1_map_file_pattern + ext_nii): Annotated[
         NiftiFile,
-        Optional,
+        optional,
     ],
     _p(rb1_map_file_pattern + ext_json): Annotated[
         JSONFile,
         JSONFileValidator(RB1Schema),
-        Optional,
+        optional,
     ],
 })
 

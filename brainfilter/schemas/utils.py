@@ -3,10 +3,10 @@ from os import PathLike
 from typing import Annotated, T
 
 # internal
-from brainfilter.validation import (
-    FileValidator, DirectoryValidator, JSONFileValidator, TSVFileValidator
+from brainfilter.validators import (
+    FileValidator, DirectoryValidator, JSONFileValidator, TSVFileValidator,
 )
-from brainfilter.validator_zoo import URIValidator, Minimum, Maximum
+from brainfilter.adaptors import Minimum, Maximum
 
 # optionals
 try:
@@ -14,11 +14,48 @@ try:
 except ImportError:
     UPath = None
 
+# optional
+try:
+    import uritools
+except ImportError:
+    uritools = None
+
+
+# ----------------------------------------------------------------------
+# URI types
+# ----------------------------------------------------------------------
+
+
+class URI(str):
+
+    def __new__(cls, value: str) -> "URI":
+        value = value0 = str(value)
+        if uritools:
+            if not uritools.isuri(value):
+                value = uritools.urijoin("file:///", value)
+            if not uritools.isuri(value):
+                raise TypeError(f"Not a valid URI: {value0!r}")
+        return str.__new__(cls, value)
+
+
+class DOI(URI):
+
+    def __new__(cls, value: str) -> "DOI":
+        value = value0 = str(value)
+        if uritools:
+            if not uritools.isuri(value):
+                value = uritools.urijoin("https://doi.org/", value)
+            if not uritools.isuri(value):
+                raise TypeError(f"Not a valid DOI: {value0!r}")
+            if uritools.urisplit(value).scheme == "doi":
+                value = uritools.urijoin(
+                    "https://doi.org/",
+                    uritools.urisplit(value).path
+                )
+        return URI.__new__(cls, value)
+
 
 PathType = UPath | PathLike if UPath else PathLike
-
-
-URI = Annotated[str, URIValidator]
 File = Annotated[PathType, FileValidator()]
 Directory = Annotated[PathType, DirectoryValidator()]
 JSONFile = Annotated[PathType, JSONFileValidator()]

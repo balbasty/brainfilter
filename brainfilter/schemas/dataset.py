@@ -4,9 +4,9 @@ from typing import Annotated
 
 # internals
 from brainfilter.re import bids_label
-from brainfilter.validation import (
+from brainfilter.validators import (
     DirectorySchema, JSONFileValidator, TSVFileValidator,
-    Required, Recommended, Optional,
+    required, recommended, optional,
 )
 from brainfilter.schemas.utils import File, Directory
 from brainfilter.versioning import VersionSpecifier, VersionSwitch
@@ -21,7 +21,7 @@ from brainfilter.schemas.sessions import SessionsJSONFile
 BIDSDatasetSchema = DirectorySchema({
     "dataset_description.json": Annotated[
         DatasetDescriptionFile,
-        Required,
+        required,
     ],
     VersionSwitch[
         VersionSpecifier[">=1.9.0"],
@@ -31,60 +31,60 @@ BIDSDatasetSchema = DirectorySchema({
         File,
         VersionSwitch[
             VersionSpecifier[">=1.8.0"],
-            Required,
-            Recommended,
+            required,
+            recommended,
         ],
     ],
     "CITATION.cff": Annotated[
         CitationFile,
-        Optional,
+        optional,
         VersionSpecifier[">=1.9.0"]
     ],
     "CHANGES": Annotated[
         ChangeFile,
-        Optional,
+        optional,
     ],
     "LICENSE": Annotated[
         File,
-        Optional,
+        optional,
         VersionSpecifier[">=1.4.0"]
     ],
     "sourcedata": Annotated[
         Directory,
-        Optional,
+        optional,
     ],
     "code": Annotated[
         Directory,
-        Optional,
+        optional,
     ],
     "phenotype": Annotated[
         Directory,
-        Optional,
+        optional,
         VersionSpecifier[">=1.0.1"]
     ],
     "participants.tsv": Annotated[
         ParticipantsFile,
-        Recommended,
+        recommended,
     ],
     "participants.json": Annotated[
         ParticipantsJSONFile,
-        Recommended,
+        recommended,
     ],
     "sessions.json": Annotated[
         SessionsJSONFile,
-        Optional,
+        optional,
     ],
     "samples.tsv": Annotated[
         TSVFileValidator,
-        Optional,
+        optional,
     ],
     "samples.json": Annotated[
         JSONFileValidator,
-        Optional,
+        optional,
     ],
     re.compile(f"sub-{bids_label}"): Annotated[
         SubjectDir,
-        Optional,
+        optional,
     ],
 })
 

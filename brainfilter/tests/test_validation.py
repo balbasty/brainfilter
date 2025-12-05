@@ -1,14 +1,14 @@
 from typing import Annotated
 
-from brainfilter import validation as V
+from brainfilter import validators as V
 from brainfilter import validator_zoo as Z
 from brainfilter import schemas as S
 
 
 def test_json_schema_validator():
     schema = V.JSONSchema({
-        "name": Annotated[str, V.Required],
-        "age": Annotated[int, Z.Minimum(0), V.Required],
+        "name": Annotated[str, V.required],
+        "age": Annotated[int, Z.Minimum(0), V.required],
     })
 
     # Valid data
@@ -43,41 +43,41 @@ def test_directory_validator(tmp_path):
     schema = V.DirectorySchema({
         "dataset_description.json": Annotated[
             S.dataset_description.DatasetDescriptionFile,
-            V.Required,
+            V.required,
         ],
         re.compile(r"sub-\d+"): Annotated[
             S.utils.Directory,
-            V.Required,
+            V.required,
             V.DirectorySchema({
                 "anat": Annotated[
                     S.utils.Directory,
-                    V.Optional,
+                    V.optional,
                     V.DirectorySchema({
                         re.compile(r"sub-\d+_T1w\.nii\.gz"):
                         Annotated[
                             S.utils.File,
-                            V.Required,
+                            V.required,
                         ],
                         re.compile(r"sub-\d+_T1w\.json"):
                         Annotated[
                             S.utils.File,
-                            V.Optional,
+                            V.optional,
                         ],
                     }),
                 ],
                 "func": Annotated[
                     S.utils.Directory,
-                    V.Optional,
+                    V.optional,
                     V.DirectorySchema({
                         re.compile(r"sub-\d+_task-\w+_bold\.nii\.gz"):
                         Annotated[
                             S.utils.File,
-                            V.Required,
+                            V.required,
                         ],
                         re.compile(r"sub-\d+_task-\w+_bold\.json"):
                         Annotated[
                             S.utils.File,
-                            V.Optional,
+                            V.optional,
                         ],
                     }),
                 ]
