@@ -4,7 +4,15 @@ from pathlib import Path
 import pytest
 
 from brainfilter.conditions import (
-    And, AndGlob, Glob, Globish, NotACondition, Or, OrGlob, Regex, Regexish,
+    And,
+    AndGlob,
+    Glob,
+    Globish,
+    NotACondition,
+    Or,
+    OrGlob,
+    Regex,
+    Regexish,
 )
 
 
