@@ -315,3 +315,66 @@ def test_applies_to_companions_flag():
     data = "sub-01/func/sub-01_task-rest_bold.nii.gz"
     assert applies_to(meta, data)
     assert not applies_to(meta, data, companions=False)
+
+
+# -- child names -------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [".", "..", "", "a/b"])
+def test_dot_and_dot_dot_are_not_children(ds, name):
+    with pytest.raises(KeyError):
+        ds[name]
+    assert name not in ds and ds.get(name) is None
+    with ds.transaction() as tx:
+        with pytest.raises(KeyError):
+            ds[name]
+        with pytest.raises(KeyError):
+            ds[name] = {}
+        assert name not in ds
+    assert tx.written == []
+
+
+def test_dot_dot_cannot_write_outside_the_transaction(tmp_path):
+    ds = _populate(BidsPath(str(tmp_path / "ds")))
+    with ds.transaction() as tx:
+        with pytest.raises(KeyError):
+            ds[".."]["outside.json"] = {"Out": 1}
+        with pytest.raises(TypeError, match="read-only"):
+            (ds / "..")["outside.json"] = {"Out": 1}
+        with pytest.raises(TypeError, match="read-only"):
+            (ds / "sub-01" / ".." / ".." / "outside.json").write({"Out": 1})
+    assert tx.written == []
+    assert not (tmp_path / "outside.json").exists()
+
+
+# -- sidecar read errors -----------------------------------------------------------
+
+def test_metadata_raises_the_nearest_unreadable_sidecar(ds):
+    near = ds / "sub-01/ses-1/anat/sub-01_ses-1_acq-mp_T1w.json"
+    near.write_text("{near")
+    (ds / "T1w.json").write_text("{far")
+    with pytest.raises(json.JSONDecodeError) as info:
+        (ds / T1W).metadata
+    assert info.value.doc == "{near"
+
+
+# -- typed reads and root= ---------------------------------------------------------
+
+def _loose_table(top):
+    (top / "events.json").write_text(json.dumps({"code": {"Format": "string"}}))
+    (top / "loose").mkdir(parents=True, exist_ok=True)
+    table = top / "loose" / "sub-01_events.tsv"
+    table.write_text("code\n1\n2\n")
+    return table
+
+
+def test_typed_read_takes_root(tmp_path):
+    top = BidsPath(str(tmp_path))
+    table = _loose_table(top)
+    assert table.read() == [{"code": 1}, {"code": 2}]      # inferred
+    assert table.read(root=top) == [{"code": "1"}, {"code": "2"}]
+    assert table.read(root=str(top))[0]["code"] == "1"
+    with top.transaction():
+        assert table.read(root=top)[0]["code"] == "1"
+    pytest.importorskip("pandas")
+    assert table.read_dataframe()["code"].tolist() == [1, 2]
+    assert table.read_dataframe(root=top)["code"].tolist() == ["1", "2"]

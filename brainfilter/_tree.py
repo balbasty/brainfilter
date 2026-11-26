@@ -68,6 +68,9 @@ __all__ = ["DATASET_DESCRIPTION", "AsyncJSONContentMixin",
 
 DATASET_DESCRIPTION = "dataset_description.json"
 
+# Files are read as UTF-8, skipping a byte-order mark; written without one.
+_ENCODING = "utf-8-sig"
+
 # A path of either family (sync or async).
 _P = TypeVar("_P")
 
@@ -97,8 +100,55 @@ def _not_content(name: str) -> TypeError:
 # -- shared, I/O-free logic ------------------------------------------------------
 
 def _is_child_name(name: object) -> bool:
-    """Whether `name` can name one child (one level, non-empty)."""
-    return isinstance(name, str) and bool(name) and "/" not in name
+    """Whether `name` can name one child (one level down, not `.` or `..`)."""
+    return (
+        isinstance(name, str) and name not in ("", ".", "..")
+        and "/" not in name
+    )
+
+
+def _no_sidecar_error(path: Any) -> TypeError:  # noqa: ANN401
+    if path.suffix is None:
+        why = "it has no BIDS suffix, so no sidecar can apply to it"
+        how = "give it a BIDS name (with a suffix) first"
+    else:
+        name = path.with_extension(".json").name
+        if name == path.name:
+            name = f"{path.suffix}.json"
+        why = "no JSON sidecar applies to it"
+        how = (
+            f"create one inside a transaction first, e.g. "
+            f"`(path.parent / {name!r}).write({{...}})`"
+        )
+    return TypeError(
+        f"cannot write the metadata of {str(path)!r}: {why}, so there is no "
+        f"file to write it to; {how}"
+    )
+
+
+class _NoSidecar(dict):
+    """The metadata of a file that no sidecar applies to: empty, read-only.
+
+    It is the only map of the file's `ChainMap`, so a write to the
+    `ChainMap` raises rather than being lost.
+    """
+
+    __slots__ = ("_path",)
+
+    def __init__(self, path: object = None) -> None:
+        super().__init__()
+        self._path = path
+
+    def _refuse(self, *args: object, **kwargs: object) -> NoReturn:
+        raise _no_sidecar_error(self._path)
+
+    __setitem__ = __delitem__ = _refuse
+    setdefault = update = pop = popitem = clear = __ior__ = _refuse
+
+
+def _metadata(path: object, contents: list) -> ChainMap:
+    """Return the `ChainMap` of a file's sidecar contents, nearest first."""
+    return ChainMap(*contents) if contents else ChainMap(_NoSidecar(path))
 
 
 def _by_name(children: Iterable[Any]) -> list[Any]:
@@ -240,7 +290,10 @@ class TreeMixin:
 
     # -- mapping of children -------------------------------------------------
     def __getitem__(self, name: str) -> Self:
-        """Return the child called `name`; `KeyError` if there is none."""
+        """Return the child called `name`; `KeyError` if there is none.
+
+        A child is one level down: `.`, `..` and a name with `/` are not.
+        """
         if not _is_child_name(name):
             raise KeyError(name)
         child = self / name
@@ -335,9 +388,13 @@ class TreeMixin:
         key is looked up in the nearest sidecar that has it. The maps are
         read when this is called; they are not kept in sync with the files.
         Inside a transaction they are the transaction's own copies, so a
-        write to the `ChainMap` edits the nearest sidecar.
+        write to the `ChainMap` edits the nearest sidecar. With no sidecar,
+        the `ChainMap` is empty and a write to it raises `TypeError`: there
+        is no file to write it to.
         """
-        return ChainMap(*(sidecar.read() for sidecar in self.sidecars(root)))
+        return _metadata(
+            self, [sidecar.read() for sidecar in self.sidecars(root)]
+        )
 
     @staticmethod
     def _list_names(directory: TreeMixin) -> set[str]:
@@ -358,42 +415,50 @@ class _ContentMixin:
     if TYPE_CHECKING:
         def read_text(self, encoding: str | None = None) -> str: ...  # noqa: D102
 
-    def _descriptions(self) -> Mapping | None:
+    def _descriptions(self, root: object = None) -> Mapping | None:
         """Return what types the content when parsed (a table's columns)."""
         return None
 
-    def _tx_entry(self, create: bool) -> _Entry | None:
+    def _tx_entry(
+        self, create: bool, root: object = None, tx: Any = None  # noqa: ANN401
+    ) -> _Entry | None:
         """Return the transaction's entry for this file (`None` outside one).
 
         The file is read into the transaction the first time it is used
-        there; a file that does not exist is created empty if `create`.
+        there; a file that does not exist is held empty if `create`, and is
+        created only if its content is then set.
         """
-        tx = active_for(self)
+        tx = tx or active_for(self)
         if tx is None:
             return None
         entry = tx._buffer.get(self)
         if entry is None:
+            # Read through the name the file is written with (no `..`).
+            source = tx._buffer.source(self)
             try:
-                text = self.read_text(encoding="utf-8")
+                text = source.read_text(encoding=_ENCODING)
             except FileNotFoundError:
                 if not create:
                     raise
                 text = None
-            descriptions = None if text is None else self._descriptions()
-            entry = tx._buffer.load(self, self._kind, text, descriptions)
+            descriptions = source._descriptions(root)
+            entry = tx._buffer.load(source, self._kind, text, descriptions)
+        if not create and entry.absent():
+            raise FileNotFoundError(2, "No such file or directory", str(self))
         return entry
 
-    def _read_content(self) -> object:
-        entry = self._tx_entry(create=False)
+    def _read_content(self, root: object = None) -> object:
+        entry = self._tx_entry(create=False, root=root)
         if entry is not None:
             return entry.content
-        text = self.read_text(encoding="utf-8")
-        return _content.parse(self._kind, text, self._descriptions())
+        text = self.read_text(encoding=_ENCODING)
+        return _content.parse(self._kind, text, self._descriptions(root))
 
     def _tx_writable(self) -> object:
-        if active_for(self) is None:
+        tx = active_for(self, write=True)
+        if tx is None:
             raise _read_only(self)
-        return self._tx_entry(create=True).content
+        return self._tx_entry(create=True, tx=tx).content
 
     def _tx_replace(
         self,
@@ -401,7 +466,7 @@ class _ContentMixin:
         columns: object = None,
         delimiters: dict[str, str] | None = None,
     ) -> None:
-        tx = active_for(self)
+        tx = active_for(self, write=True)
         if tx is None:
             raise _read_only(self)
         held = tx._buffer.get(self)
@@ -505,7 +570,7 @@ class TSVContentMixin(_ContentMixin):
     __slots__ = ()
     _kind = _content.TSV
 
-    def read(self, raw: bool = False) -> Table:
+    def read(self, raw: bool = False, root: object = None) -> Table:
         """Read the table as a `Table`: a list of rows, `column -> value`.
 
         Values are typed, one type per column, and the BIDS missing value
@@ -542,21 +607,25 @@ class TSVContentMixin(_ContentMixin):
             reading any sidecar. Inside a transaction this is a copy of
             the transaction's table, as it would be written: changing it
             does not edit the file.
+        root
+            The dataset root up to which sidecars describe the columns, as
+            in `read_metadata`. Inside a transaction, a table is typed when
+            it is first used there.
         """
         if raw:
             return self._read_raw()
-        return self._read_content()
+        return self._read_content(root)
 
-    def _descriptions(self) -> Mapping | None:
-        return self.read_metadata()
+    def _descriptions(self, root: object = None) -> Mapping | None:
+        return self.read_metadata(root)
 
     def _read_raw(self) -> Table:
         tx = active_for(self)
         entry = None if tx is None else tx._buffer.get(self)
-        if entry is not None:
+        if entry is not None and not entry.absent():
             text = _content.dump_tsv(entry.content)
         else:
-            text = self.read_text(encoding="utf-8")
+            text = self.read_text(encoding=_ENCODING)
         return _content.parse_tsv(text, raw=True)
 
     def write(
@@ -573,15 +642,17 @@ class TSVContentMixin(_ContentMixin):
         is joined with its column's `Delimiter`, from the table's JSON
         sidecar.
         """
-        if active_for(self) is None:
+        tx = active_for(self, write=True)
+        if tx is None:
             raise _read_only(self)
         rows = rows if isinstance(rows, Table) else list(rows)
         delimiters = None
-        if _content.has_lists(rows):
+        if _content.has_lists(rows) or tx._buffer.get(self) is None:
+            # Rows appended later may hold lists too.
             delimiters = _content.delimiters(self._descriptions())
         self._tx_replace(rows, columns, delimiters)
 
-    def read_dataframe(self, **kwargs: object) -> DataFrame:
+    def read_dataframe(self, root: object = None, **kwargs: object) -> DataFrame:
         """Read the table as a `pandas.DataFrame` (needs pandas).
 
         `n/a` reads as a missing value, and the columns have the types
@@ -590,15 +661,16 @@ class TSVContentMixin(_ContentMixin):
         `datetime` column with one time zone, and `object` for the rest
         (text, dates, times and the lists of a `Delimiter`). Keywords go to
         `pandas.read_csv`; with `dtype=` or `converters=`, pandas types the
-        columns as asked instead. Inside a transaction, the frame is a copy
-        of the buffered table.
+        columns as asked instead. `root` is the dataset root, as in
+        `read()`. Inside a transaction, the frame is a copy of the buffered
+        table.
         """
-        entry = self._tx_entry(create=False)
+        entry = self._tx_entry(create=False, root=root)
         if entry is not None:
             text = _content.dump_tsv(entry.content)
         else:
-            text = self.read_text(encoding="utf-8")
-        return _content.tsv_dataframe(text, kwargs, self._descriptions())
+            text = self.read_text(encoding=_ENCODING)
+        return _content.tsv_dataframe(text, kwargs, self._descriptions(root))
 
     def __getitem__(self, key: object) -> NoReturn:
         raise TypeError(
@@ -664,7 +736,10 @@ class AsyncTreeMixin:
 
     # -- mapping of children -------------------------------------------------
     async def child(self, name: str) -> Self:
-        """Return the child called `name`; `KeyError` if there is none."""
+        """Return the child called `name`; `KeyError` if there is none.
+
+        A child is one level down: `.`, `..` and a name with `/` are not.
+        """
         if not _is_child_name(name):
             raise KeyError(name)
         child = self / name
@@ -742,10 +817,18 @@ class AsyncTreeMixin:
 
         Its maps are the contents of `await sidecars(root)`, nearest first;
         the sidecars are read concurrently. Inside a transaction they are
-        the transaction's own copies, as in `BidsPath.read_metadata`.
+        the transaction's own copies, as in `BidsPath.read_metadata`. If
+        several sidecars cannot be read, the error of the nearest is
+        raised, as in `BidsPath.read_metadata`.
         """
         sidecars = await self.sidecars(root)
-        return ChainMap(*await asyncio.gather(*(s.read() for s in sidecars)))
+        contents = await asyncio.gather(
+            *(s.read() for s in sidecars), return_exceptions=True
+        )
+        for content in contents:
+            if isinstance(content, BaseException):
+                raise content
+        return _metadata(self, contents)
 
     @staticmethod
     async def _list_names(directory: AsyncTreeMixin) -> set[str]:
@@ -766,38 +849,44 @@ class _AsyncContentMixin:
     if TYPE_CHECKING:
         async def read_text(self, encoding: str | None = None) -> str: ...  # noqa: D102
 
-    async def _descriptions(self) -> Mapping | None:
+    async def _descriptions(self, root: object = None) -> Mapping | None:
         return None
 
-    async def _tx_entry(self, create: bool) -> _Entry | None:
-        tx = active_for(self)
+    async def _tx_entry(
+        self, create: bool, root: object = None, tx: Any = None  # noqa: ANN401
+    ) -> _Entry | None:
+        tx = tx or active_for(self)
         if tx is None:
             return None
         entry = tx._buffer.get(self)
         if entry is None:
+            source = tx._buffer.source(self)
             try:
-                text = await self.read_text(encoding="utf-8")
+                text = await source.read_text(encoding=_ENCODING)
             except FileNotFoundError:
                 if not create:
                     raise
                 text = None
-            descriptions = None if text is None else await self._descriptions()
+            descriptions = await source._descriptions(root)
             # Another task may have read it meanwhile: `load` keeps the
             # first entry, edits included.
-            entry = tx._buffer.load(self, self._kind, text, descriptions)
+            entry = tx._buffer.load(source, self._kind, text, descriptions)
+        if not create and entry.absent():
+            raise FileNotFoundError(2, "No such file or directory", str(self))
         return entry
 
-    async def _read_content(self) -> object:
-        entry = await self._tx_entry(create=False)
+    async def _read_content(self, root: object = None) -> object:
+        entry = await self._tx_entry(create=False, root=root)
         if entry is not None:
             return entry.content
-        text = await self.read_text(encoding="utf-8")
-        return _content.parse(self._kind, text, await self._descriptions())
+        text = await self.read_text(encoding=_ENCODING)
+        return _content.parse(self._kind, text, await self._descriptions(root))
 
     async def _tx_writable(self) -> object:
-        if active_for(self) is None:
+        tx = active_for(self, write=True)
+        if tx is None:
             raise _read_only(self, "async ")
-        return (await self._tx_entry(create=True)).content
+        return (await self._tx_entry(create=True, tx=tx)).content
 
     def _tx_replace(
         self,
@@ -805,7 +894,7 @@ class _AsyncContentMixin:
         columns: object = None,
         delimiters: dict[str, str] | None = None,
     ) -> None:
-        tx = active_for(self)
+        tx = active_for(self, write=True)
         if tx is None:
             raise _read_only(self, "async ")
         held = tx._buffer.get(self)
@@ -914,27 +1003,28 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
     __slots__ = ()
     _kind = _content.TSV
 
-    async def read(self, raw: bool = False) -> Table:
+    async def read(self, raw: bool = False, root: object = None) -> Table:
         """Read the table as a `Table`: a list of rows, `column -> value`.
 
         The coroutine counterpart of `BidsPath.read`: values are typed the
-        same way, and `raw=True` returns their exact text. Inside a
+        same way, `raw=True` returns their exact text, and `root` is the
+        dataset root up to which sidecars describe the columns. Inside a
         transaction this is the transaction's copy.
         """
         if raw:
             return await self._read_raw()
-        return await self._read_content()
+        return await self._read_content(root)
 
-    async def _descriptions(self) -> Mapping | None:
-        return await self.read_metadata()
+    async def _descriptions(self, root: object = None) -> Mapping | None:
+        return await self.read_metadata(root)
 
     async def _read_raw(self) -> Table:
         tx = active_for(self)
         entry = None if tx is None else tx._buffer.get(self)
-        if entry is not None:
+        if entry is not None and not entry.absent():
             text = _content.dump_tsv(entry.content)
         else:
-            text = await self.read_text(encoding="utf-8")
+            text = await self.read_text(encoding=_ENCODING)
         return _content.parse_tsv(text, raw=True)
 
     async def write(
@@ -943,27 +1033,30 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
         columns: Iterable[str] | None = None,
     ) -> None:
         """Replace the whole table, in a transaction (see `BidsPath.write`)."""
-        if active_for(self) is None:
+        tx = active_for(self, write=True)
+        if tx is None:
             raise _read_only(self, "async ")
         rows = rows if isinstance(rows, Table) else list(rows)
         delimiters = None
-        if _content.has_lists(rows):
+        if _content.has_lists(rows) or tx._buffer.get(self) is None:
             delimiters = _content.delimiters(await self._descriptions())
         self._tx_replace(rows, columns, delimiters)
 
-    async def read_dataframe(self, **kwargs: object) -> DataFrame:
+    async def read_dataframe(
+        self, root: object = None, **kwargs: object
+    ) -> DataFrame:
         """Read the table as a `pandas.DataFrame` (needs pandas).
 
         The coroutine counterpart of `BidsPath.read_dataframe`, with the
-        same column types.
+        same column types and `root`.
         """
-        entry = await self._tx_entry(create=False)
+        entry = await self._tx_entry(create=False, root=root)
         if entry is not None:
             text = _content.dump_tsv(entry.content)
         else:
-            text = await self.read_text(encoding="utf-8")
+            text = await self.read_text(encoding=_ENCODING)
         return _content.tsv_dataframe(
-            text, kwargs, await self._descriptions()
+            text, kwargs, await self._descriptions(root)
         )
 
     def __getitem__(self, key: object) -> NoReturn:

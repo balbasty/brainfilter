@@ -50,12 +50,21 @@ A column's type comes from the first of:
 A declared type is used only if every value parses as it. A column with
 `Levels` keeps its values as text (the keys of `Levels`); a column with a
 `Delimiter` reads as lists. `read_dataframe()` gives the same types as
-pandas dtypes.
+pandas dtypes. Both take `root=`, the dataset root up to which sidecars
+describe the columns, as `read_metadata()` does.
+
+A BIDS table has no quoting: a cell is the exact text between two tabs, so
+`"q"` reads as `"q"`, quotes included. A file may start with a UTF-8
+byte-order mark; it is skipped.
 
 When a table is written, an unchanged cell keeps its exact text (`1.50`
-stays `1.50`). A changed or new cell is written from its value: `None` as
-`n/a`, a `bool` as `true`/`false`, a `float` in its shortest form, a list
-joined with the column's `Delimiter`.
+stays `1.50`). A changed or new cell is written from its value: `None` (or
+a float NaN, as pandas holds a missing value) as `n/a`, a `bool` as
+`true`/`false`, a `float` in its shortest form, a list joined with the
+column's `Delimiter` (from the sidecar, for new columns and new tables
+too). A value holding a tab or a line break, and an infinite float, cannot
+be written: the commit raises `ValueError` before writing anything. Files
+are written without a byte-order mark.
 
 ### Sidecars
 
@@ -86,8 +95,21 @@ tx.written                                      # the files written, in order
 
 What a read returns inside the block is the transaction's own copy, so
 changing it in place is an edit. A file that was read but not changed is
-not written. Outside a block, assigning into the tree raises `TypeError`:
-nothing is ever written behind your back.
+not written, and a new file is created only once it is given content (a
+key, a row, or a whole `write()`). Outside a block, assigning into the tree
+raises `TypeError`: nothing is ever written behind your back.
+
+- A transaction holds while its block is open. A write from a task that
+  outlives the block (or runs during its commit) raises `RuntimeError`
+  instead of being lost: await such tasks inside the block.
+- A file is known by its location, so `ds["sub-01"] / ".." / "T1w.json"`
+  and `ds["T1w.json"]` (or, on a local disk, a symbolic link and its
+  target) are one file. A child name is one level down: `ds[".."]` is a
+  `KeyError`, and a path that leads out of the transaction's root is not
+  covered by it.
+- Transactions on the same files cannot be nested, sync and async alike.
+- A file that no sidecar applies to has an empty `metadata` that cannot be
+  written to (`TypeError`): create its sidecar first.
 
 One file can be edited on its own:
 
@@ -95,6 +117,10 @@ One file can be edited on its own:
 with ds["participants.json"].edit() as content:   # {} for a new file
     content["age"] = {"Units": "year"}
 ```
+
+Inside a transaction, an `edit()` joins it; if the `edit()` block raises,
+the file is put back as it was when the block began, and the rest of the
+transaction carries on.
 
 ### When a write fails
 
@@ -120,6 +146,10 @@ except TransactionError as error:
 
 A single-file `edit()` raises its write's error directly. An `edit()` inside
 a transaction that covers the file joins it.
+
+If the commit is interrupted instead (`KeyboardInterrupt`, or the async task
+is cancelled), that exception propagates as itself, with a note listing the
+files written and those not written (`error.__notes__`).
 
 ## Async
 

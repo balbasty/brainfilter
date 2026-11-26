@@ -223,7 +223,7 @@ def test_raw_read(ds):
     assert dump_tsv(table) == TEXT
 
 
-# -- writing back -------------------------------------------------------------------
+# -- writing back ------------------------------------------------------------------
 
 def test_unchanged_table_is_not_written(ds):
     with ds.transaction() as tx:
@@ -360,7 +360,7 @@ def test_dataframe_datetime():
     assert df["day"][0] == date(2024, 1, 31)
 
 
-# -- async ----------------------------------------------------------------------------
+# -- async -------------------------------------------------------------------------
 
 @pytest.fixture
 def async_ds(local_ds):
@@ -402,3 +402,151 @@ async def test_async_dataframe_dtypes(async_ds):
     assert str(df["age"].dtype) == "Int64"
     assert str(df["weight"].dtype) == "float64"
     assert df["code"].tolist() == ["02", "10"]
+
+
+# -- no quoting --------------------------------------------------------------------
+
+QUOTED = 'id\tnote\tq\nsub-01\ta"b\t"q"\nsub-02\tsaid "hi"\t""\n'
+
+
+def test_quotes_are_text():
+    rows = parse_tsv(QUOTED)
+    assert [r["note"] for r in rows] == ['a"b', 'said "hi"']
+    assert [r["q"] for r in rows] == ['"q"', '""']
+    assert [r["q"] for r in parse_tsv(QUOTED, raw=True)] == ['"q"', '""']
+    assert dump_tsv(rows) == QUOTED
+    rows[0]["id"] = "sub-09"
+    assert dump_tsv(rows) == QUOTED.replace("sub-01", "sub-09")
+    rows.append({"id": "sub-03", "note": 'x "y"'})
+    assert dump_tsv(rows).splitlines()[-1] == 'sub-03\tx "y"\tn/a'
+
+
+def test_quoted_file_round_trips(ds):
+    table = ds / "quoted.tsv"
+    table.write_text(QUOTED)
+    with ds.transaction() as tx:
+        table.read()[1]["id"] = "sub-09"
+        assert table.read(raw=True)[0]["q"] == '"q"'
+    assert tx.written == [table]
+    assert table.read_text() == QUOTED.replace("sub-02", "sub-09")
+    pytest.importorskip("pandas")
+    assert table.read_dataframe()["q"].tolist() == ['"q"', '""']
+
+
+@pytest.mark.parametrize("value", ["a\tb", "a\nb", "a\rb"])
+def test_tab_or_line_break_is_refused(ds, value):
+    table = ds["participants.tsv"]
+    with pytest.raises(ValueError, match="tab or a line break"):
+        with ds.transaction():
+            table.read()[0]["notes"] = value
+    assert table.read_text() == TEXT   # nothing written
+    with pytest.raises(ValueError, match="column name"):
+        dump_tsv(Table([{value: 1}]))
+
+
+# -- NaN and infinity --------------------------------------------------------------
+
+def test_nan_is_written_as_na():
+    nan = float("nan")
+    table = Table([{"x": 1.5, "y": nan}, {"x": nan, "y": nan}])
+    text = dump_tsv(table)
+    assert text == "x\ty\n1.5\tn/a\nn/a\tn/a\n"
+    assert [r["x"] for r in parse_tsv(text)] == [1.5, None]
+    with pytest.raises(ValueError, match="'x' holds inf"):
+        dump_tsv(Table([{"x": float("inf")}]))
+    with pytest.raises(ValueError, match="-inf"):
+        dump_tsv(Table([{"x": float("-inf")}]))
+
+
+def test_nan_from_a_dataframe(ds):
+    pytest.importorskip("pandas")
+    table = ds["participants.tsv"]
+    frame = table.read_dataframe()
+    rows = frame[["participant_id", "weight"]].to_dict("records")
+    rows[1]["weight"] = float("nan")
+    with ds.transaction():
+        table.write(rows)
+    assert table.read_text() == "participant_id\tweight\nsub-01\t70.5\nsub-02\tn/a\n"
+    assert table.read()[1]["weight"] is None
+
+
+# -- the sidecar's Delimiters, for new columns and new tables ----------------------
+
+def _with_tags(ds):
+    ds["participants.json"].write_text(json.dumps(
+        {**DESCRIPTIONS, "tags": {"Delimiter": ","}}
+    ))
+    (ds / "sessions.json").write_text(json.dumps({"tags": {"Delimiter": "|"}}))
+
+
+def test_new_column_uses_the_sidecar_delimiter(ds):
+    _with_tags(ds)
+    table = ds["participants.tsv"]
+    with ds.transaction():
+        rows = table.read()
+        rows.add_column("tags", [["a", "b"], []])
+    assert [r["tags"] for r in table.read(raw=True)] == ["a,b", ""]
+
+
+def test_new_table_uses_the_sidecar_delimiter(ds):
+    _with_tags(ds)
+    new = ds / "sub-01" / "sub-01_sessions.tsv"
+    with new.edit() as rows:
+        rows.append({"session_id": "ses-1", "tags": ["a", "b"]})
+    assert new.read_text() == "session_id\ttags\nses-1\ta|b\n"
+    # a table written without lists, then given one
+    with ds.transaction():
+        new.write([{"session_id": "ses-2"}])
+        new.read()[0]["tags"] = ["c", "d"]
+    assert new.read_text() == "session_id\ttags\nses-2\tc|d\n"
+
+
+# -- a byte-order mark -------------------------------------------------------------
+
+def test_byte_order_mark_is_skipped(ds):
+    table, sidecar = ds / "bom.tsv", ds / "bom.json"
+    table.write_bytes(b"\xef\xbb\xbfparticipant_id\tage\nsub-01\t30\n")
+    sidecar.write_bytes(b'\xef\xbb\xbf{"Level": "bom"}')
+    assert table.read().columns == ["participant_id", "age"]
+    assert table.read() == [{"participant_id": "sub-01", "age": 30.0}]
+    assert table.read(raw=True).columns == ["participant_id", "age"]
+    assert sidecar["Level"] == "bom"
+    pytest.importorskip("pandas")
+    assert list(table.read_dataframe().columns) == ["participant_id", "age"]
+    with ds.transaction():
+        sidecar["Level"] = "edited"
+        table.read()[0]["participant_id"] = "sub-02"
+    assert not sidecar.read_bytes().startswith(b"\xef\xbb\xbf")
+    assert table.read_bytes() == b"participant_id\tage\nsub-02\t30\n"
+
+
+@pytest.mark.anyio
+async def test_async_byte_order_mark_is_skipped(async_ds):
+    table, sidecar = async_ds / "bom.tsv", async_ds / "bom.json"
+    await table.write_bytes(b"\xef\xbb\xbfparticipant_id\nsub-01\n")
+    await sidecar.write_bytes(b'\xef\xbb\xbf{"Level": "bom"}')
+    assert (await table.read()).columns == ["participant_id"]
+    assert await sidecar.get("Level") == "bom"
+    async with async_ds.transaction():
+        await sidecar.set("Level", "edited")
+    assert not (await sidecar.read_bytes()).startswith(b"\xef\xbb\xbf")
+
+
+@pytest.mark.anyio
+async def test_async_new_column_uses_the_sidecar_delimiter(async_ds, local_ds):
+    _with_tags(local_ds)
+    table = async_ds / "participants.tsv"
+    async with async_ds.transaction():
+        (await table.read()).add_column("tags", [["a", "b"], None])
+    assert [r["tags"] for r in await table.read(raw=True)] == ["a,b", "n/a"]
+    new = async_ds / "sub-01" / "sub-01_sessions.tsv"
+    async with new.edit() as rows:
+        rows.append({"session_id": "ses-1", "tags": ["a", "b"]})
+    assert await new.read_text() == "session_id\ttags\nses-1\ta|b\n"
+
+
+def test_empty_cell_of_a_one_column_table_is_refused():
+    with pytest.raises(ValueError, match="one column"):
+        dump_tsv(Table([{"x": "a"}, {"x": ""}]))
+    assert dump_tsv(Table([{"x": "a"}, {"x": None}])) == "x\na\nn/a\n"
+    assert dump_tsv(Table([{"x": "", "y": ""}])) == "x\ty\n\t\n"

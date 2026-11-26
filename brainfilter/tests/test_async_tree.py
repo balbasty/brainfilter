@@ -292,3 +292,61 @@ async def test_each_directory_listed_once(ds, monkeypatch):
     await (ds / T1W).sidecars()
     assert len(calls) == len(set(calls)) == 4   # anat, ses-1, sub-01, ds
 
+
+
+# -- child names -------------------------------------------------------------------
+
+@pytest.mark.parametrize("name", [".", "..", "", "a/b"])
+async def test_dot_and_dot_dot_are_not_children(ds, name):
+    with pytest.raises(KeyError):
+        await ds.child(name)
+    assert not await ds.has(name) and await ds.get(name) is None
+
+
+async def test_dot_dot_cannot_write_outside_the_transaction(tmp_path):
+    _populate(BidsPath(str(tmp_path / "ds")))
+    ds = AsyncBidsPath(str(tmp_path / "ds"))
+    async with ds.transaction() as tx:
+        with pytest.raises(TypeError, match="read-only"):
+            await (ds / ".." / "outside.json").write({"Out": 1})
+        with pytest.raises(TypeError, match="read-only"):
+            await (ds / "sub-01" / ".." / ".." / "outside.json").set("Out", 1)
+    assert tx.written == []
+    assert not (tmp_path / "outside.json").exists()
+
+
+# -- sidecar read errors -----------------------------------------------------------
+
+async def test_metadata_raises_the_nearest_unreadable_sidecar(ds, monkeypatch):
+    import asyncio
+
+    near = ds / "sub-01/ses-1/anat/sub-01_ses-1_acq-mp_T1w.json"
+    await near.write_text("{near")
+    await (ds / "T1w.json").write_text("{far")
+    real = type(near).read_text
+
+    async def read_text(self, *args, **kwargs):
+        if self.name == near.name:
+            await asyncio.sleep(0.05)      # the nearest fails last
+        return await real(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(near), "read_text", read_text)
+    with pytest.raises(json.JSONDecodeError) as info:
+        await (ds / T1W).read_metadata()
+    assert info.value.doc == "{near"
+
+
+# -- typed reads and root= ---------------------------------------------------------
+
+async def test_typed_read_takes_root(tmp_path):
+    from brainfilter.tests.test_tree import _loose_table
+
+    _loose_table(BidsPath(str(tmp_path)))
+    top = AsyncBidsPath(str(tmp_path))
+    table = top / "loose" / "sub-01_events.tsv"
+    assert await table.read() == [{"code": 1}, {"code": 2}]
+    assert await table.read(root=top) == [{"code": "1"}, {"code": "2"}]
+    async with top.transaction():
+        assert (await table.read(root=top))[0]["code"] == "1"
+    pytest.importorskip("pandas")
+    assert (await table.read_dataframe(root=top))["code"].tolist() == ["1", "2"]
