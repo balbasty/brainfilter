@@ -666,7 +666,11 @@ class BidsPathMixin:
             hk != tk or (tk != "datatype" and hv != tv)
             for (hk, hv), (tk, tv) in zip(have, target)
         ):
-            want = "/".join(v or "<datatype>" for _, v in target) or "the top"
+            known = SUFFIX_DATATYPES.get(suffix, ())
+            datatype = given or (next(iter(known)) if len(known) == 1 else None)
+            want = "/".join(
+                v or datatype or "<datatype>" for _, v in target
+            ) or "the top"
             raise BidsNameError(
                 f"cannot place {name!r} in {str(self)!r}: it belongs in "
                 f"{want} of the dataset; start from the dataset or a "
