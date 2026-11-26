@@ -41,7 +41,10 @@ from brainfilter._names import (
     check_entity,
     check_extension,
     check_suffix,
+    data_directory,
+    datatype_of,
     format_name,
+    is_metadata,
     parse_name,
     role_of,
     sort_entities,
@@ -175,21 +178,26 @@ class BidsEntities(dict):
         return self > other or self == other
 
 
-def _names(path: object) -> tuple[str, str] | None:
-    """Read the name of a path and of its parent lexically, or `None`.
+def _view(path: object) -> PurePath | None:
+    """Return a plain `PurePath` view of a path, or `None`.
 
-    A plain `PurePath` view is used so that no BIDS class (and so no
-    dispatch) is involved, and nothing is read from a filesystem. An async
-    driver has no such view, so its spelling is read instead.
+    A plain view is used so that no BIDS class (and so no dispatch) is
+    involved, and nothing is read from a filesystem. An async driver has no
+    such view, so its spelling is read instead.
     """
     try:
         try:
-            view = PurePath(path)
+            return PurePath(path)
         except TypeError:
-            view = PurePath(str(path))
-        return view.name, view.parent.name
+            return PurePath(str(path))
     except (TypeError, ValueError):
         return None
+
+
+def _names(path: object) -> tuple[str, str] | None:
+    """Read the name of a path and of its parent lexically, or `None`."""
+    view = _view(path)
+    return None if view is None else (view.name, view.parent.name)
 
 
 class BidsPathMixin:
@@ -283,15 +291,28 @@ class BidsPathMixin:
 
     @property
     def datatype(self) -> str | None:
-        """The datatype directory the path is in (`anat`, `func`), or `None`."""
-        parent = _names(self.wrapped)
-        name = parent[1] if parent is not None else ""
-        return name if name in DATATYPES else None
+        """The datatype directory the path is in (`anat`, `func`), or `None`.
+
+        A file inside a data file that is a directory (a CTF MEG
+        `sub-01_meg.ds/`, an OME-Zarr `sub-01_BF.ome.zarr/`) is in the
+        datatype directory of that data file.
+        """
+        view = _view(self.wrapped)
+        return None if view is None else datatype_of(view.parts)
 
     @property
     def is_metadata(self) -> bool:
-        """Whether the name is a metadata file (`.json`, `.tsv`, `.bval`, ...)."""
-        return self.extension in METADATA_EXTENSIONS
+        """Whether the name is a metadata file (`.json`, `.tsv`, `.bval`, ...).
+
+        A `.tsv` file whose BIDS suffix is a data suffix (`beh`, `motion`,
+        `blood`) holds data, not metadata, and so does every file inside a
+        data file that is a directory (`sub-01_meg.ds/`).
+        """
+        view = _view(self.wrapped)
+        if view is not None and data_directory(view.parts) is not None:
+            return False
+        parsed = parse_name(self.name)
+        return is_metadata(parsed.suffix, parsed.extension)
 
     @property
     def subject(self) -> str | None:
@@ -358,7 +379,11 @@ class BidsPathMixin:
         Raises
         ------
         BidsNameError
-            If the name is not a BIDS name.
+            If the name is not a BIDS name, or an entity it does not have is
+            added to a name that is not a BIDS file name: one with a suffix,
+            and entities or an extension (`sub-01_T1w.nii.gz`, `T1w.json`).
+            A directory (`anat`, `sub-01`) or a bare word (`README`) gets no
+            new entity.
         ValueError
             If an entity would not parse back, or the name would be empty.
         """
@@ -371,6 +396,13 @@ class BidsPathMixin:
                 new.pop(str(key), None)
                 continue
             key, label = check_entity(key, label)
+            if key not in parsed.entities and not parsed.is_file_name:
+                raise BidsNameError(
+                    f"cannot add the entity {key}-{label} to {self.name!r}: "
+                    "it is not a BIDS name of a file, which has a suffix and "
+                    "entities or an extension (<key>-<label>_..._<suffix>"
+                    "<extension>)"
+                )
             new[key] = label
         if sort:
             new = sort_entities(new)
@@ -392,7 +424,7 @@ class BidsPathMixin:
         ------
         BidsNameError
             If there is no subject to replace and the name is not a BIDS
-            name.
+            file name (a directory such as `anat`, or `README`).
         """
         return self._with_label("sub", subject)
 
@@ -407,7 +439,7 @@ class BidsPathMixin:
         ------
         BidsNameError
             If there is no session to replace and the name is not a BIDS
-            name.
+            file name (a directory such as `anat` or `sub-01`, or `README`).
         """
         return self._with_label("ses", session)
 

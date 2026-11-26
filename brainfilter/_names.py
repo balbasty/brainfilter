@@ -6,24 +6,54 @@ that do not exist yet.
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import PurePath, PurePosixPath
 from typing import NamedTuple
 
-# Datatype directories (`sub-<label>[/ses-<label>]/<datatype>/`).
+# Datatype directories (`sub-<label>[/ses-<label>]/<datatype>/`): the
+# `objects.datatypes` of the official BIDS 1.11.2 schema, but `phenotype`,
+# which is a dataset-level directory.
 DATATYPES = frozenset({
-    "anat", "func", "dwi", "fmap", "perf", "beh", "eeg", "meg", "ieeg",
-    "pet", "micr", "nirs", "motion", "mrs",
+    "anat", "func", "dwi", "fmap", "perf", "beh", "eeg", "emg", "meg",
+    "ieeg", "pet", "micr", "nirs", "motion", "mrs",
 })
 
 # Extensions of metadata files (sidecars, tables, gradient tables).
 METADATA_EXTENSIONS = frozenset({".json", ".tsv", ".bval", ".bvec"})
 
+# Suffixes of `.tsv` files that are data, not metadata: in `rules.files.raw`
+# of the official BIDS 1.11.2 schema, the tabular files that are a datatype's
+# recording (`beh.noncontinuous`, `motion.motion`, `pet.blood`). Every other
+# `.tsv` there (`channels`, `electrodes`, `optodes`, `events`, `aslcontext`,
+# `scans`, `sessions`) describes another file's recording. Continuous
+# recordings (`physio`, `stim`, ...) are `.tsv.gz`, which is not a metadata
+# extension, so they are data already.
+TABULAR_DATA_SUFFIXES = frozenset({"beh", "motion", "blood"})
+
 # Metadata suffixes that apply to data files with another suffix
-# (`sub-01_task-x_events.tsv` describes `sub-01_task-x_bold.nii.gz`).
+# (`sub-01_task-x_events.tsv` describes `sub-01_task-x_bold.nii.gz`): the
+# suffixes of the `channels`, `events` and `task` groups, `perf.aslcontext`,
+# `perf.asllabeling` and the `scans`/`sessions` tables, in `rules.files` of
+# the official BIDS 1.11.2 schema.
 COMPANION_SUFFIXES = frozenset({
-    "scans", "sessions", "events", "physio", "stim", "channels",
-    "electrodes", "coordsystem", "aslcontext", "asllabeling", "beh",
+    "scans", "sessions", "events", "physio", "physioevents", "stim",
+    "channels", "electrodes", "coordsystem", "optodes", "aslcontext",
+    "asllabeling",
 })
+
+# Entities a companion file may have that the data file it describes cannot:
+# in `rules.files.raw` of the official BIDS 1.11.2 schema, `space` on
+# `electrodes`/`coordsystem` (EEG, iEEG, EMG recordings have none) and
+# `recording` on `physio`/`physioevents`/`stim` (MRI, MEG, motion and PET
+# recordings have none). They name the companion's own coordinate space or
+# recording, so a data file that lacks one is still described by it.
+COMPANION_ONLY_ENTITIES = frozenset({"space", "recording"})
+
+# Extensions of data "files" that are directories (`sub-01_meg.ds/`): those
+# ending in `/` in `objects.extensions` of the official BIDS 1.11.2 schema.
+# The schema's bare `/` (a MEG directory without an extension) is recognised
+# by its place instead; see `data_directory`.
+DIRECTORY_EXTENSIONS = frozenset({".ds", ".mefd", ".ome.zarr"})
 
 # Top-level folders that are not part of the raw data.
 OPTIONAL_FOLDERS = ("derivatives", "sourcedata", "code", "stimuli")
@@ -106,6 +136,32 @@ class ParsedName(NamedTuple):
     def is_bids(self) -> bool:
         """Whether the name is shaped like a BIDS name."""
         return bool(self.entities) or self.suffix is not None
+
+    @property
+    def is_file_name(self) -> bool:
+        """Whether the name is shaped like the name of a BIDS file.
+
+        It has a suffix, and entities or an extension (`sub-01_T1w.nii.gz`,
+        `T1w.json`). A bare word (`anat`, `README`) and a name with entities
+        only (`sub-01`) are not: entities cannot be added to them.
+        """
+        return self.suffix is not None and bool(self.entities or self.extension)
+
+
+def index_value(label: str) -> int | str:
+    """Return the value of an index label (`"01"` is `1`); others as is."""
+    return int(label) if label.isascii() and label.isdigit() else label
+
+
+def same_label(key: str, a: str, b: str) -> bool:
+    """Whether two labels of entity `key` are the same.
+
+    Index entities (`run`, `echo`, ...; see `INDEX_ENTITIES`) compare by
+    number, so `run-1` and `run-01` are the same run; others as strings.
+    """
+    if key in INDEX_ENTITIES:
+        return index_value(a) == index_value(b)
+    return a == b
 
 
 def parse_name(name: str) -> ParsedName:
@@ -221,13 +277,51 @@ def role_of(name: str, parent_name: str) -> str | None:
     return None
 
 
+def data_directory(parts: Sequence[str]) -> int | None:
+    """Return the index of the part that is a directory-shaped data file.
+
+    Some BIDS data files are directories (a CTF MEG `sub-01_meg.ds/`, an
+    OME-Zarr `sub-01_BF.ome.zarr/`): every file inside belongs to that one
+    data file. It is the first part above the last whose name is a BIDS
+    file name with an extension in `DIRECTORY_EXTENSIONS`, or with no
+    extension at all directly in a datatype directory (a MEG directory such
+    as `sub-01_task-x_meg/`). `None` when no part is one.
+    """
+    for i, part in enumerate(parts[:-1]):
+        parsed = parse_name(part)
+        if not parsed.is_file_name:
+            continue
+        if parsed.extension in DIRECTORY_EXTENSIONS:
+            return i
+        if not parsed.extension and i and parts[i - 1] in DATATYPES:
+            return i
+    return None
+
+
+def datatype_of(parts: Sequence[str]) -> str | None:
+    """Return the datatype directory a path is in, from its parts, or `None`.
+
+    A file inside a directory-shaped data file (see `data_directory`) is in
+    the datatype directory of that data file.
+    """
+    i = data_directory(parts)
+    parent = (len(parts) if i is None else i + 1) - 2
+    if parent >= 0 and parts[parent] in DATATYPES:
+        return parts[parent]
+    return None
+
+
 class ParsedPath(NamedTuple):
-    """The BIDS components of a path, relative to its dataset root."""
+    """The BIDS components of a path, relative to its dataset root.
+
+    For a file inside a directory-shaped data file (`sub-01_meg.ds/x`, see
+    `data_directory`), every component but `path` is that data file's.
+    """
 
     path: str
     """The path, `/`-separated."""
     directory: PurePosixPath
-    """The directory the path is in (`.` at the dataset root)."""
+    """The directory the data item is in (`.` at the dataset root)."""
     entities: dict
     """The entities of the name; empty for a non-BIDS name."""
     suffix: str | None
@@ -236,11 +330,25 @@ class ParsedPath(NamedTuple):
     """Everything from the first dot of the name, or `""`."""
     datatype: str | None
     """The datatype directory the path is in (`anat`), or `None`."""
+    item: str
+    """The data item the path belongs to: `path`, or the data directory."""
 
     @property
     def is_metadata(self) -> bool:
-        """Whether the name is a metadata file (`.json`, `.tsv`, ...)."""
-        return self.extension in METADATA_EXTENSIONS
+        """Whether the name is a metadata file (`.json`, `.tsv`, ...).
+
+        A `.tsv` file whose suffix is a data suffix (`beh`, `motion`,
+        `blood`; see `TABULAR_DATA_SUFFIXES`) is data, not metadata, and so
+        is every file inside a directory-shaped data file.
+        """
+        return is_metadata(self.suffix, self.extension)
+
+
+def is_metadata(suffix: str | None, extension: str) -> bool:
+    """Whether a name with this suffix and extension is a metadata file."""
+    if extension == ".tsv" and suffix in TABULAR_DATA_SUFFIXES:
+        return False
+    return extension in METADATA_EXTENSIONS
 
 
 def parse_path(path: object) -> ParsedPath:
@@ -254,12 +362,13 @@ def parse_path(path: object) -> ParsedPath:
     if isinstance(path, PurePath):
         path = path.as_posix()
     p = PurePosixPath(str(path))
-    parsed = parse_name(p.name)
-    parent = p.parent.name
-    datatype = parent if parent in DATATYPES else None
+    parts = p.parts
+    i = data_directory(parts)
+    item = p if i is None else PurePosixPath(*parts[:i + 1])
+    parsed = parse_name(item.name)
     return ParsedPath(
-        p.as_posix(), p.parent, parsed.entities, parsed.suffix,
-        parsed.extension, datatype,
+        p.as_posix(), item.parent, parsed.entities, parsed.suffix,
+        parsed.extension, datatype_of(parts), item.as_posix(),
     )
 
 
@@ -270,12 +379,18 @@ def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
 
     - its directory is the data file's directory or one of its ancestors;
     - every entity of its name is in the data file's name, with the same
-      label;
+      label (index entities, such as `run`, compare by number: `run-1` is
+      `run-01`);
     - its suffix is the data file's suffix, or (when `companions` is true)
       a companion suffix (`events`, `scans`, `sessions`, `physio`, ...; see
       `COMPANION_SUFFIXES`);
     - if it is in a datatype directory, the data file is in one of the
       same datatype.
+
+    A companion may also have an entity that the data file lacks, when that
+    entity names the companion's own space or recording (`space`,
+    `recording`; see `COMPANION_ONLY_ENTITIES`): `sub-01_space-CapTrak_
+    electrodes.tsv` describes `sub-01_task-x_eeg.edf`.
 
     Pass `companions=False` for a JSON sidecar's metadata: a companion's
     sidecar (`events.json`) describes the companion file, not the data.
@@ -289,10 +404,16 @@ def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
         meta.directory not in data.directory.parents
     ):
         return False
-    if meta.suffix != data.suffix and (
-        not companions or meta.suffix not in COMPANION_SUFFIXES
-    ):
+    companion = meta.suffix != data.suffix
+    if companion and (not companions or meta.suffix not in COMPANION_SUFFIXES):
         return False
     if meta.datatype and meta.datatype != data.datatype:
         return False
-    return all(data.entities.get(k) == v for k, v in meta.entities.items())
+    for key, label in meta.entities.items():
+        other = data.entities.get(key)
+        if other is None:
+            if not (companion and key in COMPANION_ONLY_ENTITIES):
+                return False
+        elif not same_label(key, label, other):
+            return False
+    return True

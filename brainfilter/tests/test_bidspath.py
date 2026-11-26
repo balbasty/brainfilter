@@ -420,3 +420,43 @@ def test_user_subclass_keeps_type_and_state():
     q = p.parent / "sub-01" / "sub-01_T1w.json"
     assert type(q) is TaggedBidsPath
     assert q.tag == "t" and q.subject == "01"
+
+
+@pytest.mark.parametrize("path, edit", [
+    ("ds/sub-01/anat", lambda p: p.with_session("02")),
+    ("ds/sub-01", lambda p: p.with_session("02")),
+    ("ds/README", lambda p: p.with_subject("02")),
+    ("ds/README", lambda p: p.with_entities(sub="02")),
+    ("ds/sub-01/ses-1/anat", lambda p: p.with_entities(run=1)),
+    ("ds/sub-01", lambda p: p.with_entities(ses="1", keep_existing=True)),
+])
+def test_editors_add_no_entity_to_a_name_that_is_not_a_file(path, edit):
+    # `anat`, `README` and `sub-01` parse as BIDS names, but are not names
+    # of BIDS files: an entity added to one would corrupt the path
+    with pytest.raises(BidsNameError, match="not a BIDS name of a file"):
+        edit(PureBidsPath(path))
+
+
+def test_editors_still_rename_directories_and_files():
+    assert str(PureBidsPath("ds/sub-01/anat").with_subject("02")) == (
+        "ds/sub-02/anat"
+    )
+    assert str(PureBidsPath("ds/sub-01/ses-1").with_session("2")) == (
+        "ds/sub-01/ses-2"
+    )
+    assert str(PureBidsPath("ds/sub-01").with_entities(sub="02")) == "ds/sub-02"
+    assert str(PureBidsPath("ds/README").with_entities({})) == "ds/README"
+    assert str(PureBidsPath("ds/T1w.json").with_session("1")) == (
+        "ds/ses-1_T1w.json"
+    )
+    assert str(PureBidsPath("ds/sub-01_T1w").with_session("1")) == (
+        "ds/sub-01_ses-1_T1w"
+    )
+
+
+def test_is_file_name():
+    assert parse_name("sub-01_T1w.nii.gz").is_file_name
+    assert parse_name("T1w.json").is_file_name
+    assert parse_name("sub-01_task-x_meg").is_file_name
+    for name in ("anat", "README", "sub-01", "sub-01_ses-1", "a_b.txt"):
+        assert not parse_name(name).is_file_name

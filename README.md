@@ -64,6 +64,40 @@ Sidecars are inherited up to the dataset root: the nearest ancestor with a
 `read_metadata()`. A file with no dataset root above it (a loose file, a
 scratch directory) gets the sidecars in its own directory only.
 
+## Selecting files
+
+A `Filter` picks a subset of a dataset from its file listing, before
+anything is downloaded:
+
+```python
+from brainfilter.filter import Filter
+
+f = Filter(subjects="01", datatypes="anat", acq="mprage", run=[1, 2])
+f.select(listing)                      # relative path strings, or paths
+f.walk("s3://openneuro.org/ds000224")  # list the dataset, then select
+```
+
+Data files are kept when they pass every filter, and the metadata that
+applies to them (sidecars, `scans.tsv`, `events.tsv`, `channels.tsv`, ...)
+comes with them under the BIDS inheritance principle. A few rules follow
+BIDS rather than the file extension:
+
+- a table that is a recording (`*_beh.tsv`, `*_motion.tsv`, `*_blood.tsv`)
+  is data, and so is `*_physio.tsv.gz`, which also comes with the run it
+  describes;
+- a data file that is a directory (a CTF `*_meg.ds/`, an OME-Zarr
+  `*.ome.zarr/`) is kept or skipped whole, hidden files inside included;
+- a companion that names its own space or recording
+  (`sub-01_space-CapTrak_electrodes.tsv`) still applies to recordings
+  without one;
+- metadata that applies to no data file at all (an `events.tsv` alone) is
+  kept when the subject, session, datatype and entities it names pass.
+
+So `Filter().select(listing)` keeps every file but hidden ones and the
+optional folders (`derivatives/`, `sourcedata/`, ...; ask for them with
+`folders=`). `select` expects files: pass `walk()`'s output, or filter
+`rglob("*")` on `is_file()`.
+
 ## Writing
 
 The tree is read-only, except inside a transaction. Edits to JSON and TSV
