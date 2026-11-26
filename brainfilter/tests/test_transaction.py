@@ -442,3 +442,207 @@ def test_table():
     assert copy == table and copy.columns == table.columns
     assert copy[0] is not table[0]
     assert repr(Table([], ["x"])) == "Table([], columns=['x'])"
+
+
+# -- a transaction only while it is open -------------------------------------------
+
+def test_write_after_the_transaction_closed_raises(ds):
+    import contextvars
+
+    with ds.transaction():
+        # what a thread or a task started inside the block runs in
+        inside = contextvars.copy_context()
+    late = ds / "T1w.json"
+    with pytest.raises(RuntimeError, match="already closed.*would be lost"):
+        inside.run(late.__setitem__, "Late", 1)
+    with pytest.raises(RuntimeError, match="already closed"):
+        inside.run(late.write, {"Late": 1})
+    with pytest.raises(RuntimeError, match="already closed"):
+        inside.run(late.edit().__enter__)
+    # a read sees the files, and a new transaction can be opened there
+    assert inside.run(late.read) == FILES["T1w.json"]
+
+    def again():
+        with ds.transaction():
+            late["Again"] = 1
+
+    inside.run(again)
+    assert on_disk(late) == {**FILES["T1w.json"], "Again": 1}
+
+
+def test_write_during_the_commit_raises(ds, monkeypatch):
+    import contextvars
+
+    from brainfilter import transaction as T
+
+    real = T._write_file
+    seen = []
+
+    def write_file(path, data):
+        try:
+            inside.run(ds["dwi.json"].__setitem__, "Late", 1)
+        except RuntimeError as error:
+            seen.append(str(error))
+        real(path, data)
+
+    monkeypatch.setattr(T, "_write_file", write_file)
+    with ds.transaction():
+        ds["T1w.json"]["Edited"] = 1
+        inside = contextvars.copy_context()
+    assert len(seen) == 1 and "being committed" in seen[0]
+    assert on_disk(ds / "dwi.json") == FILES["dwi.json"]
+
+
+# -- one entry per file -----------------------------------------------------------
+
+def test_two_names_for_one_file_share_an_entry(ds):
+    other = ds / "sub-01" / ".." / "T1w.json"
+    with ds.transaction() as tx:
+        other["A"] = 1
+        ds["T1w.json"]["B"] = 2
+        assert ds["T1w.json"]["A"] == 1 and other["B"] == 2
+        assert ds["T1w.json"].read() is other.read()
+        assert tx.changed == [ds / "T1w.json"]
+    assert tx.written == [ds / "T1w.json"]
+    assert on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "A": 1, "B": 2}
+
+
+def test_dot_dot_new_file_is_listed_and_written_once(ds):
+    with ds.transaction() as tx:
+        (ds / "sub-01" / ".." / "new.json")["A"] = 1
+        assert "new.json" in ds and ds["new.json"]["A"] == 1
+    assert tx.written == [ds / "new.json"]
+    assert on_disk(ds / "new.json") == {"A": 1}
+    assert "new.json" in [p.name for p in ds.iterdir()]
+    assert "new.json" not in ds["sub-01"].keys()
+
+
+def test_a_symlink_and_its_target_share_an_entry(local_ds):
+    import os
+
+    link = local_ds / "link.json"
+    os.symlink(os.fspath(local_ds / "T1w.json"), os.fspath(link))
+    with local_ds.transaction() as tx:
+        link["A"] = 1
+        local_ds["T1w.json"]["B"] = 2
+    assert len(tx.written) == 1
+    assert on_disk(local_ds / "T1w.json") == {**FILES["T1w.json"], "A": 1, "B": 2}
+    assert on_disk(link) == on_disk(local_ds / "T1w.json")
+
+
+def test_dot_dot_out_of_the_root_is_not_covered(ds):
+    with ds["sub-01"].transaction():
+        with pytest.raises(TypeError, match="read-only"):
+            (ds / "sub-01" / ".." / "T1w.json")["Level"] = "x"
+    assert on_disk(ds / "T1w.json") == FILES["T1w.json"]
+
+
+# -- a joined edit that fails ------------------------------------------------------
+
+def test_failed_edit_in_a_transaction_is_undone(ds):
+    with ds.transaction() as tx:
+        ds["T1w.json"]["Before"] = 1
+        held = ds["T1w.json"].read()
+        try:
+            with ds["T1w.json"].edit() as content:
+                content["Partial"] = 1
+                del content["Level"]
+                raise ValueError
+        except ValueError:
+            pass
+        assert ds["T1w.json"].read() is held        # the same object, put back
+        assert "Partial" not in held and held["Level"] == "root"
+        rows = ds["participants.tsv"].read()
+        try:
+            with ds["participants.tsv"].edit() as table:
+                table[0]["sex"] = "M"
+                table.append({"participant_id": "sub-09"})
+                table.add_column("extra")
+                raise ValueError
+        except ValueError:
+            pass
+        assert ds["participants.tsv"].read() is rows
+        try:
+            with (ds / "new.json").edit() as content:
+                content["Partial"] = 1
+                raise ValueError
+        except ValueError:
+            pass
+        assert "new.json" not in ds
+    assert tx.written == [ds / "T1w.json"]
+    assert on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "Before": 1}
+    assert ds["participants.tsv"].read_text() == PARTICIPANTS
+    assert not (ds / "new.json").exists()
+
+
+# -- an interrupted commit ---------------------------------------------------------
+
+def test_interrupted_commit_reports_and_propagates(ds, monkeypatch):
+    from brainfilter import transaction as T
+
+    real = T._write_file
+    calls = []
+
+    def write_file(path, data):
+        calls.append(path)
+        if len(calls) == 2:
+            raise KeyboardInterrupt
+        real(path, data)
+
+    monkeypatch.setattr(T, "_write_file", write_file)
+    with pytest.raises(KeyboardInterrupt) as info:
+        with ds.transaction() as tx:
+            _edit_three(ds)
+    notes = getattr(info.value, "__notes__", [])
+    assert len(notes) == 1
+    assert "interrupted writing" in notes[0]
+    assert f"written: {str(ds / 'T1w.json')!r}" in notes[0]
+    assert f"not written: {str(ds / 'participants.tsv')!r}" in notes[0]
+    assert tx.written == [ds / "T1w.json"]
+    assert on_disk(ds / "T1w.json")["Edited"] == 1
+    assert on_disk(ds / "dwi.json") == FILES["dwi.json"]
+
+
+# -- a new file only when it is given content --------------------------------------
+
+def test_new_file_is_created_only_when_set(ds):
+    new = ds / "new.json"
+    with new.edit():
+        pass
+    assert not new.exists()
+    with ds.transaction() as tx:
+        with new.edit():
+            pass
+        with pytest.raises(KeyError):
+            del new["k"]
+        assert "new.json" not in ds and ds.get("new.json") is None
+        with pytest.raises(FileNotFoundError):
+            new.read()
+        new["k"] = 1
+        del new["k"]                 # set, then emptied: still nothing
+        assert tx.changed == []
+    assert tx.written == [] and not new.exists()
+    table = ds / "sub-01" / "sub-01_scans.tsv"
+    with table.edit():
+        pass
+    assert not table.exists()
+    with ds.transaction():
+        new.write({})                # replaced: written, even empty
+        table.write([])
+    assert on_disk(new) == {} and table.exists()
+
+
+# -- metadata with no sidecar ------------------------------------------------------
+
+def test_metadata_without_a_sidecar_refuses_writes(ds):
+    data = ds / "sub-02" / "anat" / "sub-02_T2w.nii.gz"
+    with ds.transaction() as tx:
+        meta = data.metadata
+        assert meta == ChainMap() and dict(meta) == {}
+        with pytest.raises(TypeError, match="no JSON sidecar.*sub-02_T2w.json"):
+            meta["EchoTime"] = 0.03
+        with pytest.raises(TypeError, match="no JSON sidecar"):
+            meta.update(EchoTime=0.03)
+        with pytest.raises(TypeError, match="no BIDS suffix"):
+            (ds / "sub-01_ses-1.nii").metadata["x"] = 1
+    assert tx.written == []

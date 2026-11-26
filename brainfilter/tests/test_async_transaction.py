@@ -262,3 +262,206 @@ async def test_edit_joins_a_transaction(ds):
             content["Level"] = "x"
         assert await on_disk(ds / "T1w.json") == FILES["T1w.json"]
     assert tx.written == [ds / "T1w.json"]
+
+
+# -- a transaction only while it is open -------------------------------------------
+
+async def test_task_outliving_the_transaction_raises(ds):
+    sidecar = ds / "T1w.json"
+    started, go = asyncio.Event(), asyncio.Event()
+
+    async def late():
+        started.set()
+        await go.wait()
+        await sidecar.set("Late", 1)
+
+    async with ds.transaction():
+        task = asyncio.create_task(late())
+        await started.wait()
+    go.set()
+    with pytest.raises(RuntimeError, match="already closed.*would be lost"):
+        await task
+    assert await on_disk(sidecar) == FILES["T1w.json"]
+
+
+async def test_late_task_can_read_and_open_its_own(ds):
+    sidecar = ds / "T1w.json"
+    go = asyncio.Event()
+
+    async def late():
+        await go.wait()
+        with pytest.raises(RuntimeError, match="already closed"):
+            async with sidecar.edit():
+                pass
+        assert (await sidecar.read())["Level"] == "root"
+        async with ds.transaction():
+            await sidecar.set("Again", 1)
+
+    async with ds.transaction():
+        task = asyncio.create_task(late())
+    go.set()
+    await task
+    assert (await on_disk(sidecar))["Again"] == 1
+
+
+async def test_write_during_the_commit_raises(ds, monkeypatch):
+    from brainfilter import transaction as T
+
+    real = T._awrite_file
+    committing, done = asyncio.Event(), asyncio.Event()
+
+    async def awrite(path, data):
+        committing.set()
+        await done.wait()
+        await real(path, data)
+
+    async def late():
+        await committing.wait()
+        try:
+            await (ds / "dwi.json").set("Late", 1)
+        finally:
+            done.set()
+
+    monkeypatch.setattr(T, "_awrite_file", awrite)
+    async with ds.transaction():
+        await (ds / "T1w.json").set("Edited", 1)
+        task = asyncio.create_task(late())
+    with pytest.raises(RuntimeError, match="being committed"):
+        await task
+    assert await on_disk(ds / "dwi.json") == FILES["dwi.json"]
+    assert (await on_disk(ds / "T1w.json"))["Edited"] == 1
+
+
+# -- one entry per file -----------------------------------------------------------
+
+async def test_two_names_for_one_file_share_an_entry(ds):
+    other = ds / "sub-01" / ".." / "T1w.json"
+    async with ds.transaction() as tx:
+        await other.set("A", 1)
+        await (ds / "T1w.json").set("B", 2)
+        assert await other.read() is await (ds / "T1w.json").read()
+    assert tx.written == [ds / "T1w.json"]
+    assert await on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "A": 1, "B": 2}
+
+
+# -- a joined edit that fails ------------------------------------------------------
+
+async def test_failed_edit_in_a_transaction_is_undone(ds):
+    async with ds.transaction() as tx:
+        await (ds / "T1w.json").set("Before", 1)
+        with pytest.raises(ValueError):
+            async with (ds / "T1w.json").edit() as content:
+                content["Partial"] = 1
+                raise ValueError
+        assert "Partial" not in await (ds / "T1w.json").read()
+        rows = await (ds / "participants.tsv").read()
+        with pytest.raises(ValueError):
+            async with (ds / "participants.tsv").edit() as table:
+                table[0]["sex"] = "M"
+                del table[1]
+                raise ValueError
+        assert await (ds / "participants.tsv").read() is rows
+    assert tx.written == [ds / "T1w.json"]
+    assert await on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "Before": 1}
+    assert await (ds / "participants.tsv").read_text() == PARTICIPANTS
+
+
+# -- sync and async transactions do not overlap ------------------------------------
+
+async def test_sync_and_async_transactions_do_not_overlap(local_ds):
+    sync = BidsPath(str(local_ds))
+    with sync.transaction():
+        with pytest.raises(RuntimeError, match="already open"):
+            async with local_ds.transaction():
+                pass
+        with pytest.raises(RuntimeError, match="already open"):
+            async with (local_ds / "T1w.json").edit():
+                pass
+    async with (local_ds / "sub-01").transaction():
+        with pytest.raises(RuntimeError, match="already open"):
+            with sync.transaction():
+                pass
+        with pytest.raises(RuntimeError, match="already open"):
+            with (sync / "sub-01" / "sub-01_T1w.json").edit():
+                pass
+        with (sync / "sub-02").transaction():        # disjoint: fine
+            sync["sub-02"]["sub-02_T1w.json"] = {"A": 1}
+    assert await on_disk(local_ds / "T1w.json") == FILES["T1w.json"]
+
+
+# -- an interrupted commit ---------------------------------------------------------
+
+async def test_cancelled_commit_reports_and_propagates(ds, monkeypatch):
+    from brainfilter import transaction as T
+
+    real = T._awrite_file
+    calls = []
+    blocked = asyncio.Event()
+
+    async def awrite(path, data):
+        calls.append(path)
+        if len(calls) == 2:
+            blocked.set()
+            await asyncio.Event().wait()        # until cancelled
+        await real(path, data)
+
+    monkeypatch.setattr(T, "_awrite_file", awrite)
+    holder, raised = [], []
+
+    async def run():
+        try:
+            async with ds.transaction() as tx:
+                holder.append(tx)
+                await (ds / "T1w.json").set("Edited", 1)
+                (await (ds / "participants.tsv").read()).append(
+                    {"participant_id": "sub-03"}
+                )
+                await (ds / "dwi.json").set("Edited", 1)
+        except BaseException as error:
+            raised.append(error)
+            raise
+
+    task = asyncio.create_task(run())
+    await blocked.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    # what left the transaction: the cancellation itself, with a note
+    assert type(raised[0]) is asyncio.CancelledError
+    notes = getattr(raised[0], "__notes__", [])
+    assert len(notes) == 1 and "interrupted writing" in notes[0]
+    assert f"written: {str(ds / 'T1w.json')!r}" in notes[0]
+    assert f"not written: {str(ds / 'participants.tsv')!r}" in notes[0]
+    assert holder[0].written == [ds / "T1w.json"]
+    assert await on_disk(ds / "dwi.json") == FILES["dwi.json"]
+
+
+# -- a new file only when it is given content --------------------------------------
+
+async def test_new_file_is_created_only_when_set(ds):
+    new = ds / "new.json"
+    async with new.edit():
+        pass
+    assert not await new.exists()
+    async with ds.transaction() as tx:
+        with pytest.raises(KeyError):
+            await new.delete("k")
+        assert not await ds.has("new.json")
+        with pytest.raises(FileNotFoundError):
+            await new.read()
+    assert tx.written == [] and not await new.exists()
+    async with ds.transaction():
+        await new.write({})
+    assert await on_disk(new) == {}
+
+
+# -- metadata with no sidecar ------------------------------------------------------
+
+async def test_metadata_without_a_sidecar_refuses_writes(ds):
+    data = ds / "sub-02" / "anat" / "sub-02_T2w.nii.gz"
+    async with ds.transaction() as tx:
+        meta = await data.read_metadata()
+        assert dict(meta) == {}
+        with pytest.raises(TypeError, match="no JSON sidecar.*sub-02_T2w.json"):
+            meta["EchoTime"] = 0.03
+    assert tx.written == []

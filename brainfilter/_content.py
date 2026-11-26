@@ -17,9 +17,14 @@ A declared type (1 or 2) is used only if every value of the column parses
 as it; otherwise the next one is tried. A column with `Levels` keeps its
 values as text, so they match the keys of `Levels`. A column with a
 `Delimiter` holds lists of values of its type. `n/a` is `None`.
+
+A BIDS TSV file has no quoting: a cell is the exact text between two tabs,
+quotes included, so a cell cannot hold a tab or a line break. Files are read
+as UTF-8, with or without a byte-order mark, and written without one.
 """
 from __future__ import annotations
 
+import copy
 import csv
 import io
 import json
@@ -36,6 +41,12 @@ __all__ = ["STANDARD_COLUMNS", "Table"]
 
 # Missing-value marker of BIDS tables.
 NA = "n/a"
+
+# The byte-order mark some editors write at the start of a UTF-8 file.
+BOM = "\ufeff"
+
+# What a TSV cell cannot hold: BIDS tables have no quoting.
+_SEPARATORS = re.compile(r"[\t\n\r]")
 
 JSON = "json"
 TSV = "tsv"
@@ -298,6 +309,14 @@ def format_value(
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, float):
+        if math.isnan(value):
+            # A missing value, as pandas holds it.
+            return NA
+        if math.isinf(value):
+            raise ValueError(
+                f"column {column!r} holds {value!r}, which a BIDS table "
+                "cannot hold: write a finite number, or None for n/a"
+            )
         return repr(float(value))
     if isinstance(value, (date, time)):
         return value.isoformat()
@@ -308,7 +327,7 @@ def format_value(
                 "no Delimiter to join it with; set one in the table's JSON "
                 "sidecar, or join the values into a string"
             )
-        return delimiter.join(format_value(item) for item in value)
+        return delimiter.join(format_value(item, column=column) for item in value)
     return str(value)
 
 
@@ -333,10 +352,17 @@ class Table(list):
     and with `add_column` and `drop_column`. A key that a row has and
     `columns` does not becomes a new, last column. When the table is
     written, a value read from the file and left unchanged keeps its exact
-    text. Any other value is written from its type: `None` or a missing key
-    as `n/a`, a `bool` as `true`/`false`, a `float` in its shortest `repr`
-    form, a date or time in ISO 8601, a list joined with the column's
-    `Delimiter`, and anything else as `str(value)`.
+    text. Any other value is written from its type: `None`, a missing key
+    or a float NaN as `n/a`, a `bool` as `true`/`false`, a `float` in its
+    shortest `repr` form, a date or time in ISO 8601, a list joined with
+    the column's `Delimiter`, and anything else as `str(value)`. A value
+    whose text holds a tab or a line break, and an infinite float, cannot be
+    written (`ValueError`).
+
+    A list in a column is joined with the column's `Delimiter`, from the
+    table's JSON sidecar; a table read from a file knows the `Delimiter` of
+    every column its sidecar describes, including columns it does not have
+    yet.
     """
 
     def __init__(
@@ -421,12 +447,37 @@ class Table(list):
     def __repr__(self) -> str:
         return f"Table({list(self)!r}, columns={self.columns!r})"
 
+    def _snapshot(self) -> Callable[[], None]:
+        """Return a function that puts this table back as it is now, in place.
+
+        Its rows are the same objects again, with their values as now.
+        """
+        rows = [(row, copy.deepcopy(dict(row))) for row in self]
+        columns = list(self._columns)
+        text = {key: (row, dict(kept)) for key, (row, kept) in self._text.items()}
+        delimiters = dict(self._delimiters)
+
+        def restore() -> None:
+            for row, values in rows:
+                row.clear()
+                row.update(values)
+            self[:] = [row for row, _ in rows]
+            self._columns = columns
+            self._text = text
+            self._delimiters = delimiters
+
+        return restore
+
 
 # -- JSON --------------------------------------------------------------------------
 
+def _without_bom(text: str) -> str:
+    return text[1:] if text.startswith(BOM) else text
+
+
 def parse_json(text: str) -> object:
-    """Parse the text of a JSON file."""
-    return json.loads(text)
+    """Parse the text of a JSON file (a leading byte-order mark is skipped)."""
+    return json.loads(_without_bom(text))
 
 
 def dump_json(content: object) -> str:
@@ -468,9 +519,26 @@ def delimiters(descriptions: Mapping | None) -> dict[str, str]:
 
 
 def _text_rows(text: str) -> tuple[list[dict[str, str | None]], list[str]]:
-    reader = csv.DictReader(io.StringIO(text), delimiter="\t")
+    # BIDS tables have no quoting: a quote is a character of its cell.
+    reader = csv.DictReader(
+        io.StringIO(_without_bom(text)), delimiter="\t",
+        quoting=csv.QUOTE_NONE,
+    )
     rows = list(reader)
     return rows, list(reader.fieldnames or ())
+
+
+def new_table(
+    descriptions: Mapping | None = None, columns: Iterable[str] = ()
+) -> Table:
+    """Return an empty `Table` that knows the `Delimiter`s `descriptions` give.
+
+    Every column the descriptions give a `Delimiter` is known, whether the
+    table has it yet or not, so a list added later can be written.
+    """
+    table = Table(columns=columns)
+    table._delimiters = delimiters(descriptions)
+    return table
 
 
 def parse_tsv(
@@ -486,10 +554,7 @@ def parse_tsv(
     if raw:
         return Table(rows, columns=columns)
     specs = column_specs(columns, rows, descriptions)
-    table = Table(columns=columns)
-    table._delimiters = {
-        c: spec.delimiter for c, spec in specs.items() if spec.delimiter
-    }
+    table = new_table(descriptions, columns)
     for cells in rows:
         row: dict = {}
         kept = {}
@@ -518,10 +583,10 @@ def dump_tsv(table: Table) -> str:
     if not isinstance(table, Table):
         table = Table(table)
     columns = table.columns
-    out = io.StringIO()
-    writer = csv.writer(out, delimiter="\t", lineterminator="\n")
-    writer.writerow(columns)
-    for row in table:
+    lines = ["\t".join(
+        _check_cell(str(column), column, None) for column in columns
+    )]
+    for index, row in enumerate(table):
         kept = table._original_text(row)
         cells = []
         for column in columns:
@@ -530,11 +595,32 @@ def dump_tsv(table: Table) -> str:
             if original is not None and _same(value, original[0]):
                 cells.append(original[1])
             else:
-                cells.append(format_value(
+                cells.append(_check_cell(format_value(
                     value, table._delimiters.get(column), column
-                ))
-        writer.writerow(cells)
-    return out.getvalue()
+                ), column, index))
+        if cells == [""]:
+            # A blank line, which a reader skips: the row would be lost.
+            raise ValueError(
+                f"row {index} of column {columns[0]!r} is an empty string, "
+                "which a table of one column cannot hold (its line would be "
+                "blank); write None for n/a"
+            )
+        lines.append("\t".join(cells))
+    return "\n".join(lines) + "\n"
+
+
+def _check_cell(text: str, column: object, row: int | None) -> str:
+    """Return `text`, checked to fit in one cell of a BIDS table."""
+    if _SEPARATORS.search(text):
+        where = "the column name" if row is None else (
+            f"row {row} of column {column!r}"
+        )
+        raise ValueError(
+            f"{where} holds a tab or a line break ({text!r}), which a BIDS "
+            "table cannot hold: it has no quoting; replace them, e.g. with "
+            "spaces"
+        )
+    return text
 
 
 def _typed_series(series: Series, spec: ColumnSpec) -> Series:
@@ -581,7 +667,11 @@ def tsv_dataframe(
             "read_dataframe needs pandas; install it, or use read() "
             "for a list of rows"
         ) from None
-    options: dict = {"sep": "\t", "na_values": [NA], "keep_default_na": False}
+    text = _without_bom(text)
+    options: dict = {
+        "sep": "\t", "na_values": [NA], "keep_default_na": False,
+        "quoting": csv.QUOTE_NONE,
+    }
     typed = "dtype" not in kwargs and "converters" not in kwargs
     if typed:
         options["dtype"] = str
@@ -608,7 +698,9 @@ def parse(
     """
     if kind == JSON:
         return {} if text is None else parse_json(text)
-    return Table() if text is None else parse_tsv(text, descriptions)
+    if text is None:
+        return new_table(descriptions)
+    return parse_tsv(text, descriptions)
 
 
 def dump(kind: str, content: object) -> str:
