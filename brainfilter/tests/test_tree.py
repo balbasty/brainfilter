@@ -101,9 +101,12 @@ def test_missing_child(ds):
 
 
 def test_read_only(ds):
-    with pytest.raises(TypeError, match="read-only.*transactions"):
+    # outside a transaction; see test_transaction.py for the edits
+    with pytest.raises(TypeError, match="read-only.*transaction"):
+        ds["sub-03.json"] = {}
+    with pytest.raises(TypeError, match="only JSON and TSV"):
         ds["sub-03"] = {}
-    with pytest.raises(TypeError, match="read-only"):
+    with pytest.raises(TypeError, match="does not delete"):
         del ds["sub-01"]
     with pytest.raises(TypeError, match="read-only"):
         ds["T1w.json"]["Level"] = "x"
@@ -129,8 +132,12 @@ def test_tsv_reads_as_rows(ds):
     table = ds["participants.tsv"]
     rows = table.read()
     assert rows == [
-        {"participant_id": "sub-01", "age": "30", "sex": "F"},
+        {"participant_id": "sub-01", "age": 30.0, "sex": "F"},   # BIDS: number
         {"participant_id": "sub-02", "age": None, "sex": "M"},
+    ]
+    assert table.read(raw=True) == [
+        {"participant_id": "sub-01", "age": "30", "sex": "F"},
+        {"participant_id": "sub-02", "age": "n/a", "sex": "M"},
     ]
     assert list(table) == rows
     with pytest.raises(TypeError, match="read()"):
@@ -222,12 +229,70 @@ def test_explicit_root(ds):
         t1w.sidecars(root=ds / "sub-02")
 
 
-def test_no_dataset_root(tmp_path):
-    path = BidsPath(str(tmp_path / "loose" / "sub-01_T1w.nii.gz"))
-    path.parent.mkdir()
-    path.write_bytes(b"")
-    with pytest.raises(ValueError, match="dataset_description.json"):
-        path.metadata
+# A directory with no dataset root above it: its own sidecars apply, and
+# not those above it.
+LOOSE = {
+    "T1w.json": {"Above": 1},                               # not inherited
+    "loose/sub-01_T1w.json": {"Level": "own"},
+    "loose/T1w.json": {"Level": "generic", "Generic": 1},
+    "loose/sub-02_T1w.json": {"Level": "other-subject"},   # entity mismatch
+    "loose/sub-01_bold.json": {"Level": "wrong-suffix"},
+    "loose/sub-01_T1w.nii.gz": b"nifti",
+}
+LOOSE_DATA = "loose/sub-01_T1w.nii.gz"
+
+
+def _populate_loose(top):
+    for rel, content in LOOSE.items():
+        path = top / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        else:
+            path.write_text(json.dumps(content))
+    return top
+
+
+def test_no_dataset_root_uses_own_directory(tmp_path):
+    top = _populate_loose(BidsPath(str(tmp_path)))
+    data = top / LOOSE_DATA
+    assert [s.name for s in data.sidecars()] == ["sub-01_T1w.json", "T1w.json"]
+    meta = data.metadata
+    assert meta["Level"] == "own" and meta["Generic"] == 1
+    assert "Above" not in meta
+    # an explicit root still reaches above
+    assert data.read_metadata(root=top)["Above"] == 1
+    with pytest.raises(ValueError, match="not an ancestor"):
+        data.sidecars(root=top / "elsewhere")
+
+
+def test_no_dataset_root_metadata_write(tmp_path):
+    top = _populate_loose(BidsPath(str(tmp_path)))
+    data = top / LOOSE_DATA
+    with data.parent.transaction() as tx:
+        data.metadata["EchoTime"] = 0.03
+    assert tx.written == [top / "loose/sub-01_T1w.json"]
+    assert json.loads((top / "loose/sub-01_T1w.json").read_text()) == {
+        "Level": "own", "EchoTime": 0.03,
+    }
+
+
+def test_no_dataset_root_lists_each_ancestor_once(memory_ds, monkeypatch):
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    top = _populate_loose(BidsPath("memory://top"))
+    data = top / LOOSE_DATA
+    calls = []
+    real = MemoryFileSystem.ls
+
+    def ls(self, path, *args, **kwargs):
+        calls.append(path)
+        return real(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(MemoryFileSystem, "ls", ls)
+    assert [s.name for s in data.sidecars()] == ["sub-01_T1w.json", "T1w.json"]
+    # one walk up: each ancestor is listed once, to learn there is no root
+    assert len(calls) == len(set(calls)) == len(data.parents)
 
 
 def test_each_directory_listed_once(memory_ds, monkeypatch):

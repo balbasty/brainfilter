@@ -37,3 +37,41 @@ def async_memory(monkeypatch):
     registry = sys.modules["fsspec.registry"]._registry
     monkeypatch.setitem(registry, "memory", AsyncMemoryFileSystem)
     return AsyncMemoryFileSystem
+
+
+@pytest.fixture
+def fail_nth(monkeypatch):
+    """Make the store refuse the n-th file a commit writes (1-based).
+
+    The failure is injected where bagof-paths moves a staged file onto its
+    target, so the transaction sees the `CommitError` a real refusal gives.
+    """
+    from bagof.paths import _staged
+
+    def arm(n):
+        calls = []
+
+        def wrap(real):
+            def commit(*args, **kwargs):
+                calls.append(args)
+                if len(calls) == n:
+                    raise PermissionError(13, "refused by the test")
+                return real(*args, **kwargs)
+            return commit
+
+        def awrap(real):
+            async def commit(*args, **kwargs):
+                calls.append(args)
+                if len(calls) == n:
+                    raise PermissionError(13, "refused by the test")
+                return await real(*args, **kwargs)
+            return commit
+
+        monkeypatch.setattr(_staged, "_commit_local", wrap(_staged._commit_local))
+        monkeypatch.setattr(_staged, "_commit_remote", wrap(_staged._commit_remote))
+        monkeypatch.setattr(
+            _staged, "_acommit_remote", awrap(_staged._acommit_remote)
+        )
+        return calls
+
+    return arm

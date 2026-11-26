@@ -1,4 +1,5 @@
 """The async family: the sync tree tests, mirrored with coroutines."""
+import json
 from collections import ChainMap
 
 import pytest
@@ -6,7 +7,14 @@ import pytest
 from brainfilter import bidspath as B
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
 from brainfilter.tests.test_bidspath import DISPATCH
-from brainfilter.tests.test_tree import BOLD, FILES, T1W, _populate
+from brainfilter.tests.test_tree import (
+    BOLD,
+    FILES,
+    LOOSE_DATA,
+    T1W,
+    _populate,
+    _populate_loose,
+)
 
 pytestmark = pytest.mark.anyio
 
@@ -121,10 +129,12 @@ async def test_sync_mapping_syntax_points_to_the_coroutines(ds):
 
 
 async def test_read_only(ds):
-    with pytest.raises(TypeError, match="read-only.*transactions"):
-        ds["sub-03"] = {}
-    with pytest.raises(TypeError, match="read-only"):
+    with pytest.raises(TypeError, match=r"await \(path / name\)\.write"):
+        ds["sub-03.json"] = {}
+    with pytest.raises(TypeError, match="does not delete"):
         del ds["sub-01"]
+    with pytest.raises(TypeError, match="read-only outside a transaction"):
+        await (ds / "T1w.json").set("Level", "x")
 
 
 # -- contents ------------------------------------------------------------------
@@ -155,8 +165,12 @@ async def test_tsv_reads_as_rows(ds):
     table = await ds.child("participants.tsv")
     rows = await table.read()
     assert rows == [
-        {"participant_id": "sub-01", "age": "30", "sex": "F"},
+        {"participant_id": "sub-01", "age": 30.0, "sex": "F"},   # BIDS: number
         {"participant_id": "sub-02", "age": None, "sex": "M"},
+    ]
+    assert await table.read(raw=True) == [
+        {"participant_id": "sub-01", "age": "30", "sex": "F"},
+        {"participant_id": "sub-02", "age": "n/a", "sex": "M"},
     ]
     assert [row async for row in table] == rows
     with pytest.raises(TypeError, match=r"await read\(\)"):
@@ -240,12 +254,30 @@ async def test_explicit_root(ds):
         await t1w.sidecars(root=ds / "sub-02")
 
 
-async def test_no_dataset_root(tmp_path):
-    path = AsyncBidsPath(str(tmp_path / "loose" / "sub-01_T1w.nii.gz"))
-    await path.parent.mkdir()
-    await path.write_bytes(b"")
-    with pytest.raises(ValueError, match="dataset_description.json"):
-        await path.read_metadata()
+async def test_no_dataset_root_uses_own_directory(tmp_path):
+    _populate_loose(BidsPath(str(tmp_path)))
+    top = AsyncBidsPath(str(tmp_path))
+    data = top / LOOSE_DATA
+    names = [s.name for s in await data.sidecars()]
+    assert names == ["sub-01_T1w.json", "T1w.json"]
+    meta = await data.read_metadata()
+    assert meta["Level"] == "own" and meta["Generic"] == 1
+    assert "Above" not in meta
+    assert (await data.read_metadata(root=top))["Above"] == 1
+    with pytest.raises(ValueError, match="not an ancestor"):
+        await data.sidecars(root=top / "elsewhere")
+
+
+async def test_no_dataset_root_metadata_write(tmp_path):
+    _populate_loose(BidsPath(str(tmp_path)))
+    top = AsyncBidsPath(str(tmp_path))
+    data = top / LOOSE_DATA
+    async with data.parent.transaction() as tx:
+        (await data.read_metadata())["EchoTime"] = 0.03
+    assert tx.written == [top / "loose/sub-01_T1w.json"]
+    assert json.loads(await (top / "loose/sub-01_T1w.json").read_text()) == {
+        "Level": "own", "EchoTime": 0.03,
+    }
 
 
 async def test_each_directory_listed_once(ds, monkeypatch):
