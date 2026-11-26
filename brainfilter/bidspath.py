@@ -43,6 +43,7 @@ from brainfilter._names import (
     role_of,
     sort_entities,
 )
+from brainfilter._tree import JSONContentMixin, TreeMixin, TSVContentMixin
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -446,10 +447,16 @@ def _seal(root: type) -> None:
 
 
 # -- concrete paths ------------------------------------------------------------
-class BidsPath(BidsPathMixin, Path):
+class BidsPath(TreeMixin, BidsPathMixin, Path):
     """A BIDS file or directory, on any storage `bagof.paths.Path` supports.
 
     The class is picked from the name; see the module documentation.
+
+    A directory is also a read-only mapping of its children
+    (`dataset["sub-01"]["anat"]`, `keys()`, iteration), a JSON file a
+    mapping of its content (`sidecar["RepetitionTime"]`, `read()`), and a
+    TSV file a list of rows (`read()`, `read_dataframe()`). A file's
+    `metadata` is the `ChainMap` of the JSON sidecars that apply to it.
     """
 
     __slots__ = ()
@@ -474,7 +481,7 @@ class BidsCodeDirectory(BidsDirectory):
     _role = "code"
 
 
-class BidsJSONFile(BidsFile):
+class BidsJSONFile(JSONContentMixin, BidsFile):
     """A BIDS JSON file."""
 
     __slots__ = ()
@@ -500,7 +507,7 @@ class BidsTableSidecarFile(BidsSidecarFile):
     __slots__ = ()
 
 
-class BidsTSVFile(BidsFile):
+class BidsTSVFile(TSVContentMixin, BidsFile):
     """A BIDS TSV table."""
 
     __slots__ = ()

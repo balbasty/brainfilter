@@ -256,7 +256,7 @@ def parse_path(path: object) -> ParsedPath:
     )
 
 
-def applies_to(meta: object, data: object) -> bool:
+def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
     """Whether a metadata file applies to a data file (BIDS inheritance).
 
     It does when all of these hold:
@@ -264,11 +264,14 @@ def applies_to(meta: object, data: object) -> bool:
     - its directory is the data file's directory or one of its ancestors;
     - every entity of its name is in the data file's name, with the same
       label;
-    - its suffix is the data file's suffix, or a companion suffix
-      (`events`, `scans`, `sessions`, `physio`, ...; see
+    - its suffix is the data file's suffix, or (when `companions` is true)
+      a companion suffix (`events`, `scans`, `sessions`, `physio`, ...; see
       `COMPANION_SUFFIXES`);
     - if it is in a datatype directory, the data file is in one of the
       same datatype.
+
+    Pass `companions=False` for a JSON sidecar's metadata: a companion's
+    sidecar (`events.json`) describes the companion file, not the data.
 
     Both paths are `/`-separated strings, path objects or `ParsedPath`,
     relative to the same root. Whether `meta` is a metadata file at all is
@@ -279,7 +282,9 @@ def applies_to(meta: object, data: object) -> bool:
         meta.directory not in data.directory.parents
     ):
         return False
-    if meta.suffix != data.suffix and meta.suffix not in COMPANION_SUFFIXES:
+    if meta.suffix != data.suffix and (
+        not companions or meta.suffix not in COMPANION_SUFFIXES
+    ):
         return False
     if meta.datatype and meta.datatype != data.datatype:
         return False
