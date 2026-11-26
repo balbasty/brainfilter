@@ -76,6 +76,13 @@ SORTED_ENTITIES = (
     "desc",         # description (kept last by convention)
 )
 
+# Index entities: their value is a non-negative integer, so `run-1` and
+# `run-01` are the same run. The entities whose `format` is `index` in
+# `objects.entities` of the official BIDS 1.11.2 schema.
+INDEX_ENTITIES = frozenset({
+    "chunk", "echo", "flip", "inv", "run", "split",
+})
+
 # Characters that would change how a name splits back into its parts.
 _RESERVED = frozenset("_-./")
 
