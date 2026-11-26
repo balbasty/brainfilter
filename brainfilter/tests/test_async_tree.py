@@ -121,10 +121,12 @@ async def test_sync_mapping_syntax_points_to_the_coroutines(ds):
 
 
 async def test_read_only(ds):
-    with pytest.raises(TypeError, match="read-only.*transactions"):
-        ds["sub-03"] = {}
-    with pytest.raises(TypeError, match="read-only"):
+    with pytest.raises(TypeError, match=r"await \(path / name\)\.write"):
+        ds["sub-03.json"] = {}
+    with pytest.raises(TypeError, match="does not delete"):
         del ds["sub-01"]
+    with pytest.raises(TypeError, match="read-only outside a transaction"):
+        await (ds / "T1w.json").set("Level", "x")
 
 
 # -- contents ------------------------------------------------------------------
