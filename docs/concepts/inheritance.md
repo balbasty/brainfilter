@@ -88,7 +88,7 @@ one-entity file of the `func` directory because it is further away.
 ```python
 from brainfilter import BidsPath
 
-w = BidsPath("memory://inh", mode="w")
+w = BidsPath("memory://inherit", mode="w")
 w["dataset_description.json"] = {"Name": "Inheritance", "BIDSVersion": "1.9.0"}
 w["bold.json"] = {"Manufacturer": "ACME", "RepetitionTime": 3.0}
 w["task-rest_bold.json"] = {"TaskName": "rest", "RepetitionTime": 2.0}
@@ -106,7 +106,7 @@ func["sub-01_task-rest_run-2_bold.json"] = {"Run": 2}
 ```
 
 ```pycon
->>> ds = BidsPath("memory://inh")
+>>> ds = BidsPath("memory://inherit")
 >>> image = ds["sub-01"]["func"]["sub-01_task-rest_run-01_bold.nii.gz"]
 >>> for sidecar in image.sidecars:
 ...     print(sidecar.relative_to(ds))

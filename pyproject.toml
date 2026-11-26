@@ -42,9 +42,10 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
-# Comment -> use flat-layout auto discovery instead
-# [tool.setuptools]
-# packages = ["brainfilter"]
+# Find packages explicitly: flat-layout auto discovery refuses to build when
+# another top-level directory, such as the docs build output `site/`, exists.
+[tool.setuptools.packages.find]
+include = ["brainfilter*"]
 
 [tool.versioningit]
 default-version = "0+unknown"

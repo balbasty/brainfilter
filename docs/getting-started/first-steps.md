@@ -70,7 +70,7 @@ store costs nothing until the first question is asked of it.
 BidsPath('ds')
 ```
 
-A `BidsPath` behaves like a [`pathlib.Path`][pathlib.Path] that also knows
+A `BidsPath` behaves like a [`pathlib.Path`](https://docs.python.org/3/library/pathlib.html#pathlib.Path) that also knows
 about BIDS. It has the usual members (`exists()`, `iterdir()`, `read_text()`,
 the `/` operator), and it adds the mapping interface and the BIDS vocabulary
 shown below. By default it is read-only: any operation that would change the
