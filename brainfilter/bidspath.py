@@ -1,530 +1,716 @@
-import json
-import re
-import warnings
-from fnmatch import fnmatch
-from typing import Union
-from io import IOBase
+"""BIDS paths: name parsing, entity editing and file-type dispatch.
 
-from brainfilter.fancypath import (
-    FancyDirectory, FancyFile, FancyJSONFile, FancyPath,
-    StrOrBytesOrPath, TextFileLike
+A [`BidsPath`][brainfilter.bidspath.BidsPath] is a `bagof.paths.Path` that
+also reads its name as a BIDS name::
+
+    >>> p = BidsPath("ds/sub-01/ses-1/anat/sub-01_ses-1_T1w.nii.gz")
+    >>> p.entities, p.suffix, p.extension, p.datatype
+    ({'sub': '01', 'ses': '1'}, 'T1w', '.nii.gz', 'anat')
+    >>> p.with_subject("02")
+    BidsPath('ds/sub-02/ses-1/anat/sub-02_ses-1_T1w.nii.gz')
+
+A [`PureBidsPath`][brainfilter.bidspath.PureBidsPath] has the same BIDS
+surface over a `bagof.paths.PurePath`, with no I/O at all.
+
+Every BIDS component is computed from the name when asked for, never
+stored, so a derived path (`/`, `parent`, `with_name`, ...) re-parses its
+own name. The class of a path is picked from its name and its parent's name
+as well (`participants.tsv` is a `BidsParticipantsFile`, a `.json` file a
+`BidsSidecarFile`, ...), without touching the filesystem, so a remote path
+or one that does not exist yet gets the same class as a local one.
+
+!!! warning "`suffix` is the BIDS suffix"
+    On these paths `suffix` is the BIDS suffix (`T1w`) and `with_suffix`
+    replaces it. The file extension is `extension` (`.nii.gz`) and is
+    replaced with `with_extension`.
+"""
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from bagof.paths import Path, PurePath
+
+from brainfilter._names import (
+    DATATYPES,
+    METADATA_EXTENSIONS,
+    SORTED_ENTITIES,
+    ParsedName,
+    check_entity,
+    check_extension,
+    check_suffix,
+    format_name,
+    parse_name,
+    role_of,
+    sort_entities,
 )
-from brainfilter.hdict import HDict, TrackedHDict
-from brainfilter.tracking import TrackedDict, tracks
+
+if TYPE_CHECKING:
+    from typing_extensions import Self
+
+__all__ = [
+    "DATATYPES",
+    "METADATA_EXTENSIONS",
+    "BidsCodeDirectory",
+    "BidsDatasetDescriptionFile",
+    "BidsDirectory",
+    "BidsEntities",
+    "BidsFile",
+    "BidsJSONFile",
+    "BidsNameError",
+    "BidsParticipantsFile",
+    "BidsParticipantsSidecarFile",
+    "BidsPath",
+    "BidsPathMixin",
+    "BidsPhenotypeFile",
+    "BidsPhenotypeSidecarFile",
+    "BidsSamplesFile",
+    "BidsSamplesSidecarFile",
+    "BidsScansFile",
+    "BidsScansSidecarFile",
+    "BidsSessionsFile",
+    "BidsSessionsSidecarFile",
+    "BidsSidecarFile",
+    "BidsTSVFile",
+    "BidsTableSidecarFile",
+    "PureBidsCodeDirectory",
+    "PureBidsDatasetDescriptionFile",
+    "PureBidsDirectory",
+    "PureBidsFile",
+    "PureBidsJSONFile",
+    "PureBidsParticipantsFile",
+    "PureBidsParticipantsSidecarFile",
+    "PureBidsPath",
+    "PureBidsPhenotypeFile",
+    "PureBidsPhenotypeSidecarFile",
+    "PureBidsSamplesFile",
+    "PureBidsSamplesSidecarFile",
+    "PureBidsScansFile",
+    "PureBidsScansSidecarFile",
+    "PureBidsSessionsFile",
+    "PureBidsSessionsSidecarFile",
+    "PureBidsSidecarFile",
+    "PureBidsTSVFile",
+    "PureBidsTableSidecarFile",
+]
 
 
-REGISTERED_PATH_TYPES = {}
+class BidsNameError(ValueError):
+    """An edit that needs a BIDS name was asked of a name that is not one."""
 
 
 class BidsEntities(dict):
-    """Container for BIDS entities."""
+    """BIDS entities of a name, `key -> label`, in file-name order.
 
-    SORTED_ENTITIES = [
-        "sub",                  # ()            Subject
-        "ses",                  # ()            Session
-        "sample",               # (MICR)        Sample
-        "task",                 # ()            Task
-        "tracksys",             # (MOTION)      Tracking system
-        "acq",                  # ()            Acquisition
-        "ce",                   # (MRI)         Contrast enhancement
-        "trc",                  # (PET)         Tracer
-        "stain",                # (MICR)        Stain
-        "nuc",                  # (RMS)         Nucleus
-        "voi",                  # (RMS)         Volume of Interest
-        "rec",                  # (MRI/PET)     Reconstruction
-        "dir",                  # (MRI-EPI)     PE-Direction
-        "run",                  # ()            Run
-        "proc",                 # (EEG/MEG)     Processing
-        "mod",                  # ()            Modality (derives from suffix)
-        "echo",                 # (MRI)         Echo
-        "flip",                 # (MRI)         Flip angle
-        "inv",                  # (MRI)         Inversion time
-        "mt",                   # (MRI)         Magnetization transfer
-        "part",                 # ()            Part Magnitude/Phase/Real/Imag
-        "chunk",                # (MRI/MICR)    Chunk index
-        "split",                # (MEG)         Split file index
-        "hemi",                 # (DRV/SURF)    Hemisphere
-        "space",                # ()            Coordinates space
-        "seg",                  # (DRV)         Segmentation
-        "res",                  # (DRV/IMG)     Resolution
-        "den",                  # (DRV/SURF)    Density
-        "label",                # (DRV/MSK)     Segmentation label
-        "desc",                 # (DRV)         Description
-        "recording",            # (Phys)        Recording
-    ]
+    The comparisons follow the BIDS inheritance principle: `a < b` when a
+    file with entities `a` inherits (strictly) from a file with entities
+    `b`, i.e. every entity of `b` is in `a` with the same label and `a` has
+    more.
+    """
 
-    def __lt__(self, other: dict) -> bool:
-        """Check whether this file inherits (strictly) from the other file."""
+    SORTED_ENTITIES: ClassVar[tuple[str, ...]] = SORTED_ENTITIES
+    """Entity keys in canonical file-name order."""
+
+    def sorted(self) -> BidsEntities:
+        """Return these entities in canonical order (unknown keys last)."""
+        return BidsEntities(sort_entities(self))
+
+    def __lt__(self, other: object) -> bool:
+        """Whether this file inherits (strictly) from the other file."""
         if not isinstance(other, dict):
             return NotImplemented
-
-        # If exactly the same, return False
-        if set(self.keys()) == set(other.keys()):
+        if set(self) == set(other):
             return False
+        return {k: v for k, v in self.items() if k in other} == other
 
-        # Subset of self that are also in other
-        common = {k: v for k, v in self.items() if k in other}
-
-        # Check if the subset matches the inherited dict
-        return common == other
-
-    def __le__(self, other: dict) -> bool:
-        """Check whether this file inherits from the other file."""
+    def __le__(self, other: object) -> bool:
+        """Whether this file inherits from the other file."""
+        if not isinstance(other, dict):
+            return NotImplemented
         return self < other or self == other
 
-    def __gt__(self, other: dict) -> bool:
-        """Check whether the other file inherits (stricly) from this file."""
+    def __gt__(self, other: object) -> bool:
+        """Whether the other file inherits (strictly) from this file."""
         if not isinstance(other, dict):
             return NotImplemented
-
-        # If exactly the same, return False
-        if set(self.keys()) == set(other.keys()):
+        if set(self) == set(other):
             return False
+        return {k: v for k, v in other.items() if k in self} == self
 
-        # Subset of self that are also in other
-        common = {k: v for k, v in other.items() if k in self}
-
-        # Check if the subset matches the inherited dict
-        return common == self
-
-    def __ge__(self, other: dict) -> bool:
-        """Check whether the other file inherits from this file."""
+    def __ge__(self, other: object) -> bool:
+        """Whether the other file inherits from this file."""
+        if not isinstance(other, dict):
+            return NotImplemented
         return self > other or self == other
 
 
-class JSONContent(dict):
-    """Container for JSON file content."""
+def _names(path: object) -> tuple[str, str] | None:
+    """Read the name of a path and of its parent lexically, or `None`.
 
-    def write_to(self, file: TextFileLike) -> None:
-        """Write content to a JSON file."""
-        if not isinstance(file, IOBase):
-            file = FancyPath(file)
-            with file.open("w", encoding="utf-8") as f:
-                return self.write_to(f)
-        json.dump(self, file, indent=4)
+    A plain `PurePath` view is used so that no BIDS class (and so no
+    dispatch) is involved, and nothing is read from a filesystem.
+    """
+    try:
+        view = PurePath(path)
+        return view.name, view.parent.name
+    except (TypeError, ValueError):
+        return None
+
+
+class BidsPathMixin:
+    """The lexical BIDS surface shared by `BidsPath` and `PureBidsPath`."""
+
+    __slots__ = ()
+
+    # Set on each family root by `_seal`: the root, the classes defined in
+    # this module (which dispatch on their name), and the class of each role.
+    _root: ClassVar[type]
+    _builtin: ClassVar[frozenset[type]] = frozenset()
+    _by_role: ClassVar[dict[str, type]]
+    # The role a class is dispatched for (see `_names.role_of`).
+    _role: ClassVar[str | None] = None
+
+    # These are defined by bagof's wrappers, which this mixin is used with.
+    if TYPE_CHECKING:
+        name: str
+        parent: Self
+        parents: tuple[Self, ...]
+        wrapped: Any
+
+        def with_name(self, name: str) -> Self: ...  # noqa: D102
+        def __truediv__(self, other: object) -> Self: ...  # noqa: D105
+
+    # -- dispatch ------------------------------------------------------------
+    def __new__(cls, *args: object, **kwargs: object) -> Self:
+        """Pick the class a path's name calls for.
+
+        Constructing a family root (`BidsPath("x/participants.tsv")`) gives
+        the specialised class; constructing a specialised class gives it, or
+        a subclass of it that the name calls for. A subclass defined outside
+        this module is never swapped for another class.
+        """
+        if args and cls in cls._builtin:
+            names = _names(args[0])
+            if names is not None:
+                chosen = cls._class_for(*names)
+                if issubclass(chosen, cls):
+                    cls = chosen
+        return object.__new__(cls)
 
     @classmethod
-    def load_from(cls, file: TextFileLike) -> "JSONContent":
-        """Load content from a JSON file."""
-        if not isinstance(file, IOBase):
-            file = FancyPath(file)
-            with file.open("r", encoding="utf-8") as f:
-                return cls.load_from(f)
-        return cls(json.load(file))
+    def _class_for(cls, name: str, parent_name: str) -> type:
+        """Pick the class, in this family, for a name in a parent directory."""
+        return cls._by_role.get(role_of(name, parent_name), cls._root)
 
+    def with_wrapped(self, wrapped: object) -> Self:
+        """Return a path around `wrapped`, of the class its name calls for.
 
-class BidsSidecarContent(HDict):
-    """Container for BIDS sidecar file content."""
+        Every derived path (`/`, `parent`, `with_name`, ...) is built here,
+        so it is re-dispatched on its own name. A subclass defined outside
+        this module keeps its own type.
+        """
+        new = super().with_wrapped(wrapped)  # type: ignore[misc]
+        if type(self) in self._builtin:
+            names = _names(wrapped)
+            if names is not None:
+                cls = self._class_for(*names)
+                if type(new) is not cls:
+                    new.__class__ = cls
+        return new
 
-    @classmethod
-    def load_from(cls, file: StrOrBytesOrPath) -> "BidsSidecarContent":
-        """Load content from a JSON file."""
-        path = BidsPath(file)
-
-        # Load content that exactly matches the file
-        if path.exists():
-            leaf = JSONContent.load_from(file)
-        else:
-            leaf = JSONContent()
-        leaf._parent = path
-
-        # Load inherited content from sibling files
-        dir = path.parent
-        inherited = []
-        while True:
-            for sibling in dir.iterdir():
-                if (
-                    path.extension == sibling.extension
-                    and path.suffix == sibling.suffix
-                    and path.entities < sibling.entities
-                ):
-                    inherited.append(JSONContent.load_from(sibling))
-
-            if (dir / "dataset_description.json").exists():
-                break
-            if dir.resolve() == FancyPath("/"):
-                break
-            dir = dir.parent
-
-        return cls(leaf, *inherited)
-
-    def write_to(self, file: StrOrBytesOrPath) -> None:
-        """Write content to a JSON file."""
-        if self._leaf or FancyPath(file).exists():
-            self._leaf.write_to(file)
-
-
-class BidsDatasetDescriptionContent(dict):
-    """Container for BIDS dataset_description.json content."""
-    ...
-
-
-@tracks(JSONContent)
-class TrackedJSONContent(TrackedDict, JSONContent):
-    """A tracked JSON content dictionary."""
-    ...
-
-
-@tracks(BidsSidecarContent)
-class TrackedBidsSidecarContent(TrackedHDict, BidsSidecarContent):
-    """A tracked BIDS sidecar content dictionary."""
-    ...
-
-
-@tracks(BidsDatasetDescriptionContent)
-class TrackedBidsDatasetDescriptionContent(
-    TrackedDict, BidsDatasetDescriptionContent
-):
-    """A tracked BIDS dataset_description.json content dictionary."""
-    ...
-
-
-class BidsPath(FancyPath):
-    """Base class for BIDS paths (files or directories)."""
-
-    def __new__(cls, *args, **kwargs):
-        cls0 = cls
-        path = FancyPath._make_pure(*args, **kwargs)
-        for pattern, path_type in REGISTERED_PATH_TYPES.items():
-            if (
-                (isinstance(pattern, re.Pattern) and pattern.match(path.name))
-                or
-                (isinstance(pattern, str) and fnmatch(path.name, pattern))
-                or
-                (callable(pattern) and pattern(path))
-            ):
-                cls = path_type
-                break
-        obj = super().__new__(cls, *args, **kwargs)
-        if not issubclass(cls, cls0):
-            obj.__init__(*args, **kwargs)
-        return obj
+    # -- parsed components ---------------------------------------------------
+    @property
+    def basename(self) -> str:
+        """The name without its extension (`sub-01_T1w`)."""
+        return parse_name(self.name).basename
 
     @property
     def extension(self) -> str:
-        """Return the file extension, including .nii.gz for NIfTI files."""
-        if "." in self.name:
-            return ".".join(self.name.split(".")[1:])
-        else:
-            return ""
-
-    def with_extension(self, extension: str) -> "BidsPath":
-        """Return a new BidsPath with the given file extension."""
-        return type(self)(self.parent / (self.basename + extension))
-
-    @property
-    def basename(self) -> str:
-        """Return the file name without extensions."""
-        return self.name.split(".")[0]
-
-    def with_basename(self, basename: str) -> "BidsPath":
-        """Return a new BidsPath with the given file extension."""
-        return type(self)(self.parent / (basename + self.extension))
+        """Everything from the first dot of the name (`.nii.gz`), or `""`."""
+        return parse_name(self.name).extension
 
     @property
     def entities(self) -> BidsEntities:
-        """Return BIDS entities as a dictionary."""
-        parts = self.basename.split("_")
-        entities = BidsEntities()
-        for part in parts:
-            if "-" in part:
-                key, *value = part.split("-")
-                entities[key] = "-".join(value)
-        return entities
+        """The BIDS entities of the name; empty for a non-BIDS name."""
+        return BidsEntities(parse_name(self.name).entities)
+
+    @property
+    def suffix(self) -> str | None:  # type: ignore[override]
+        """The BIDS suffix (`T1w`, `bold`), or `None`.
+
+        !!! warning "This is not the file extension"
+            See `extension` for `.nii.gz`.
+        """
+        return parse_name(self.name).suffix
+
+    @property
+    def datatype(self) -> str | None:
+        """The datatype directory the path is in (`anat`, `func`), or `None`."""
+        parent = _names(self.wrapped)
+        name = parent[1] if parent is not None else ""
+        return name if name in DATATYPES else None
+
+    @property
+    def is_metadata(self) -> bool:
+        """Whether the name is a metadata file (`.json`, `.tsv`, `.bval`, ...)."""
+        return self.extension in METADATA_EXTENSIONS
+
+    @property
+    def subject(self) -> str | None:
+        """The subject label.
+
+        It is read from the name's `sub` entity, else from the nearest
+        `sub-<label>` directory above the path.
+        """
+        return self._label("sub")
+
+    @property
+    def session(self) -> str | None:
+        """The session label.
+
+        It is read from the name's `ses` entity, else from the nearest
+        `ses-<label>` directory above the path.
+        """
+        return self._label("ses")
+
+    def _label(self, key: str) -> str | None:
+        label = parse_name(self.name).entities.get(key)
+        if label is not None:
+            return label
+        for parent in self.parents:
+            parsed = parse_name(parent.name)
+            if parsed.suffix is None and list(parsed.entities) == [key]:
+                return parsed.entities[key]
+        return None
+
+    # -- editors -------------------------------------------------------------
+    def _parsed_bids(self, edit: str) -> ParsedName:
+        parsed = parse_name(self.name)
+        if not parsed.is_bids:
+            raise BidsNameError(
+                f"cannot {edit} of {self.name!r}: it is not a BIDS name "
+                "(<key>-<label>_..._<suffix><extension>)"
+            )
+        return parsed
 
     def with_entities(
         self,
         entities: dict | None = None,
+        *,
         keep_existing: bool = False,
         sort: bool | None = None,
-        **extra_entities,
-    ) -> "BidsPath":
-        """Return a new BidsPath with the given file extension."""
+        **extra_entities: object,
+    ) -> Self:
+        """Return a path whose name has the given entities.
+
+        Parameters
+        ----------
+        entities
+            Entities to set, `key -> label`. A label of `None` removes the
+            entity.
+        keep_existing
+            Keep the name's other entities. By default they are replaced.
+        sort
+            Put the entities in canonical BIDS order. By default, they are
+            sorted when `keep_existing` is true; otherwise they keep the
+            order they are given in.
+        **extra_entities
+            More entities to set, as keywords.
+
+        Raises
+        ------
+        BidsNameError
+            If the name is not a BIDS name.
+        ValueError
+            If an entity would not parse back, or the name would be empty.
+        """
+        parsed = self._parsed_bids("set the entities")
         if sort is None:
             sort = keep_existing
-
-        new_entities = self.entities if keep_existing else BidsEntities()
-        new_entities.update(entities or {})
-        new_entities.update(extra_entities)
-
+        new = dict(parsed.entities) if keep_existing else {}
+        for key, label in {**(entities or {}), **extra_entities}.items():
+            if label is None:
+                new.pop(str(key), None)
+                continue
+            key, label = check_entity(key, label)
+            new[key] = label
         if sort:
-            new_entities = {
-                key: new_entities[key]
-                for key in BidsEntities.SORTED_ENTITIES
-                if key in new_entities
-            } | {
-                key: value
-                for key, value in new_entities.items()
-                if key not in BidsEntities.SORTED_ENTITIES
-            }
-
-        basename = "_".join(
-            f"{key}-{value}" for key, value in new_entities.items()
-        )
-        if self.suffix:
-            basename += f"_{self.suffix}"
-
-        return type(self)(self.parent / (basename + self.extension))
-
-    @property
-    def subject(self) -> str | None:
-        """Return the subject ID."""
-        return self.entities.get("sub", None)
-
-    def with_subject(self, subject: str) -> "BidsPath":
-        """Return a new BidsPath with the given subject ID."""
-        prev_name = f"sub-{self.subject}"
-        new_name = f"sub-{subject}"
-        parts = list(self.parts)
-        if prev_name in parts:
-            parts[parts.index(prev_name)] = new_name
-            return type(self)(FancyPath(*parts)).with_subject(subject)
-
-        return self.with_entities(keep_existing=True, sub=subject)
-
-    @property
-    def session(self) -> str | None:
-        """Return the session ID."""
-        return self.entities.get("ses", None)
-
-    def with_session(self, session: str) -> "BidsPath":
-        """Return a new BidsPath with the given session ID."""
-        prev_name = f"ses-{self.session}"
-        new_name = f"ses-{session}"
-        parts = list(self.parts)
-        if prev_name in parts:
-            parts[parts.index(prev_name)] = new_name
-            return type(self)(FancyPath(*parts)).with_session(session)
-
-        return self.with_entities(keep_existing=True, ses=session)
-
-    @property
-    def suffix(self) -> str | None:
-        """
-        Return the BIDS suffix.
-
-        !!! warning "This is different from the file extension"
-        """
-        if "_" in self.name:
-            return self.basename.split("_")[-1]
-        return None
-
-    def with_suffix(self, suffix: str) -> "BidsPath":
-        """Return a new BidsPath with the given BIDS suffix."""
-        basename = self.basename.split("_")
-        if "-" not in basename[-1]:
-            basename = basename[:-1]
-        basename.append(suffix)
-        basename = "_".join(basename)
-        return type(self)(self.parent / (basename + self.extension))
-
-    @property
-    def dataset(self) -> Union["BidsPath", None]:
-        """Return the root dataset directory."""
-        path = self
-        while not (path / "dataset_description.json").exists():
-            if path.resolve() == FancyPath("/"):
-                return None
-            path = path.parent
-        return BidsPath(path)
-
-
-class BidsDirectory(BidsPath, FancyDirectory):
-    """Class for BIDS directories."""
-    ...
-
-
-class BidsDataset(BidsDirectory):
-    """Class for BIDS datasets."""
-
-    def __init__(self, *args, **kwargs):
-        if_missing: str = kwargs.get("if_missing", "ignore")
-        super().__init__(*args, **kwargs)
-        self._post_init(if_missing=if_missing)
-
-    def _post_init(self, if_missing: str = "ignore") -> None:
-        if not (self / "dataset_description.json").exists():
-            msg = (
-                f"{self} is not a BIDS dataset: "
-                f"missing dataset_description.json"
+            new = sort_entities(new)
+        name = format_name(new, parsed.suffix, parsed.extension)
+        if not parse_name(name).is_bids:
+            raise ValueError(
+                f"removing every entity of {self.name!r} would leave no name"
             )
-            if if_missing == "raise":
-                raise FileNotFoundError(msg)
-            elif if_missing == "warn":
-                warnings.warn(msg, UserWarning)
-            elif if_missing == "create":
-                (self / "dataset_description.json").touch()
+        return self.with_name(name)
+
+    def with_subject(self, subject: object) -> Self:
+        """Return the path of another subject.
+
+        Every `sub-<label>` directory above the path that names the current
+        subject is renamed, and so is the name's `sub` entity. A name that
+        has no `sub` entity gets one only if no directory names a subject.
+
+        Raises
+        ------
+        BidsNameError
+            If there is no subject to replace and the name is not a BIDS
+            name.
+        """
+        return self._with_label("sub", subject)
+
+    def with_session(self, session: object) -> Self:
+        """Return the path of another session.
+
+        Every `ses-<label>` directory above the path that names the current
+        session is renamed, and so is the name's `ses` entity. A name that
+        has no `ses` entity gets one only if no directory names a session.
+
+        Raises
+        ------
+        BidsNameError
+            If there is no session to replace and the name is not a BIDS
+            name.
+        """
+        return self._with_label("ses", session)
+
+    def _with_label(self, key: str, label: object) -> Self:
+        key, label = check_entity(key, label)
+        old = self._label(key)
+        path = self if old is None else self._rename_dirs(key, old, label)
+        if old is None or key in parse_name(path.name).entities:
+            return path.with_entities(keep_existing=True, **{key: label})
+        return path
+
+    def _rename_dirs(self, key: str, old: str, new: str) -> Self:
+        """Rename every `key-old` directory above this path to `key-new`."""
+        chain = [self, *self.parents]
+        target = f"{key}-{old}"
+        hits = [i for i in range(1, len(chain)) if chain[i].name == target]
+        if not hits:
+            return self
+        top = hits[-1]
+        path = chain[top].with_name(f"{key}-{new}")
+        for ancestor in reversed(chain[1:top]):
+            name = ancestor.name
+            path = path / (f"{key}-{new}" if name == target else name)
+        return path / self.name
+
+    def with_suffix(self, suffix: str) -> Self:  # type: ignore[override]
+        """Return a path whose name has another BIDS suffix.
+
+        !!! warning "This is not the file extension"
+            See `with_extension` to replace `.nii.gz`.
+
+        Raises
+        ------
+        BidsNameError
+            If the name is not a BIDS name.
+        ValueError
+            If `suffix` is empty, starts with a dot, or contains `_`, `-`,
+            `.` or `/`.
+        """
+        parsed = self._parsed_bids("set the suffix")
+        name = format_name(parsed.entities, check_suffix(suffix), parsed.extension)
+        return self.with_name(name)
+
+    def with_extension(self, extension: str) -> Self:
+        """Return a path whose name has another extension (`.nii.gz`).
+
+        Any name has an extension, so this works on non-BIDS names too.
+        """
+        return self.with_name(self.basename + check_extension(extension))
+
+    def with_basename(self, basename: str) -> Self:
+        """Return a path whose name has another basename, same extension."""
+        if not basename or "." in basename or "/" in basename:
+            raise ValueError(
+                f"invalid basename {basename!r}: it must be non-empty and "
+                "contain no '.' or '/'"
+            )
+        return self.with_name(basename + self.extension)
 
 
-class BidsFile(BidsPath, FancyFile):
-    """Class for BIDS files."""
-    ...
+def _seal(root: type) -> None:
+    """Record a family's classes and the class of each role on its root."""
+    classes = {root}
+    stack = [root]
+    while stack:
+        for sub in stack.pop().__subclasses__():
+            if sub not in classes:
+                classes.add(sub)
+                stack.append(sub)
+    root._root = root
+    root._builtin = frozenset(classes)
+    root._by_role = {
+        c.__dict__["_role"]: c for c in classes if c.__dict__.get("_role")
+    }
 
 
-class BidsJSONFile(BidsFile, FancyJSONFile):
+# -- concrete paths ------------------------------------------------------------
+class BidsPath(BidsPathMixin, Path):
+    """A BIDS file or directory, on any storage `bagof.paths.Path` supports.
+
+    The class is picked from the name; see the module documentation.
     """
-    A BIDS JSON file.
 
-    Examples
-    --------
-    >>> sidecar = BidsJSONFile("sub-01_task-rest_bold.json")
-    ...
-    ... # Read into a variable then write back
-    >>> content = sidecar.read()             # read content into var
-    >>> content["RepetitionTime"] = 2.0      # modify content in var
-    >>> content["EchoTime"] = 0.1            # ...
-    >>> sidecar.write(content)               # write content back to file
-    ...
-    ... # Load into the object then dump back
-    >>> sidecar.load()                       # load content into object
-    >>> sidecar["RepetitionTime"] = 2.0      # modify content in memory
-    >>> sidecar["EchoTime"] = 0.1            # ...
-    >>> sidecar.dump()                       # write changes back to file
-    ...
-    ... # Use as a context manager
-    >>> with sidecar as content:             # enter: load content into obj
-    ...     content["RepetitionTime"] = 2.0  # modify content in memory
-    ...     content["EchoTime"] = 0.1        # ...
-    ...                                      # exit: write changes back to file
-    ...
-    ... # Implicit read-modify-write
-    >>> TR = sidecar["RepetitionTime"]       # read content from disk
-    >>> sidecar["RepetitionTime"] = 2.0      # modify content on disk
-    """
-
-    def _read_json(self) -> JSONContent:
-        return JSONContent.load_from(self)
+    __slots__ = ()
 
 
-class BidsTSVFile(BidsFile):
-    """A BIDS TSV file.
+class BidsFile(BidsPath):
+    """A BIDS file."""
 
-    Examples
-    --------
-    >>> tsv = BidsTSVFile("participants.tsv")
-    >>>
-    >>> print(tsv.content)                   # load content
-    >>> tsv.content['sub-0001', 'age'] = 70  # modify content in memory
-    >>> tsv.write_content()                  # write changes back to file
-    >>>
-    >>> # Or use as a context manager (changes are saved on exit)
-    >>> with BidsTSVFile("participants.tsv") as content:
-    ...     content['sub-0001', 'age'] = 70
-    """
-    ...
+    __slots__ = ()
 
 
-class BidsDatasetDescriptionFile(BidsJSONFile):
-    """A BIDS dataset_description.json file."""
+class BidsDirectory(BidsPath):
+    """A BIDS directory."""
 
-    def _read_json(self) -> BidsDatasetDescriptionContent:
-        return BidsDatasetDescriptionContent.load_from(self)
-
-
-class BidsSidecarFile(BidsJSONFile):
-    """A BIDS sidecar JSON file."""
-
-    def _read_json(self) -> BidsSidecarContent:
-        return BidsSidecarContent.load_from(self)
-
-
-class BidsTableSidecarFile(BidsSidecarFile):
-    """A BIDS sidecar JSON file for a TSV file."""
-    ...
-
-
-class BidsParticipantsFile(BidsTSVFile):
-    """A BIDS participants.tsv file."""
-    ...
-
-
-class BidsParticipantsSidecarFile(BidsTableSidecarFile):
-    """A BIDS participants.json file."""
-    ...
-
-
-class BidsSessionsFile(BidsTSVFile):
-    """A BIDS sessions.tsv file."""
-    ...
-
-
-class BidsSessionsSidecarFile(BidsTableSidecarFile):
-    """A BIDS sessions.json file."""
-    ...
-
-
-class BidsSamplesFile(BidsTSVFile):
-    """A BIDS samples.tsv file."""
-    ...
-
-
-class BidsSamplesSidecarFile(BidsTableSidecarFile):
-    """A BIDS samples.json file."""
-    ...
-
-
-class BidsScansFile(BidsTSVFile):
-    """A BIDS scans.tsv file."""
-    ...
-
-
-class BidsScansSidecarFile(BidsTableSidecarFile):
-    """A BIDS scans.json file."""
-    ...
-
-
-class BidsPhenotypeFile(BidsTSVFile):
-    """A BIDS <phenotype>.tsv file."""
-    ...
-
-
-class BidsPhenotypeSidecarFile(BidsTableSidecarFile):
-    """A BIDS <phenotype>.json file."""
-    ...
+    __slots__ = ()
 
 
 class BidsCodeDirectory(BidsDirectory):
-    """A BIDS code/ directory."""
-    ...
+    """A BIDS `code/` directory."""
+
+    __slots__ = ()
+    _role = "code"
 
 
-REGISTERED_PATH_TYPES.update({
-    "dataset_description.json":
-        BidsDatasetDescriptionFile,
-    "participants.json":
-        BidsParticipantsSidecarFile,
-    "participants.tsv":
-        BidsParticipantsFile,
-    "sessions.json":
-        BidsSessionsSidecarFile,
-    "sessions.tsv":
-        BidsSessionsFile,
-    "*_sessions.tsv":
-        BidsSessionsFile,
-    "samples.json":
-        BidsSamplesSidecarFile,
-    "samples.tsv":
-        BidsSamplesFile,
-    "scans.json":
-        BidsScansSidecarFile,
-    "*_scans.json":
-        BidsScansSidecarFile,
-    "scans.tsv":
-        BidsScansFile,
-    "*_scans.tsv":
-        BidsScansFile,
-    (lambda x: x.parent.name == "phenotype" and x.suffix == ".json"):
-        BidsPhenotypeSidecarFile,
-    (lambda x: x.parent.name == "phenotype" and x.suffix == ".tsv"):
-        BidsPhenotypeFile,
-    (lambda x: x.name == "code"):
-        BidsCodeDirectory,
-    "*.json":
-        BidsSidecarFile,
-    "*.tsv":
-        BidsTSVFile,
-    (lambda x: x.is_dir()):
-        BidsDirectory,
-    (lambda x: x.is_file()):
-        BidsFile,
-})
+class BidsJSONFile(BidsFile):
+    """A BIDS JSON file."""
+
+    __slots__ = ()
+
+
+class BidsDatasetDescriptionFile(BidsJSONFile):
+    """A BIDS `dataset_description.json` file."""
+
+    __slots__ = ()
+    _role = "dataset_description"
+
+
+class BidsSidecarFile(BidsJSONFile):
+    """A BIDS JSON sidecar."""
+
+    __slots__ = ()
+    _role = "sidecar"
+
+
+class BidsTableSidecarFile(BidsSidecarFile):
+    """A BIDS JSON sidecar describing a TSV table's columns."""
+
+    __slots__ = ()
+
+
+class BidsTSVFile(BidsFile):
+    """A BIDS TSV table."""
+
+    __slots__ = ()
+    _role = "table"
+
+
+class BidsParticipantsFile(BidsTSVFile):
+    """A BIDS `participants.tsv` file."""
+
+    __slots__ = ()
+    _role = "participants"
+
+
+class BidsParticipantsSidecarFile(BidsTableSidecarFile):
+    """A BIDS `participants.json` file."""
+
+    __slots__ = ()
+    _role = "participants_sidecar"
+
+
+class BidsSessionsFile(BidsTSVFile):
+    """A BIDS `[sub-<label>_]sessions.tsv` file."""
+
+    __slots__ = ()
+    _role = "sessions"
+
+
+class BidsSessionsSidecarFile(BidsTableSidecarFile):
+    """A BIDS `[sub-<label>_]sessions.json` file."""
+
+    __slots__ = ()
+    _role = "sessions_sidecar"
+
+
+class BidsSamplesFile(BidsTSVFile):
+    """A BIDS `samples.tsv` file."""
+
+    __slots__ = ()
+    _role = "samples"
+
+
+class BidsSamplesSidecarFile(BidsTableSidecarFile):
+    """A BIDS `samples.json` file."""
+
+    __slots__ = ()
+    _role = "samples_sidecar"
+
+
+class BidsScansFile(BidsTSVFile):
+    """A BIDS `[sub-<label>[_ses-<label>]_]scans.tsv` file."""
+
+    __slots__ = ()
+    _role = "scans"
+
+
+class BidsScansSidecarFile(BidsTableSidecarFile):
+    """A BIDS `[sub-<label>[_ses-<label>]_]scans.json` file."""
+
+    __slots__ = ()
+    _role = "scans_sidecar"
+
+
+class BidsPhenotypeFile(BidsTSVFile):
+    """A BIDS `phenotype/<measurement>.tsv` file."""
+
+    __slots__ = ()
+    _role = "phenotype"
+
+
+class BidsPhenotypeSidecarFile(BidsTableSidecarFile):
+    """A BIDS `phenotype/<measurement>.json` file."""
+
+    __slots__ = ()
+    _role = "phenotype_sidecar"
+
+
+_seal(BidsPath)
+
+
+# -- pure paths ----------------------------------------------------------------
+class PureBidsPath(BidsPathMixin, PurePath):
+    """A BIDS file or directory name, for lexical operations only.
+
+    The same BIDS surface as `BidsPath`, over a `bagof.paths.PurePath`: a
+    local path or a remote URL is parsed with no backend and no I/O.
+    """
+
+    __slots__ = ()
+
+
+class PureBidsFile(PureBidsPath):
+    """A BIDS file name."""
+
+    __slots__ = ()
+
+
+class PureBidsDirectory(PureBidsPath):
+    """A BIDS directory name."""
+
+    __slots__ = ()
+
+
+class PureBidsCodeDirectory(PureBidsDirectory):
+    """A BIDS `code/` directory name."""
+
+    __slots__ = ()
+    _role = "code"
+
+
+class PureBidsJSONFile(PureBidsFile):
+    """A BIDS JSON file name."""
+
+    __slots__ = ()
+
+
+class PureBidsDatasetDescriptionFile(PureBidsJSONFile):
+    """A BIDS `dataset_description.json` name."""
+
+    __slots__ = ()
+    _role = "dataset_description"
+
+
+class PureBidsSidecarFile(PureBidsJSONFile):
+    """A BIDS JSON sidecar name."""
+
+    __slots__ = ()
+    _role = "sidecar"
+
+
+class PureBidsTableSidecarFile(PureBidsSidecarFile):
+    """A BIDS JSON sidecar name for a TSV table."""
+
+    __slots__ = ()
+
+
+class PureBidsTSVFile(PureBidsFile):
+    """A BIDS TSV table name."""
+
+    __slots__ = ()
+    _role = "table"
+
+
+class PureBidsParticipantsFile(PureBidsTSVFile):
+    """A BIDS `participants.tsv` name."""
+
+    __slots__ = ()
+    _role = "participants"
+
+
+class PureBidsParticipantsSidecarFile(PureBidsTableSidecarFile):
+    """A BIDS `participants.json` name."""
+
+    __slots__ = ()
+    _role = "participants_sidecar"
+
+
+class PureBidsSessionsFile(PureBidsTSVFile):
+    """A BIDS `[sub-<label>_]sessions.tsv` name."""
+
+    __slots__ = ()
+    _role = "sessions"
+
+
+class PureBidsSessionsSidecarFile(PureBidsTableSidecarFile):
+    """A BIDS `[sub-<label>_]sessions.json` name."""
+
+    __slots__ = ()
+    _role = "sessions_sidecar"
+
+
+class PureBidsSamplesFile(PureBidsTSVFile):
+    """A BIDS `samples.tsv` name."""
+
+    __slots__ = ()
+    _role = "samples"
+
+
+class PureBidsSamplesSidecarFile(PureBidsTableSidecarFile):
+    """A BIDS `samples.json` name."""
+
+    __slots__ = ()
+    _role = "samples_sidecar"
+
+
+class PureBidsScansFile(PureBidsTSVFile):
+    """A BIDS `[sub-<label>[_ses-<label>]_]scans.tsv` name."""
+
+    __slots__ = ()
+    _role = "scans"
+
+
+class PureBidsScansSidecarFile(PureBidsTableSidecarFile):
+    """A BIDS `[sub-<label>[_ses-<label>]_]scans.json` name."""
+
+    __slots__ = ()
+    _role = "scans_sidecar"
+
+
+class PureBidsPhenotypeFile(PureBidsTSVFile):
+    """A BIDS `phenotype/<measurement>.tsv` name."""
+
+    __slots__ = ()
+    _role = "phenotype"
+
+
+class PureBidsPhenotypeSidecarFile(PureBidsTableSidecarFile):
+    """A BIDS `phenotype/<measurement>.json` name."""
+
+    __slots__ = ()
+    _role = "phenotype_sidecar"
+
+
+_seal(PureBidsPath)

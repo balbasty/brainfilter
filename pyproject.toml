@@ -13,8 +13,14 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Medical Science Apps.",
 ]
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+  "bagof-paths >= 0.3",
+]
 dynamic = ["version"]
+
+[project.optional-dependencies]
+# universal-pathlib provides the memory:// backend the tests run against.
+test = ["pytest", "universal-pathlib"]
 
 
 [project.urls]
