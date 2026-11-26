@@ -83,7 +83,7 @@ toggle.name = "Switch to light mode"
 # - https://zensical.org/docs/authoring/icons-emojis/#search
 # ----------------------------------------------------------------------------
 [project.theme.icon]
-logo =  "material/sprout"
+logo =  "fontawesome/solid/filter"
 repo = "fontawesome/brands/github"
 
 # ----------------------------------------------------------------------------
