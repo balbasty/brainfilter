@@ -104,3 +104,16 @@ def test_and_or():
         And(1)
     with pytest.raises(NotACondition.Error):
         Or(1)
+
+
+def test_regex_full_defaults_to_the_caller():
+    r = Regex("a")
+    assert r.full is None and r("ba")           # searches when used alone
+    assert repr(Regex("a", full=False)) == "Regex(re.compile('a'), full=False)"
+    # an explicit `full` survives a copy and Regexish
+    assert Regex(Regex("a", full=True)).full is True
+    assert Regexish(Regex("a"), full=True).full is True
+    assert not Regexish(Regex("a"), full=True)("ba")
+    assert Regexish(Regex("a", full=False), full=True).full is False
+    either = Regexish(Or(Regex("a"), Regex("b", full=False)), full=True)
+    assert [c.full for c in either.cond] == [True, False]

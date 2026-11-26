@@ -55,7 +55,9 @@ class Regexish(Condition):
     """A regex, or any-of (`Or`) several regexes.
 
     `Regexish("a", "b")` matches a value that matches `a` or `b`, the same
-    rule as `Globish`. `full=True` is passed on to each `Regex`.
+    rule as `Globish`. `full=` is passed on to each `Regex`, including one
+    given already built (`Regexish(Regex("a"), full=True)`) that did not
+    choose for itself; a `Regex` built with an explicit `full=` keeps it.
     """
 
     def __new__(cls, *args, **kwargs) -> "Regexish":
@@ -67,7 +69,7 @@ class Regexish(Condition):
         elif len(args) == 0:
             raise ValueError("At least one argument required")
         elif isinstance(args[0], Condition):
-            return args[0]
+            return default_full(args[0], kwargs.get("full"))
         else:
             return Regex(args[0], **kwargs)
 
@@ -75,16 +77,22 @@ class Regexish(Condition):
 class Regex(Regexish):
     """A regex condition.
 
-    By default it matches a value it is found anywhere in
-    (`re.Pattern.search`); with `full=True` it must match the whole value
-    (`re.Pattern.fullmatch`).
+    With `full=True` it must match the whole value (`re.Pattern.fullmatch`);
+    with `full=False` it matches a value it is found anywhere in
+    (`re.Pattern.search`). The default, `full=None`, leaves the choice to
+    where the regex is used: it searches, except where a whole value is
+    expected, such as a label filter of `brainfilter.filter.Filter`.
     """
 
-    def __init__(self, pattern: re.Pattern | str, full: bool = False) -> None:
+    def __init__(
+        self, pattern: re.Pattern | str, full: bool | None = None
+    ) -> None:
         if pattern is self:
             # `Regexish(regex)` returned `regex`, which Python re-initializes
             return
         if isinstance(pattern, Regex):
+            if full is None:
+                full = pattern.full
             pattern = pattern.pattern
         if isinstance(pattern, str):
             pattern = re.compile(pattern)
@@ -95,8 +103,8 @@ class Regex(Regexish):
         return str(self.pattern)
 
     def __repr__(self) -> str:
-        if self.full:
-            return f"Regex({str(self)}, full=True)"
+        if self.full is not None:
+            return f"Regex({str(self)}, full={self.full})"
         return f"Regex({str(self)})"
 
     def __call__(self, value: str | Path) -> bool:
@@ -104,6 +112,22 @@ class Regex(Regexish):
         if self.full:
             return self.pattern.fullmatch(str(value)) is not None
         return self.pattern.search(str(value)) is not None
+
+
+def default_full(cond: Condition, full: bool | None) -> Condition:
+    """Give `full` to the regexes in `cond` that left it to their caller.
+
+    A `Regex` whose `full` is `None` becomes one with `full`; one with an
+    explicit `full` is kept. `And` and `Or` are rebuilt around their
+    conditions; any other condition is returned as it is.
+    """
+    if full is None:
+        return cond
+    if isinstance(cond, Regex):
+        return cond if cond.full is not None else Regex(cond.pattern, full=full)
+    if type(cond) in (And, Or):
+        return type(cond)(*(default_full(c, full) for c in cond.cond))
+    return cond
 
 
 class Globish(Condition):
