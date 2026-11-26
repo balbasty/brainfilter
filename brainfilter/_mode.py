@@ -3,8 +3,9 @@
 A path is read-only (`"r"`) unless it was built with `mode="w"` or
 returned by `with_mode("w")`. The mode is held on the path object and
 carried onto every path derived from it. It is a brainfilter rule, not a
-filesystem permission: the wrapped driver object (`path.wrapped`) is not
-guarded.
+filesystem permission: the wrapped driver object (`path.wrapped`) and the
+backend's own handles (`path.fs`, `path.client`) reach the storage directly
+and are not guarded.
 """
 from __future__ import annotations
 

@@ -498,15 +498,17 @@ class Table(list):
     def _set_column(self, name: str, values: list) -> None:
         """Set the values of a column, adding it last if it is new.
 
-        A table with no column yet gets one row per value.
+        A table with no row yet (no column either, or a header alone) gets
+        one row per value, `n/a` in its other columns.
 
         Raises
         ------
         ValueError
             If `values` has not one value per row.
         """
-        if not self and not self.columns:
-            self.extend({} for _ in values)
+        if not self:
+            header = self.columns
+            self.extend(dict.fromkeys(header) for _ in values)
         if len(values) != len(self):
             raise ValueError(
                 f"column {name!r} is given {len(values)} values, but the "

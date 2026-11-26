@@ -41,9 +41,13 @@ their exact text.
 
 A transaction covers the files below its root, in the thread or task that
 opened it (and the tasks started inside it), while it is open. A write
-through the tree once it has closed (from a task that outlived the block,
-say, or during its commit) raises `RuntimeError` rather than being lost or
-written past the commit. Transactions on overlapping trees cannot be nested,
+through the tree to one of those files from anywhere else raises
+`RuntimeError` rather than being lost or written past the transaction:
+from another thread (a `threading.Thread` or a `ThreadPoolExecutor` worker
+does not share the block's context, so it does not join the transaction),
+from a task started outside the block, and, once the block has closed, from
+a task that outlived it or during its commit. Transactions on overlapping
+trees cannot be nested, nor be open at once in two threads or tasks,
 whether sync or async; on disjoint trees they can. A file is known by its
 location: two names for one file (`sub-01/../T1w.json` and `T1w.json`, or a
 symbolic link and its target on a local disk) share one entry. A file is
@@ -80,12 +84,19 @@ If the commit is interrupted by an exception that is not an error
 propagates as itself, with a note (PEP 678, `__notes__`) saying which files
 were written and which were not.
 
-A write outside a block raises the error of its one write directly.
+A write outside a block raises the error of its one write directly. Two
+writes to one file outside a block are made one after the other, so that
+neither is lost: through the sync family across the threads of the
+process, and through the async family across the tasks of one event loop.
+Writes from other processes are not coordinated: the last replace wins.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import copy
 import os
+import threading
 from contextvars import ContextVar
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any
@@ -94,7 +105,7 @@ from brainfilter import _content
 from brainfilter._family import in_family
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
     from types import TracebackType
 
     from brainfilter.bidspath import AsyncBidsPath, BidsPath
@@ -106,6 +117,12 @@ _ACTIVE: ContextVar[tuple[_TransactionBase, ...]] = ContextVar(
     "brainfilter_transactions", default=()
 )
 
+# Every transaction open (or committing) in the process, whatever context
+# opened it, guarded by `_REGISTRY_LOCK`: a write from another context to a
+# file one of them covers is refused rather than written past it.
+_REGISTRY_LOCK = threading.Lock()
+_REGISTRY: list[_TransactionBase] = []
+
 
 def active_for(
     path: object, *, write: bool = False
@@ -114,16 +131,39 @@ def active_for(
 
     A transaction that has closed (or is committing) is not active, but a
     task started inside it still sees it: with `write`, such a transaction
-    raises `RuntimeError`, since a write through it would be lost.
+    raises `RuntimeError`, since a write through it would be lost. With
+    `write`, a transaction that covers `path` but was opened in another
+    context (a thread, or a task not started inside its block) raises
+    `RuntimeError` too: the write would go past it.
     """
+    own = _ACTIVE.get()
     closed = None
-    for tx in _ACTIVE.get():
+    for tx in own:
         if tx.covers(path):
             if tx._state == _OPEN:
                 return tx
             closed = closed or tx
-    if write and closed is not None:
-        raise closed._closed_error(path)
+    if write:
+        if closed is not None:
+            raise closed._closed_error(path)
+        elsewhere = _open_elsewhere(path, own)
+        if elsewhere is not None:
+            raise elsewhere._elsewhere_error(path)
+    return None
+
+
+def _open_elsewhere(
+    path: object, own: tuple[_TransactionBase, ...]
+) -> _TransactionBase | None:
+    """Return a transaction covering `path` that this context is not in."""
+    with _REGISTRY_LOCK:
+        others = [tx for tx in _REGISTRY if not any(tx is t for t in own)]
+    if not others:
+        return None
+    location = _location(path)
+    for tx in others:
+        if _within(location, tx._location):
+            return tx
     return None
 
 
@@ -206,6 +246,86 @@ def _write_path(path: Any, location: tuple[str, Any]) -> Any:  # noqa: ANN401
     if clean is path or location[0] == "remote":
         return clean
     return clean if _location(clean) == location else path
+
+
+# -- one write at a time per file ---------------------------------------------------
+
+class _Slot:
+    """A lock, and how many writes hold it or wait for it."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self, lock: object) -> None:
+        self.lock = lock
+        self.users = 0
+
+
+# `location -> slot` for the sync family, and `loop -> {location -> slot}`
+# for the async one (an `asyncio.Lock` belongs to one event loop). A slot
+# is dropped when its last user lets it go (a cancelled wait included), and
+# a loop's table with its last slot, so neither holds a file or a loop that
+# no write is using. Both are changed under `_LOCKS_LOCK`.
+_LOCKS_LOCK = threading.Lock()
+_LOCKS: dict[object, _Slot] = {}
+_ALOCKS: dict[asyncio.AbstractEventLoop, dict[object, _Slot]] = {}
+
+
+def _take(table: dict[object, _Slot], location: object,
+          new: Callable[[], object]) -> _Slot:
+    slot = table.get(location)
+    if slot is None:
+        slot = table[location] = _Slot(new())
+    slot.users += 1
+    return slot
+
+
+def _let_go(table: dict[object, _Slot], location: object, slot: _Slot) -> None:
+    slot.users -= 1
+    if not slot.users:
+        del table[location]
+
+
+@contextlib.contextmanager
+def file_lock(path: object) -> Iterator[None]:
+    """Hold the lock on the file at `path` (by location) for a block.
+
+    One write through at a time per file, across the threads of the
+    process: a read, change and replace of the file is not interleaved with
+    another of the same file.
+    """
+    location = _location(path)
+    with _LOCKS_LOCK:
+        slot = _take(_LOCKS, location, threading.Lock)
+    try:
+        with slot.lock:  # type: ignore[attr-defined]
+            yield
+    finally:
+        with _LOCKS_LOCK:
+            _let_go(_LOCKS, location, slot)
+
+
+@contextlib.asynccontextmanager
+async def afile_lock(path: object) -> AsyncIterator[None]:
+    """Hold the lock on the file at `path` for a block, in this event loop.
+
+    The async counterpart of `file_lock`: one write through at a time per
+    file, across the tasks of the running event loop.
+    """
+    location = _location(path)
+    loop = asyncio.get_running_loop()
+    with _LOCKS_LOCK:
+        table = _ALOCKS.get(loop)
+        if table is None:
+            table = _ALOCKS[loop] = {}
+        slot = _take(table, location, asyncio.Lock)
+    try:
+        async with slot.lock:  # type: ignore[attr-defined]
+            yield
+    finally:
+        with _LOCKS_LOCK:
+            _let_go(table, location, slot)
+            if not table:
+                _ALOCKS.pop(loop, None)
 
 
 # -- the buffer (pure) ------------------------------------------------------------
@@ -473,12 +593,29 @@ class _TransactionBase:
                     "transactions on the same files cannot be nested, "
                     "whether sync or async"
                 )
+        with _REGISTRY_LOCK:
+            for other in _REGISTRY:
+                if self._overlaps(other):
+                    raise RuntimeError(
+                        f"a transaction on {str(other._root)!r} is already "
+                        f"{_doing(other)} in another thread or task; "
+                        "transactions on the same files cannot be open at "
+                        "once: open this one after it ends"
+                    )
+            _REGISTRY.append(self)
         _ACTIVE.set((*active, self))
         self._state = _OPEN
 
     def _close(self) -> None:
         _ACTIVE.set(tuple(t for t in _ACTIVE.get() if t is not self))
         self._state = _COMMITTING
+
+    def _finish(self) -> None:
+        """Drop the held files, and let other contexts write the files."""
+        self._buffer.clear()
+        self._state = _DONE
+        with _REGISTRY_LOCK:
+            _REGISTRY[:] = [t for t in _REGISTRY if t is not self]
 
     def _closed_error(self, path: object) -> RuntimeError:
         when = (
@@ -490,6 +627,18 @@ class _TransactionBase:
             f"{str(self._root)!r} {when}, so the edit would be lost; make "
             "every edit inside the transaction's block (await the tasks "
             "that make them before it ends)"
+        )
+
+    def _elsewhere_error(self, path: object) -> RuntimeError:
+        if self._state == _COMMITTING:
+            return self._closed_error(path)
+        return RuntimeError(
+            f"cannot edit {str(path)!r}: a transaction on "
+            f"{str(self._root)!r} is open in another thread or task, and "
+            "this write would go past it (it would be written now, whatever "
+            "the transaction does, and its commit could overwrite it); make "
+            "the edit inside the transaction's block (a task started there "
+            "shares it, a thread does not), or after it ends"
         )
 
     def _target(self, path: object) -> Any:  # noqa: ANN401
@@ -525,6 +674,10 @@ class _TransactionBase:
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({str(self._root)!r})"
+
+
+def _doing(tx: _TransactionBase) -> str:
+    return "being committed" if tx._state == _COMMITTING else "open"
 
 
 def write_file(path: BidsPath, data: bytes) -> None:
@@ -577,8 +730,7 @@ class Transaction(_TransactionBase):
             if exc_type is None:
                 self._commit()
         finally:
-            self._buffer.clear()
-            self._state = _DONE
+            self._finish()
 
     def _commit(self) -> None:
         plan = self._buffer.plan()
@@ -624,8 +776,7 @@ class AsyncTransaction(_TransactionBase):
             if exc_type is None:
                 await self._commit()
         finally:
-            self._buffer.clear()
-            self._state = _DONE
+            self._finish()
 
     async def _commit(self) -> None:
         plan = self._buffer.plan()

@@ -179,6 +179,18 @@ def _column(table: Table, name: object) -> list:
     return [row.get(name) for row in table]
 
 
+def _column_values(column: str, values: object) -> list:
+    """Return a copy of `values` as a list: one value per row of `column`."""
+    if isinstance(values, (str, bytes, bytearray, Mapping)):
+        raise TypeError(
+            f"the values of column {column!r} cannot be a "
+            f"{type(values).__name__}: give one value per row, as a list "
+            "(a string is not split into its characters); to give every row "
+            "the same value, repeat it: [value] * number_of_rows"
+        )
+    return copy.deepcopy(list(values))  # type: ignore[call-overload]
+
+
 def _new_table(rows: Iterable[Mapping[str, object]], columns: object,
                origin: object) -> Table:
     """Return `rows` as the table a file holds in place of `origin`.
@@ -280,10 +292,14 @@ class SidecarChain(ChainMap):
         *maps: Mapping,
         sidecars: Iterable[Any] = (),
         owner: object = None,
+        _farther: bool = False,
     ) -> None:
         super().__init__(*maps)
         self.sidecars = tuple(sidecars)
         self._owner = owner
+        # Whether this is the `parents` of another chain: the sidecars
+        # farther than the nearest one.
+        self._farther = _farther
 
     def as_dict(self) -> dict:
         """Return the merged content as a plain `dict`: the nearest wins."""
@@ -291,6 +307,13 @@ class SidecarChain(ChainMap):
 
     def _nearest(self) -> Any:  # noqa: ANN401
         if not self.sidecars:
+            if self._farther:
+                raise TypeError(
+                    f"cannot write the farther sidecars of "
+                    f"{str(self._owner)!r}: there is no farther sidecar, so "
+                    "there is no file to write to; write to the nearer "
+                    "sidecars instead"
+                )
             raise _no_sidecar_error(self._owner)
         return self.sidecars[0]
 
@@ -354,7 +377,8 @@ class SidecarChain(ChainMap):
     def parents(self) -> Self:
         """The chain of every sidecar but the nearest; writes go to the next."""
         return type(self)(
-            *self.maps[1:], sidecars=self.sidecars[1:], owner=self._owner
+            *self.maps[1:], sidecars=self.sidecars[1:], owner=self._owner,
+            _farther=True,
         )
 
 
@@ -627,7 +651,9 @@ class _ContentMixin:
 
         Inside a transaction, a change that raises leaves the content as it
         was. Outside one, the file is read, changed and written in one
-        atomic replace; a change that raises writes nothing.
+        atomic replace, holding the file's lock, so concurrent writes to one
+        file are made one after the other; a change that raises writes
+        nothing.
         """
         require_writable(self, _WRITE)
         tx = active_for(self, write=True)
@@ -640,10 +666,13 @@ class _ContentMixin:
                 restore()
                 raise
             return
-        buffer = _Buffer()
-        change(self._load(buffer, create=True))
-        for path, data in buffer.plan():
-            _transaction.write_file(path, data)
+        # One read-change-write at a time per file, so that two writes to
+        # the same file (from two threads) do not lose one of them.
+        with _transaction.file_lock(self):
+            buffer = _Buffer()
+            change(self._load(buffer, create=True))
+            for path, data in buffer.plan():
+                _transaction.write_file(path, data)
 
 
 class JSONContentMixin(_ContentMixin):
@@ -858,10 +887,12 @@ class TSVContentMixin(_ContentMixin):
     def __setitem__(self, column: str, values: Iterable[object]) -> None:
         """Set a column, adding it last if it is new: one value per row.
 
-        In a table with no column yet (a new file), the first column sets
-        the number of rows.
+        In a table with no row yet (a new file, or a header alone), the
+        first column set gives the number of rows, and the other columns
+        are `n/a` in them. `values` is a list or another iterable of values;
+        a `str`, `bytes` or mapping raises `TypeError`.
         """
-        values = copy.deepcopy(list(values))
+        values = _column_values(column, values)
         self._change(lambda entry: entry.content._set_column(column, values))
 
     def __delitem__(self, column: str) -> None:
@@ -1105,10 +1136,13 @@ class _AsyncContentMixin:
                 restore()
                 raise
             return
-        buffer = _Buffer()
-        change(await self._load(buffer, create=True))
-        for path, data in buffer.plan():
-            await _transaction.awrite_file(path, data)
+        # One read-change-write at a time per file, across the tasks of
+        # this event loop (see `_ContentMixin._change`).
+        async with _transaction.afile_lock(self):
+            buffer = _Buffer()
+            change(await self._load(buffer, create=True))
+            for path, data in buffer.plan():
+                await _transaction.awrite_file(path, data)
 
 
 class AsyncJSONContentMixin(_AsyncContentMixin):
@@ -1288,8 +1322,13 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
 
     # -- writes --------------------------------------------------------------
     async def set(self, column: str, values: Iterable[object]) -> None:
-        """Set a column, adding it last if it is new: one value per row."""
-        values = copy.deepcopy(list(values))
+        """Set a column, adding it last if it is new: one value per row.
+
+        As `BidsPath.__setitem__`: in a table with no row yet, the first
+        column set gives the number of rows; a `str`, `bytes` or mapping
+        raises `TypeError`.
+        """
+        values = _column_values(column, values)
         await self._change(
             lambda entry: entry.content._set_column(column, values)
         )

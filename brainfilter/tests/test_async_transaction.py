@@ -569,3 +569,162 @@ async def test_sidecar_without_a_sidecar_refuses_writes(ds):
         with pytest.raises(TypeError, match="no JSON sidecar"):
             await meta.delete("EchoTime")
     assert tx.written == []
+
+
+async def test_farther_sidecars_name_what_is_missing(ds):
+    meta = await (ds / T1W).sidecar
+    farthest = meta
+    for _ in meta.sidecars:
+        farthest = farthest.parents
+    assert type(farthest) is type(meta) and farthest.sidecars == ()
+    with pytest.raises(TypeError, match="no farther sidecar"):
+        await farthest.set("x", 1)
+    with pytest.raises(TypeError, match="no farther sidecar"):
+        await farthest.update(x=1)
+
+
+# -- concurrent writes through ----------------------------------------------------
+
+@pytest.fixture
+def slow_writes(monkeypatch):
+    """Widen the gap between reading a file and replacing it (see the sync)."""
+    from brainfilter import transaction as T
+
+    real = T.awrite_file
+
+    async def awrite_file(path, data):
+        await asyncio.sleep(0.005)
+        await real(path, data)
+
+    monkeypatch.setattr(T, "awrite_file", awrite_file)
+
+
+async def test_concurrent_sets_all_survive(ds, slow_writes):
+    from brainfilter import transaction as T
+
+    sidecar = ds / "T1w.json"
+    await asyncio.gather(*(sidecar.set(k, 1) for k in "abcdef"))
+    content = await on_disk(sidecar)
+    assert {k: 1 for k in "abcdef"}.items() <= content.items()
+    assert asyncio.get_running_loop() not in T._ALOCKS   # nothing kept
+
+
+async def test_concurrent_tsv_columns_all_survive(ds, slow_writes):
+    table = ds / "participants.tsv"
+    await asyncio.gather(
+        table.set("x", [1, 2]), table.set("y", ["a", "b"]),
+        (ds / "sub-01" / ".." / "participants.tsv").set("z", [3, 4]),
+    )
+    columns = await table.as_dict()
+    assert columns["x"] == [1, 2] and columns["y"] == ["a", "b"]
+    assert columns["z"] == [3, 4]
+
+
+async def test_a_cancelled_write_lets_go_of_its_lock(ds, monkeypatch):
+    from brainfilter import transaction as T
+
+    real = T.awrite_file
+    writing, release = asyncio.Event(), asyncio.Event()
+
+    async def awrite_file(path, data):
+        writing.set()
+        await release.wait()
+        await real(path, data)
+
+    monkeypatch.setattr(T, "awrite_file", awrite_file)
+    sidecar = ds / "T1w.json"
+    first = asyncio.create_task(sidecar.set("First", 1))
+    await writing.wait()
+    waiting = asyncio.create_task(sidecar.set("Cancelled", 1))
+    await asyncio.sleep(0)                      # waits for the lock
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    release.set()
+    await first
+    content = await on_disk(sidecar)
+    assert content["First"] == 1 and "Cancelled" not in content
+    assert asyncio.get_running_loop() not in T._ALOCKS
+
+
+def test_each_event_loop_has_its_own_locks(tmp_path):
+    from brainfilter import transaction as T
+
+    _populate(BidsPath(str(tmp_path / "ds")))
+    ds = AsyncBidsPath(str(tmp_path / "ds"), mode="w")
+    for run in range(2):                        # two loops, one after the other
+        asyncio.run((ds / "T1w.json").set(f"Run{run}", run))
+    content = json.loads((tmp_path / "ds" / "T1w.json").read_text())
+    assert content["Run0"] == 0 and content["Run1"] == 1
+    assert len(T._ALOCKS) == 0
+
+
+# -- a transaction is not joined from another task or thread ------------------------
+
+async def test_a_task_from_outside_cannot_write_past_a_transaction(ds):
+    sidecar = ds / "T1w.json"
+    go, done = asyncio.Event(), asyncio.Event()
+
+    async def outside():
+        await go.wait()
+        try:
+            await sidecar.set("Outside", 1)
+        finally:
+            done.set()
+
+    task = asyncio.create_task(outside())       # started before the block
+    with pytest.raises(RuntimeError, match="boom"):
+        async with ds:
+            await sidecar.set("Inside", 1)
+            go.set()
+            await done.wait()
+            with pytest.raises(RuntimeError, match="another thread or task"):
+                await task
+            raise RuntimeError("boom")
+    assert await on_disk(sidecar) == FILES["T1w.json"]
+
+
+async def test_a_thread_cannot_write_past_an_async_transaction(local_ds):
+    # local only: the sync family cannot use memory:// once it is async here
+    import threading
+
+    ds = local_ds
+    raised = []
+
+    def thread():
+        try:
+            BidsPath(str(ds), mode="w")["T1w.json"]["Thread"] = 1
+        except RuntimeError as error:
+            raised.append(error)
+
+    async with ds:
+        await (ds / "T1w.json").set("Inside", 1)
+        worker = threading.Thread(target=thread)
+        worker.start()
+        await asyncio.to_thread(worker.join)
+    assert len(raised) == 1 and "another thread or task" in str(raised[0])
+    assert await on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "Inside": 1}
+
+
+# -- column values, and a table with a header and no row -------------------------
+
+@pytest.mark.parametrize("values", ["RL", b"RL", {"a": 1, "b": 2}])
+async def test_a_column_is_not_split_from_a_string_or_mapping(ds, values):
+    table = ds / "participants.tsv"
+    with pytest.raises(TypeError, match="one value per row"):
+        await table.set("s", values)
+    async with ds:
+        with pytest.raises(TypeError, match="one value per row"):
+            await table.set("s", values)
+    assert await table.read_text() == PARTICIPANTS
+
+
+async def test_a_header_only_table_takes_its_first_column(ds):
+    scans = ds / "sub-01" / "sub-01_scans.tsv"
+    await scans.write_text("filename\tacq_time\n")
+    await scans.set("filename", ["anat/a.nii"])
+    assert await scans.read_text() == "filename\tacq_time\nanat/a.nii\tn/a\n"
+    await scans.write_text("filename\n")
+    async with ds:
+        await scans.set("extra", [1, 2])
+    assert await scans.read_text() == "filename\textra\nn/a\t1\nn/a\t2\n"

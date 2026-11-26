@@ -912,3 +912,219 @@ def test_sidecar_without_a_sidecar_refuses_writes(ds):
     assert tx.written == []
     with pytest.raises(TypeError, match="no JSON sidecar"):
         data.sidecar["EchoTime"] = 0.03
+
+
+def test_farther_sidecars_name_what_is_missing(ds):
+    meta = (ds / T1W).sidecar
+    farthest = meta
+    for _ in meta.sidecars:
+        farthest = farthest.parents
+    assert farthest.sidecars == () and dict(farthest) == {}
+    for write in (
+        lambda: farthest.__setitem__("x", 1),
+        lambda: farthest.__delitem__("x"),
+        lambda: farthest.update(x=1),
+        lambda: farthest.clear(),
+    ):
+        with pytest.raises(TypeError, match="no farther sidecar") as info:
+            write()
+        assert "no JSON sidecar applies" not in str(info.value)
+
+
+# -- concurrent writes through ----------------------------------------------------
+
+@pytest.fixture
+def slow_writes(monkeypatch):
+    """Widen the gap between reading a file and replacing it.
+
+    Without a lock per file, every concurrent write then reads the file
+    before any of them replaces it, and all but one change are lost.
+    """
+    import time
+
+    from brainfilter import transaction as T
+
+    real = T.write_file
+
+    def write_file(path, data):
+        time.sleep(0.005)
+        real(path, data)
+
+    monkeypatch.setattr(T, "write_file", write_file)
+
+
+def test_threaded_writes_to_one_file_all_survive(ds, slow_writes):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brainfilter import transaction as T
+
+    sidecar = ds / "T1w.json"
+    other = ds / "sub-01" / ".." / "T1w.json"   # another name, one file
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        done = [
+            pool.submit((sidecar if i % 2 else other).__setitem__, f"K{i}", i)
+            for i in range(16)
+        ]
+        for future in done:
+            future.result()
+    content = on_disk(sidecar)
+    assert {f"K{i}": i for i in range(16)}.items() <= content.items()
+    assert T._LOCKS == {}                       # nothing kept once done
+
+
+def test_threaded_tsv_columns_all_survive(ds, slow_writes):
+    from concurrent.futures import ThreadPoolExecutor
+
+    table = ds / "participants.tsv"
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        done = [
+            pool.submit(table.__setitem__, f"c{i}", [i, i + 1]) for i in range(6)
+        ]
+        for future in done:
+            future.result()
+    keys = table.keys()                         # in the order they landed
+    assert keys[:3] == ["participant_id", "age", "sex"]
+    assert sorted(keys[3:]) == [f"c{i}" for i in range(6)]
+    assert table.as_dict()["c3"] == [3, 4]
+
+
+def test_a_failed_write_lets_go_of_its_lock(ds):
+    from brainfilter import transaction as T
+
+    with pytest.raises(ValueError, match="one value per row"):
+        ds["participants.tsv"]["x"] = [1]
+    assert T._LOCKS == {}
+    ds["participants.tsv"]["x"] = [1, 2]        # not held by the failure
+    assert ds["participants.tsv"]["x"] == [1, 2]
+
+
+# -- a transaction is not joined from another thread --------------------------------
+
+def test_a_thread_cannot_write_past_a_transaction(ds):
+    from concurrent.futures import ThreadPoolExecutor
+
+    def write(path, key):
+        path[key] = 1
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with pytest.raises(RuntimeError, match="boom"):
+            with ds:
+                ds["T1w.json"]["Inside"] = 1
+                for path in (ds / "T1w.json", ds / "dwi.json",
+                             ds / "sub-01" / "sub-01_new.json"):
+                    future = pool.submit(write, path, "Thread")
+                    with pytest.raises(RuntimeError) as info:
+                        future.result()
+                    message = str(info.value)
+                    assert "another thread or task" in message
+                    assert str(path) in message and str(ds) in message
+                future = pool.submit(
+                    (ds / "participants.tsv").__setitem__, "x", [1, 2]
+                )
+                with pytest.raises(RuntimeError, match="another thread"):
+                    future.result()
+                # nor does a transaction open there on the same files
+                future = pool.submit(lambda: ds["sub-01"].__enter__())
+                with pytest.raises(RuntimeError, match="already open in "
+                                   "another thread or task"):
+                    future.result()
+                raise RuntimeError("boom")
+        # nothing the thread tried was written, and nothing of the block
+        assert on_disk(ds / "T1w.json") == FILES["T1w.json"]
+        assert on_disk(ds / "dwi.json") == FILES["dwi.json"]
+        assert not (ds / "sub-01" / "sub-01_new.json").exists()
+        assert "x" not in ds["participants.tsv"].keys()
+        # once the block has ended, the thread writes through again
+        pool.submit(write, ds / "dwi.json", "After").result()
+    assert on_disk(ds / "dwi.json")["After"] == 1
+
+
+def test_a_thread_writes_outside_the_transaction_root(ds):
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with ds["sub-01"].transaction() as tx:
+            ds["sub-01"]["sub-01_T1w.json"]["Inside"] = 1
+            # a file the block does not cover, and a disjoint transaction
+            pool.submit(ds["T1w.json"].__setitem__, "Thread", 1).result()
+
+            def disjoint():
+                with ds["sub-02"]:
+                    ds["sub-02"]["sub-02_T1w.json"] = {"Thread": 1}
+
+            pool.submit(disjoint).result()
+            assert on_disk(ds / "T1w.json")["Thread"] == 1
+    assert tx.written == [ds / "sub-01" / "sub-01_T1w.json"]
+    assert on_disk(ds / "sub-02" / "sub-02_T1w.json") == {"Thread": 1}
+
+
+def test_a_write_during_the_commit_from_the_block_raises(ds, monkeypatch):
+    from brainfilter import transaction as T
+
+    real = T.write_file
+    seen = []
+
+    def write_file(path, data):
+        # the context that opened the block, while it commits
+        try:
+            ds["dwi.json"]["Late"] = 1
+        except RuntimeError as error:
+            seen.append(str(error))
+        real(path, data)
+
+    monkeypatch.setattr(T, "write_file", write_file)
+    with ds:
+        ds["T1w.json"]["Edited"] = 1
+    assert len(seen) == 1 and "being committed" in seen[0]
+    assert on_disk(ds / "dwi.json") == FILES["dwi.json"]
+    assert T._REGISTRY == []
+
+
+# -- column values ------------------------------------------------------------------
+
+@pytest.mark.parametrize("values", ["RL", b"RL", bytearray(b"RL"),
+                                    {"a": 1, "b": 2}])
+def test_a_column_is_not_split_from_a_string_or_mapping(ds, values):
+    table = ds["participants.tsv"]
+    with pytest.raises(TypeError, match="one value per row") as info:
+        table["s"] = values
+    assert type(values).__name__ in str(info.value)
+    assert table.read_text() == PARTICIPANTS
+    with ds:
+        with pytest.raises(TypeError, match="one value per row"):
+            table["s"] = values
+    assert table.read_text() == PARTICIPANTS
+    table["s"] = ("R", "L")                     # any other iterable is fine
+    assert table["s"] == ["R", "L"]
+
+
+# -- a table with a header and no row -------------------------------------------------
+
+@pytest.mark.parametrize("in_transaction", [False, True])
+def test_a_header_only_table_takes_its_first_column(ds, in_transaction):
+    scans = ds / "sub-01" / "sub-01_scans.tsv"
+    scans.write_text("filename\tacq_time\n")
+    table = ds["sub-01"]["sub-01_scans.tsv"]
+    assert table.as_list() == [] and table.keys() == ["filename", "acq_time"]
+
+    def edit():
+        table["filename"] = ["anat/a.nii", "anat/b.nii"]
+        table["note"] = ["x", None]
+
+    if in_transaction:
+        with ds:
+            edit()
+    else:
+        edit()
+    assert scans.read_text() == (
+        "filename\tacq_time\tnote\nanat/a.nii\tn/a\tx\nanat/b.nii\tn/a\tn/a\n"
+    )
+    with pytest.raises(ValueError, match="one value per row"):
+        table["more"] = [1]
+
+
+def test_a_header_only_table_takes_a_new_column(ds):
+    scans = ds / "sub-01" / "sub-01_scans.tsv"
+    scans.write_text("filename\n")
+    ds["sub-01"]["sub-01_scans.tsv"]["extra"] = [1]
+    assert scans.read_text() == "filename\textra\nn/a\t1\n"

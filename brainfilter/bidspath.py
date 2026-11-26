@@ -35,7 +35,8 @@ writable too::
     'w'
 
 The mode is a brainfilter rule, not a filesystem permission: the wrapped
-driver object (`path.wrapped`) does not check it.
+driver object (`path.wrapped`) and the backend's own handles (`path.fs`,
+`path.client`) reach the storage directly and do not check it.
 
 !!! warning "`suffix` is the BIDS suffix"
     On these paths `suffix` is the BIDS suffix (`T1w`) and `with_suffix`
@@ -276,7 +277,8 @@ class BidsPathMixin:
         Every path derived from this one (`/`, `parent`, `with_*`, the
         children a listing yields, `sidecars`) has the same mode. The mode
         is a brainfilter rule, not a filesystem permission: the wrapped
-        driver object (`wrapped`) does not check it.
+        driver object (`wrapped`) and the backend's own handles (`fs`,
+        `client`) reach the storage directly and do not check it.
         """
         return getattr(self, "_mode", "r")
 
