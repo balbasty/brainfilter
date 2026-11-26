@@ -49,6 +49,10 @@ build-backend = "setuptools.build_meta"
 [tool.versioningit]
 default-version = "0+unknown"
 
+[tool.versioningit.vcs]
+# Version used when the repository has no tag yet
+default-tag = "0.1"
+
 [tool.versioningit.format]
 # Same format as versioneer
 distance = "{base_version}+{distance}.{vcs}{rev}"

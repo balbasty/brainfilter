@@ -1,0 +1,95 @@
+name: Publish to PyPI
+
+# Builds the sdist and wheel, tests the wheel, and publishes with PyPI
+# trusted publishing (OIDC): there is no API-token secret.
+#
+# One-time setup, on PyPI (and on TestPyPI for test runs): add a trusted
+# publisher for balbasty/brainfilter with workflow `publish-pypi.yaml` and
+# environment `pypi` (`testpypi` on TestPyPI). Then create the matching
+# environments in the repository settings.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Commit / Branch / Tag / SHA to checkout
+        required: false
+        default: ""
+      test:
+        description: Publish to TestPyPI instead of PyPI
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag }}
+          # versioningit reads the version from git tags: it needs them,
+          # and the history between the last tag and the checkout.
+          fetch-depth: 0
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Build sdist and wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check --strict dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same as test-matrix.yaml
+        python-version: ["3.10", "3.14"]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - name: Install the built wheel
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          wheel=$(ls dist/*.whl)
+          pip install "${wheel}[test]"
+      - name: Test with pytest
+        # No checkout: only the installed wheel is tested.
+        run: pytest --pyargs brainfilter.tests
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.test && 'testpypi' || 'pypi' }}
+      url: ${{ inputs.test && 'https://test.pypi.org/p/brainfilter' || 'https://pypi.org/p/brainfilter' }}
+    permissions:
+      id-token: write  # trusted publishing
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: dist
+          path: dist/
+      - name: Publish distribution
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: ${{ inputs.test && 'https://test.pypi.org/legacy/' || 'https://upload.pypi.org/legacy/' }}

@@ -6,7 +6,6 @@ The public API is importable from here:
 from brainfilter import AsyncBidsPath, BidsPath, Filter, PureBidsPath
 ```
 """
-from brainfilter._version import __version__
 from brainfilter.bidspath import (
     AsyncBidsPath,
     BidsEntities,
@@ -20,6 +19,11 @@ from brainfilter.conditions import Glob, Regex
 from brainfilter.filter import Filter
 from brainfilter.transaction import AsyncTransaction, Transaction, TransactionError
 from brainfilter.versioning import Version
+
+try:
+    from brainfilter._version import __version__
+except ImportError:  # running from a source tree that was never built
+    __version__ = "0+unknown"
 
 __all__ = [
     "AsyncBidsPath",
