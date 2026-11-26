@@ -1,0 +1,33 @@
+name: Lint on push
+
+on:
+  push:
+    branches:
+      - master
+      - main
+    paths:
+      - brainfilter/**
+      - pyproject.toml
+      - setup.py
+      - README.md
+      - codespell-ignore-words.txt
+      - .github/workflows/lint*.yaml
+  pull_request:
+    paths:
+      - brainfilter/**
+      - pyproject.toml
+      - setup.py
+      - README.md
+      - codespell-ignore-words.txt
+      - .github/workflows/lint*.yaml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    uses: ./.github/workflows/lint.yaml
