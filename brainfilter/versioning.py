@@ -59,14 +59,17 @@ class Version:
 
     @property
     def major(self) -> int:
+        """The major release number."""
         return self.release[0]
 
     @property
     def minor(self) -> int:
+        """The minor release number."""
         return self.release[1]
 
     @property
     def patch(self) -> int:
+        """The patch release number."""
         return self.release[2]
 
     def _key(self) -> tuple:

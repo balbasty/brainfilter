@@ -1,3 +1,10 @@
+"""Conditions that test a path or a label: globs, regexes and their combinations.
+
+A condition is a callable that takes a value (a string or a path) and
+returns whether it matches. `Glob` and `Regex` test one pattern; `And`
+and `Or` combine conditions; `Globish` and `Regexish` build a single
+condition, or an any-of, from one or several patterns.
+"""
 import fnmatch
 import os
 import re
@@ -7,36 +14,40 @@ from typing import Iterator
 
 
 class NotACondition:
+    """Placeholder for a value that is not a condition: raises when built."""
 
     class Error(TypeError):
-        ...
+        """Raised when a value cannot be used as a condition."""
 
     def __init__(self, *args) -> None:
         raise self.Error("Not a condition:", *args)
 
 
 class NotAGlob(NotACondition):
+    """Placeholder for a value that is not a glob: raises when built."""
 
     class Error(NotACondition.Error):
-        ...
+        """Raised when a value cannot be used as a glob."""
 
     def __init__(self, *args) -> None:
         raise self.Error("Not a glob:", *args)
 
 
 class NotARegex(NotACondition):
+    """Placeholder for a value that is not a regex: raises when built."""
 
     class Error(NotACondition.Error):
-        ...
+        """Raised when a value cannot be used as a regex."""
 
     def __init__(self, *args) -> None:
         raise self.Error("Not a regex:", *args)
 
 
 class Condition:
+    """Base class of all conditions: a test applied to a path or a string."""
 
     def __call__(self, value: str | Path) -> bool:
-        """Check whether a path fullfills the condition."""
+        """Check whether a path fulfills the condition."""
         return NotImplemented
 
 
@@ -48,6 +59,7 @@ class Regexish(Condition):
     """
 
     def __new__(cls, *args, **kwargs) -> "Regexish":
+        """Build a `Regex`, or an `Or` of regexes when given several."""
         if cls is not Regexish:
             return super().__new__(cls)
         elif len(args) > 1:
@@ -88,6 +100,7 @@ class Regex(Regexish):
         return f"Regex({str(self)})"
 
     def __call__(self, value: str | Path) -> bool:
+        """Check whether the value matches the regex."""
         if self.full:
             return self.pattern.fullmatch(str(value)) is not None
         return self.pattern.search(str(value)) is not None
@@ -101,6 +114,7 @@ class Globish(Condition):
     """
 
     def __new__(cls, *args) -> "Globish":
+        """Build a `Glob`, or an `OrGlob` of globs when given several."""
         if cls is not Globish:
             return super().__new__(cls)
         elif len(args) > 1:
@@ -114,6 +128,11 @@ class Globish(Condition):
 
 
 class Glob(Globish):
+    """A glob condition, matched with `fnmatch`.
+
+    A pattern that starts with `/` is anchored at the filesystem root;
+    any other pattern is relative to the current directory when iterated.
+    """
 
     def __init__(self, pattern: str | Path) -> None:
         if pattern is self:
@@ -137,6 +156,7 @@ class Glob(Globish):
         return f"Glob({str(self)})"
 
     def __call__(self, value: str | Path) -> bool:
+        """Check whether the value matches the glob."""
         return fnmatch.fnmatch(str(value), str(self))
 
     def __iter__(self) -> Iterator[Path]:
@@ -175,24 +195,29 @@ def _as_conditions(cond: tuple, self: Condition) -> list[Condition]:
 
 
 class And(Condition):
+    """All-of: matches a value that matches every condition."""
 
     def __init__(self, *cond: Condition | re.Pattern | str) -> None:
         self.cond = _as_conditions(cond, self)
 
     def __call__(self, value: str | Path) -> bool:
+        """Check whether the value matches every condition."""
         return all(cond(value) for cond in self.cond)
 
 
 class Or(Condition):
+    """Any-of: matches a value that matches at least one condition."""
 
     def __init__(self, *cond: Condition | re.Pattern | str) -> None:
         self.cond = _as_conditions(cond, self)
 
     def __call__(self, value: str | Path) -> bool:
+        """Check whether the value matches at least one condition."""
         return any(cond(value) for cond in self.cond)
 
 
 class OrGlob(Or, Globish):
+    """Any-of several globs; iterating yields the union of their paths."""
 
     def __init__(self, *cond) -> None:
         super().__init__(*cond)
@@ -215,6 +240,7 @@ class OrGlob(Or, Globish):
 
 
 class AndGlob(And, Globish):
+    """All-of several globs; iterating yields the intersection of their paths."""
 
     def __init__(self, *cond) -> None:
         super().__init__(*cond)

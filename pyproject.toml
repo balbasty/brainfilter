@@ -21,7 +21,7 @@ dynamic = ["version"]
 [project.optional-dependencies]
 # universal-pathlib provides the memory:// backend the tests run against;
 # anyio's pytest plugin runs the async tests.
-test = ["pytest", "universal-pathlib", "anyio"]
+test = ["pytest", "universal-pathlib", "anyio", "pandas"]
 
 
 [project.urls]
@@ -60,6 +60,10 @@ testpaths = [
   "brainfilter/tests"
 ]
 
+[tool.codespell]
+skip = "*.git,./build,*.egg-info"
+ignore-words = "codespell-ignore-words.txt"
+
 [tool.mypy]
 ignore_missing_imports = true
 
@@ -97,8 +101,6 @@ select = ["ANN", "D", "E", "F", "I"]
 ignore = [
   "ANN002",  # args should not be annotated
   "ANN003",  # kwargs should not be annotated
-  "ANN101",  # self should not be annotated.
-  "ANN102",  # cls should not be annotated.
   "D105",    # Missing docstring in magic method
   "D205"     # 1 blank line required between summary line and description -> triggered in __init__ docstrings
 ]
@@ -110,7 +112,7 @@ dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 convention = "numpy"
 
 [tool.ruff.lint.per-file-ignores]
-"ngtools/tests/*.py" = []
+"brainfilter/tests/*.py" = ["ANN", "D"]
 
 [tool.ruff.format]
 quote-style = "double"
