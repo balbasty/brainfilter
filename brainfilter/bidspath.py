@@ -51,6 +51,7 @@ from brainfilter._tree import (
     AsyncTreeMixin,
     AsyncTSVContentMixin,
     JSONContentMixin,
+    Table,
     TreeMixin,
     TSVContentMixin,
 )
@@ -121,6 +122,7 @@ __all__ = [
     "PureBidsSidecarFile",
     "PureBidsTSVFile",
     "PureBidsTableSidecarFile",
+    "Table",
 ]
 
 
@@ -488,11 +490,14 @@ class BidsPath(TreeMixin, BidsPathMixin, Path):
 
     The class is picked from the name; see the module documentation.
 
-    A directory is also a read-only mapping of its children
+    A directory is also a mapping of its children
     (`dataset["sub-01"]["anat"]`, `keys()`, iteration), a JSON file a
     mapping of its content (`sidecar["RepetitionTime"]`, `read()`), and a
-    TSV file a list of rows (`read()`, `read_dataframe()`). A file's
+    TSV file a `Table` of rows (`read()`, `read_dataframe()`). A file's
     `metadata` is the `ChainMap` of the JSON sidecars that apply to it.
+
+    The tree is read-only, except inside `with dataset.transaction():` or
+    `with sidecar.edit() as content:`; see `brainfilter.transaction`.
     """
 
     __slots__ = ()
@@ -768,7 +773,10 @@ class AsyncBidsPath(AsyncTreeMixin, BidsPathMixin, AsyncPath):
     too: `await dataset.child("sub-01")`, `await dataset.keys()`,
     `async for name in dataset`, `await sidecar.read()`,
     `await sidecar.get("RepetitionTime")`, `await table.read()`,
-    `await data.read_metadata()` and `await data.sidecars()`.
+    `await data.read_metadata()` and `await data.sidecars()`. Edits go in
+    `async with dataset.transaction():` or
+    `async with sidecar.edit() as content:`, with `await sidecar.set()`,
+    `delete()`, `update()` and `write()`.
     """
 
     __slots__ = ()

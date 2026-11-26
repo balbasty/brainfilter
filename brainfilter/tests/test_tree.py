@@ -101,9 +101,12 @@ def test_missing_child(ds):
 
 
 def test_read_only(ds):
-    with pytest.raises(TypeError, match="read-only.*transactions"):
+    # outside a transaction; see test_transaction.py for the edits
+    with pytest.raises(TypeError, match="read-only.*transaction"):
+        ds["sub-03.json"] = {}
+    with pytest.raises(TypeError, match="only JSON and TSV"):
         ds["sub-03"] = {}
-    with pytest.raises(TypeError, match="read-only"):
+    with pytest.raises(TypeError, match="does not delete"):
         del ds["sub-01"]
     with pytest.raises(TypeError, match="read-only"):
         ds["T1w.json"]["Level"] = "x"
