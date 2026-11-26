@@ -8,11 +8,15 @@ on:
     paths:
       - brainfilter/**
       - pyproject.toml
+      - setup.py
+      - README.md
       - .github/workflows/test*.yaml
   pull_request:
     paths:
       - brainfilter/**
       - pyproject.toml
+      - setup.py
+      - README.md
       - .github/workflows/test*.yaml
 
 permissions:

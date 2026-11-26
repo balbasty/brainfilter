@@ -12,12 +12,20 @@ Two rules, one per kind of operation:
   precedence: a pre-release sorts before its release
   (`Version("1.10.0-dev") < Version("1.10.0")`).
 * **Specifier tests** (`compare_versions`, `version_is_satisfied`) compare
-  releases only: a pre-release or dev version counts as its release, on
-  either side. `1.10.0-dev` satisfies `>=1.10` and `==1.10.*`, and does
-  not satisfy `<1.10`.
+  releases only: a pre-release or dev version counts as its release.
+  `1.10.0-dev` satisfies `>=1.10` and `==1.10.*`, and does not satisfy
+  `<1.10`. A pre-release written in a specifier (`>=1.10.0-rc1`) would be
+  ambiguous under that rule, so it is refused with a `ValueError`.
 
 Build metadata is ignored by both. A version or specifier may omit
 trailing components, which default to zero (`1.8` is `1.8.0`).
+
+A `Version` compares equal only to another `Version`, never to a string
+or a tuple: `Version("1.0") == "1.0"` is False, and ordering against a
+string raises `TypeError`. Equal spellings (`"1.0"`, `"v1.0.0"`) cannot all
+share one hash, so comparing with strings would break sets and dicts.
+Convert first: `Version("1.0") == Version("1.0.0")`. This matches
+`packaging.version.Version`.
 """
 import re
 from functools import total_ordering
@@ -39,7 +47,16 @@ COMPARATORS = ("==", "!=", ">=", "<=", ">", "<")
 
 @total_ordering
 class Version:
-    """A semantic version `X.Y.Z[-pre][+build]`."""
+    """A semantic version `X.Y.Z[-pre][+build]`.
+
+    Built from a string (`"1.10.0-dev"`), a tuple (`(1, 10, 0)`) or another
+    `Version`. A number is refused with a `TypeError`: `1.10` is the float
+    `1.1`, so it cannot be read back as the version it was meant to be.
+
+    Versions compare and hash with each other only (see the module
+    docstring); comparing with anything else is unequal, and ordering
+    against it raises `TypeError`.
+    """
 
     def __init__(self, version: "str | tuple[int | str, ...] | Version") -> None:
         if isinstance(version, Version):
@@ -49,7 +66,13 @@ class Version:
             return
         if isinstance(version, tuple):
             version = ".".join(map(str, version))
-        match = _VERSION.fullmatch(str(version).strip())
+        if not isinstance(version, str):
+            raise TypeError(
+                f"A version must be a string, a tuple or a Version, "
+                f"not {type(version).__name__}: {version!r}. Write it as a "
+                f"string, e.g. Version(\"1.10.0\")"
+            )
+        match = _VERSION.fullmatch(version.strip())
         if not match:
             raise ValueError(f"Invalid version: {version!r}")
         release = tuple(int(x) for x in match["release"].split("."))
@@ -83,20 +106,17 @@ class Version:
         return (self.release, (0, ids))
 
     def __eq__(self, other: object) -> bool:
-        if isinstance(other, (str, tuple)):
-            other = Version(other)
         if not isinstance(other, Version):
             return NotImplemented
         return self._key() == other._key()
 
     def __lt__(self, other: object) -> bool:
-        if isinstance(other, (str, tuple)):
-            other = Version(other)
         if not isinstance(other, Version):
             return NotImplemented
         return self._key() < other._key()
 
     def __hash__(self) -> int:
+        # Consistent with __eq__: equal versions share a key (build ignored)
         return hash(self._key())
 
     def __str__(self) -> str:
@@ -126,13 +146,19 @@ def is_version_valid(version: str, is_spec: bool = False) -> bool:
 def split_specifiers(specifier: str) -> list[tuple[str, str]]:
     """Split `">=1.8, <2"` into `[(">=", "1.8"), ("<", "2")]`.
 
-    A bare version means `==`.
+    A bare version means `==`. An empty specifier, or an empty segment
+    between commas (`">=1.8,,<2"`, `",<2"`, `">=1.8,"`), raises
+    `ValueError`.
     """
+    if not specifier.strip():
+        raise ValueError(f"Empty version specifier: {specifier!r}")
     out = []
     for spec in specifier.split(","):
         spec = spec.strip()
         if not spec:
-            continue
+            raise ValueError(
+                f"Empty segment in version specifier: {specifier!r}"
+            )
         for comparator in COMPARATORS:
             if spec.startswith(comparator):
                 spec = spec[len(comparator):].strip()
@@ -140,8 +166,6 @@ def split_specifiers(specifier: str) -> list[tuple[str, str]]:
         else:
             comparator = "=="
         out.append((comparator, spec))
-    if not out:
-        raise ValueError(f"Empty version specifier: {specifier!r}")
     return out
 
 
@@ -153,8 +177,9 @@ def compare_versions(
     """Test `version <comparator> spec_version`.
 
     Only releases are compared: a pre-release counts as its release
-    (`1.10.0-dev` satisfies `>=1.10` and `==1.10.0`), and a pre-release
-    in `spec_version` is ignored too.
+    (`1.10.0-dev` satisfies `>=1.10` and `==1.10.0`). A pre-release in
+    `spec_version` (`1.10.0-rc1`) raises `ValueError`, since it is
+    ambiguous under that rule; write the release (`1.10.0`) instead.
 
     `spec_version` may end with `.*` (`1.9.*`) with `==` and `!=`: it then
     matches every version, pre-releases included, whose release starts
@@ -176,7 +201,15 @@ def compare_versions(
         match = version.release[:len(prefix)] == prefix
         return match if comparator == "==" else not match
 
-    release, spec = version.release, Version(spec_version).release
+    spec_parsed = Version(spec_version)
+    if spec_parsed.pre is not None:
+        raise ValueError(
+            f"Pre-releases are not allowed in a version specifier: "
+            f"{comparator}{spec_version}. A pre-release version counts as "
+            f"its release when tested, so write the release instead: "
+            f"{comparator}{'.'.join(map(str, spec_parsed.release))}"
+        )
+    release, spec = version.release, spec_parsed.release
     if comparator == "==":
         return release == spec
     if comparator == "!=":
@@ -198,9 +231,11 @@ def version_is_satisfied(
 ) -> bool:
     """Whether `version` satisfies every comma-separated specifier.
 
-    A pre-release counts as its release (see `compare_versions`).
+    A pre-release counts as its release, and a pre-release in `specifier`
+    raises `ValueError` (see `compare_versions`). Every segment is checked,
+    even once one has failed.
     """
-    return all(
+    return all([
         compare_versions(version, comparator, spec)
         for comparator, spec in split_specifiers(specifier)
-    )
+    ])
