@@ -1,14 +1,20 @@
-"""Async transactions and edits: local, and memory:// on the native driver."""
+"""Async writes and transactions: local, and memory:// on the native driver."""
 import asyncio
 import json
+from collections import ChainMap
 
 import pytest
 from bagof.paths import CommitError
 
-from brainfilter.bidspath import AsyncBidsPath, BidsPath, Table
+from brainfilter import (
+    AsyncBidsPath,
+    AsyncTransaction,
+    BidsPath,
+    ReadOnlyError,
+    TransactionError,
+)
 from brainfilter.tests.test_transaction import EDITED, PARTICIPANTS
 from brainfilter.tests.test_tree import FILES, T1W, _populate
-from brainfilter.transaction import AsyncTransaction, TransactionError
 
 pytestmark = pytest.mark.anyio
 
@@ -16,7 +22,7 @@ pytestmark = pytest.mark.anyio
 @pytest.fixture
 def local_ds(tmp_path):
     _populate(BidsPath(str(tmp_path / "ds")))
-    return AsyncBidsPath(str(tmp_path / "ds"))
+    return AsyncBidsPath(str(tmp_path / "ds"), mode="w")
 
 
 @pytest.fixture
@@ -34,7 +40,7 @@ def memory_store():
 
 @pytest.fixture
 def memory_ds(memory_store, async_memory):
-    ds = AsyncBidsPath("memory://ds")
+    ds = AsyncBidsPath("memory://ds", mode="w")
     assert type(ds.wrapped).__name__ == "AsyncFSPath"   # the native driver
     return ds
 
@@ -49,7 +55,30 @@ async def on_disk(path):
     return json.loads(await path.read_text())
 
 
-# -- edits -----------------------------------------------------------------------
+# -- async with path: --------------------------------------------------------------
+
+async def test_async_with_path_gives_the_path(ds):
+    async with ds as entered:
+        assert entered is ds
+        await (ds / "T1w.json").set("RepetitionTime", 2.3)
+        assert await on_disk(ds / "T1w.json") == FILES["T1w.json"]
+    assert (await on_disk(ds / "T1w.json"))["RepetitionTime"] == 2.3
+
+
+async def test_async_with_path_discards_on_exception(ds):
+    with pytest.raises(RuntimeError):
+        async with ds:
+            await (ds / "T1w.json").set("RepetitionTime", 2.3)
+            raise RuntimeError
+    assert await on_disk(ds / "T1w.json") == FILES["T1w.json"]
+
+
+async def test_exit_without_enter(ds):
+    with pytest.raises(RuntimeError, match="no transaction"):
+        await ds.__aexit__(None, None, None)
+
+
+# -- JSON and TSV writes in a transaction ------------------------------------------
 
 async def test_set_delete_update_write(ds):
     sidecar = ds / "T1w.json"
@@ -70,31 +99,59 @@ async def test_set_delete_update_write(ds):
     assert await on_disk(ds / "dwi.json") == {"Only": "this"}
 
 
-async def test_content_is_edited_in_place(ds):
-    async with ds.transaction():
-        content = await (ds / "participants.json").read()
-        content["age"]["Units"] = "years"
-    assert await on_disk(ds / "participants.json") == {"age": {"Units": "years"}}
+async def test_as_dict_in_a_transaction_is_a_copy(ds):
+    sidecar = ds / "participants.json"
+    async with ds:
+        content = await sidecar.as_dict()
+        content["age"]["Units"] = "years"                 # not an edit
+        (await sidecar.get("age"))["Units"] = "years"     # nor this
+        await sidecar.set("New", 1)
+        held = await sidecar.as_dict()
+        held["New"] = 2
+        assert await sidecar.get("New") == 1
+        assert (await sidecar.get("age"))["Units"] == "year"
+    assert await on_disk(sidecar) == {**FILES["participants.json"], "New": 1}
 
 
-async def test_rows_and_columns(ds):
+async def test_columns(ds):
     table = ds / "participants.tsv"
-    async with ds.transaction():
-        rows = await table.read()
-        assert isinstance(rows, Table)
-        rows.append({"participant_id": "sub-03", "age": 41})
-        del rows[1]
-        rows.add_column("handedness", ["R", None])
-        rows.drop_column("sex")
-        assert [row async for row in table] == rows
+    async with ds:
+        await table.set("handedness", ["R", None])
+        await table.set("sex", ["M", "M"])
+        await table.delete("age")
+        assert await table.keys() == ["participant_id", "sex", "handedness"]
+        with pytest.raises(ValueError, match="one value per row"):
+            await table.set("x", [1])
+        with pytest.raises(KeyError):
+            await table.delete("nope")
+        assert await table.read_text() == PARTICIPANTS
     assert await table.read_text() == (
-        "participant_id\tage\thandedness\n"
-        "sub-01\t30\tR\n"
+        "participant_id\tsex\thandedness\n"
+        "sub-01\tM\tR\n"
+        "sub-02\tM\tn/a\n"
+    )
+
+
+async def test_rows_in_a_transaction_are_copies(ds):
+    table = ds / "participants.tsv"
+    async with ds:
+        rows = await table.as_list()
+        rows[0]["sex"] = "M"
+        async for row in table.rows():
+            row["sex"] = "M"
+        (await table.as_dict())["sex"][0] = "M"
+        assert await table.get("sex") == ["F", "M"]
+        rows.append({"participant_id": "sub-03", "age": 41})
+        await table.write(rows)
+        assert await table.get("sex") == ["M", "M", None]
+    assert await table.read_text() == (
+        "participant_id\tage\tsex\n"
+        "sub-01\t30\tM\n"
+        "sub-02\tn/a\tM\n"
         "sub-03\t41\tn/a\n"
     )
-    async with ds.transaction():
-        await table.write([{"a": "1"}])
-    assert await table.read() == [{"a": 1}]   # inferred as int
+    await table.write([{"a": "1"}])
+    assert await table.as_list() == [{"a": 1}]   # inferred as int
 
 
 async def test_new_files(ds):
@@ -113,25 +170,37 @@ async def test_new_files(ds):
     assert await on_disk(new) == {"Level": "new"}
 
 
+async def test_dataframe_in_a_transaction(ds):
+    pytest.importorskip("pandas")
+    table = ds / "participants.tsv"
+    async with ds:
+        await table.set("sex", ["M", "M"])
+        frame = await table.as_dataframe()
+        assert frame["sex"].tolist() == ["M", "M"]
+    assert "M\n" in await table.read_text()
+
+
 async def test_unsupported(ds):
-    async with ds.transaction():
+    async with ds:
         with pytest.raises(TypeError, match=r"await path\.set"):
             (ds / "T1w.json")["Level"] = "x"
         with pytest.raises(TypeError, match=r"await path\.delete"):
             del (ds / "T1w.json")["Level"]
-        with pytest.raises(TypeError, match="read()"):
-            (ds / "participants.tsv")["age"] = []
+        with pytest.raises(TypeError, match=r"await path\.has"):
+            "Level" in (ds / "T1w.json")
         with pytest.raises(FileNotFoundError):
-            await (ds / "nope.json").read()
+            await (ds / "nope.json").as_dict()
+        with pytest.raises(FileNotFoundError):
+            await (ds / "nope.tsv").as_dataframe()
 
 
-# -- rollback and nothing hidden ---------------------------------------------------
+# -- rollback ----------------------------------------------------------------------
 
 async def test_exception_writes_nothing(ds):
     with pytest.raises(RuntimeError, match="boom"):
         async with ds.transaction() as tx:
             await (ds / "T1w.json").set("RepetitionTime", 2.3)
-            (await (ds / "participants.tsv").read()).append({"x": "1"})
+            await (ds / "participants.tsv").set("x", ["1", "2"])
             await (ds / "new.json").write({"x": 1})
             raise RuntimeError("boom")
     assert tx.written == []
@@ -140,40 +209,33 @@ async def test_exception_writes_nothing(ds):
     assert not await ds.has("new.json")
 
 
-async def test_read_only_outside_a_transaction(ds):
-    sidecar = ds / "T1w.json"
-    for edit in (
-        sidecar.set("Level", "x"),
-        sidecar.delete("Level"),
-        sidecar.update(Level="x"),
-        sidecar.write({}),
-        (ds / "participants.tsv").write([]),
-    ):
-        with pytest.raises(TypeError, match="async with dataset.transaction"):
-            await edit
-    assert await on_disk(sidecar) == FILES["T1w.json"]
-
-
-async def test_families_do_not_share_a_transaction(ds):
-    sync = BidsPath(str(ds)) if ds.is_local() else None
-    if sync is None:
-        pytest.skip("the sync memory:// driver is replaced by the async one")
-    with sync.transaction():
-        with pytest.raises(TypeError, match="read-only"):
-            await (ds / "T1w.json").set("Level", "x")
-
-
 async def test_unchanged_files_are_not_written(ds):
     async with ds.transaction() as tx:
-        await (ds / "T1w.json").read()
+        await (ds / "T1w.json").as_dict()
         await (ds / "T1w.json").set("Level", "root")
-        await (ds / T1W).read_metadata()
+        await (ds / "participants.tsv").set("sex", ["F", "M"])
+        await (ds / T1W).sidecar
     assert tx.written == []
+
+
+async def test_a_write_that_raises_leaves_the_content(ds):
+    async with ds.transaction() as tx:
+        await (ds / "T1w.json").set("Before", 1)
+        with pytest.raises(ValueError):
+            await (ds / "T1w.json").update([("Partial", 1), ("x",)])
+        assert not await (ds / "T1w.json").has("Partial")
+        with pytest.raises(ValueError, match="one value per row"):
+            await (ds / "participants.tsv").set("extra", [1, 2, 3])
+        assert await (ds / "participants.tsv").keys() == [
+            "participant_id", "age", "sex"]
+    assert tx.written == [ds / "T1w.json"]
+    assert await on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "Before": 1}
+    assert await (ds / "participants.tsv").read_text() == PARTICIPANTS
 
 
 # -- read your writes --------------------------------------------------------------
 
-async def test_metadata_sees_the_edits(ds):
+async def test_sidecar_sees_the_edits(ds):
     data = ds / T1W
     async with ds.transaction():
         await (ds / "T1w.json").set("RepetitionTime", 2.3)
@@ -182,12 +244,15 @@ async def test_metadata_sees_the_edits(ds):
             {"Run": 1}
         )
         run = data.with_entities(run="1", keep_existing=True)
-        meta = await run.read_metadata()
+        meta = await run.sidecar
         assert meta["Run"] == 1 and meta["RepetitionTime"] == 2.3
         assert "RootOnly" not in meta
-        (await data.read_metadata())["Level"] = "edited"
+        await (await data.sidecar).set("Level", "edited")
         assert await (data.parent / data.with_extension(".json").name).get(
             "Level") == "edited"
+        flat = (await data.sidecar).as_dict()
+        flat["Level"] = "copy"
+        assert (await data.sidecar)["Level"] == "edited"
     assert await on_disk(data.with_extension(".json")) == {"Level": "edited"}
 
 
@@ -199,6 +264,105 @@ async def test_concurrent_edits_of_one_file(ds):
     assert all(content[f"K{i}"] == i for i in range(5))
 
 
+# -- writes at once -----------------------------------------------------------------
+
+async def test_writes_at_once(ds):
+    sidecar = ds / "T1w.json"
+    await sidecar.set("RepetitionTime", 2.3)
+    assert (await on_disk(sidecar))["RepetitionTime"] == 2.3
+    await sidecar.delete("RootOnly")
+    await sidecar.update({"EchoTime": 0.03})
+    assert await on_disk(sidecar) == {
+        "Level": "root", "MagneticFieldStrength": 3,
+        "RepetitionTime": 2.3, "EchoTime": 0.03,
+    }
+    table = ds / "participants.tsv"
+    await table.set("handedness", ["R", "L"])
+    assert "handedness" in await table.read_text()
+    await table.delete("handedness")
+    assert await table.read_text() == PARTICIPANTS
+    await (ds / "sub-09" / "sub-09_T1w.json").write({"New": 1})
+    assert await on_disk(ds / "sub-09" / "sub-09_T1w.json") == {"New": 1}
+
+
+async def test_merged_sidecar_writes_at_once(ds):
+    data = ds / T1W
+    meta = await data.sidecar
+    nearest = meta.sidecars[0]
+    await meta.set("EchoTime", 0.03)
+    assert await on_disk(nearest) == {"Level": "datatype", "EchoTime": 0.03}
+    assert meta["EchoTime"] == 0.03
+    await meta.delete("Level")
+    assert meta["Level"] == "session"
+    await meta.update(A=1)
+    assert await on_disk(nearest) == {"EchoTime": 0.03, "A": 1}
+    assert meta.parents.sidecars == meta.sidecars[1:]
+    for write in (
+        lambda: meta.__setitem__("A", 2),
+        lambda: meta.__delitem__("A"),
+        lambda: meta.pop("A"),
+        lambda: meta.popitem(),
+        lambda: meta.clear(),
+        lambda: meta.setdefault("B", 1),
+    ):
+        with pytest.raises(TypeError, match=r"await chain\."):
+            write()
+    with pytest.raises(TypeError, match="no JSON sidecar"):
+        await (await (ds / "sub-02/anat/sub-02_T2w.nii.gz").sidecar).set("A", 1)
+
+
+async def test_failed_write_raises_and_changes_nothing(ds, fail_nth):
+    fail_nth(1)
+    with pytest.raises(CommitError):
+        await (ds / "T1w.json").set("Level", "x")
+    assert await on_disk(ds / "T1w.json") == FILES["T1w.json"]
+
+
+async def test_new_file_is_created_only_when_set(ds):
+    new = ds / "new.json"
+    with pytest.raises(KeyError):
+        await new.delete("k")
+    assert not await new.exists()
+    async with ds.transaction() as tx:
+        with pytest.raises(KeyError):
+            await new.delete("k")
+        assert not await ds.has("new.json")
+        with pytest.raises(FileNotFoundError):
+            await new.as_dict()
+    assert tx.written == [] and not await new.exists()
+    async with ds:
+        await new.write({})
+    assert await on_disk(new) == {}
+
+
+# -- read-only paths ---------------------------------------------------------------
+
+async def test_read_only_refuses_every_write(ds):
+    ro = ds.with_mode("r")
+    sidecar = ro / "T1w.json"
+    table = ro / "participants.tsv"
+    for write in (
+        sidecar.set("Level", "x"),
+        sidecar.delete("Level"),
+        sidecar.update(Level="x"),
+        sidecar.write({}),
+        table.set("age", [1, 2]),
+        table.delete("age"),
+        table.write([]),
+    ):
+        with pytest.raises(ReadOnlyError, match=r"read-only.*with_mode\('w'\)"):
+            await write
+    with pytest.raises(ReadOnlyError):
+        await (await (ro / T1W).sidecar).set("Level", "x")
+    with pytest.raises(ReadOnlyError, match="open a transaction"):
+        ro.transaction()
+    with pytest.raises(ReadOnlyError, match="open a transaction"):
+        async with ro:
+            pass
+    assert await on_disk(ds / "T1w.json") == FILES["T1w.json"]
+    assert await (ds / "participants.tsv").read_text() == PARTICIPANTS
+
+
 # -- partial commit ----------------------------------------------------------------
 
 @pytest.mark.parametrize("n", [1, 2, 3])
@@ -207,9 +371,7 @@ async def test_partial_failure_report(ds, fail_nth, n):
     with pytest.raises(TransactionError) as info:
         async with ds.transaction():
             await (ds / "T1w.json").set("Edited", 1)
-            (await (ds / "participants.tsv").read()).append(
-                {"participant_id": "sub-03"}
-            )
+            await (ds / "participants.tsv").set("Edited", [1, 1])
             await (ds / "dwi.json").set("Edited", 1)
     error = info.value
     assert [p.name for p in error.written] == EDITED[:n - 1]
@@ -221,47 +383,8 @@ async def test_partial_failure_report(ds, fail_nth, n):
     assert (await on_disk(ds / "T1w.json")).get("Edited") == (
         1 if n > 1 else None
     )
-    assert ("sub-03" in await (ds / "participants.tsv").read_text()) == (n > 2)
+    assert ("Edited" in await (ds / "participants.tsv").read_text()) == (n > 2)
     assert await on_disk(ds / "dwi.json") == FILES["dwi.json"]
-
-
-# -- single-file edits -------------------------------------------------------------
-
-async def test_edit(ds):
-    sidecar = ds / "T1w.json"
-    async with sidecar.edit() as content:
-        content["RepetitionTime"] = 2.3
-        assert await sidecar.get("RepetitionTime") == 2.3
-        assert await on_disk(sidecar) == FILES["T1w.json"]
-    assert (await on_disk(sidecar))["RepetitionTime"] == 2.3
-    new = ds / "sub-01" / "sub-01_scans.tsv"
-    async with new.edit() as rows:
-        rows.append({"filename": "anat/x.nii.gz"})
-    assert await new.read() == [{"filename": "anat/x.nii.gz"}]
-
-
-async def test_edit_discards_on_exception(ds):
-    with pytest.raises(ValueError):
-        async with (ds / "T1w.json").edit() as content:
-            content["Level"] = "x"
-            raise ValueError
-    assert await on_disk(ds / "T1w.json") == FILES["T1w.json"]
-
-
-async def test_edit_raises_the_commit_error(ds, fail_nth):
-    fail_nth(1)
-    with pytest.raises(CommitError):
-        async with (ds / "T1w.json").edit() as content:
-            content["Level"] = "x"
-    assert await on_disk(ds / "T1w.json") == FILES["T1w.json"]
-
-
-async def test_edit_joins_a_transaction(ds):
-    async with ds.transaction() as tx:
-        async with (ds / "T1w.json").edit() as content:
-            content["Level"] = "x"
-        assert await on_disk(ds / "T1w.json") == FILES["T1w.json"]
-    assert tx.written == [ds / "T1w.json"]
 
 
 # -- a transaction only while it is open -------------------------------------------
@@ -291,9 +414,8 @@ async def test_late_task_can_read_and_open_its_own(ds):
     async def late():
         await go.wait()
         with pytest.raises(RuntimeError, match="already closed"):
-            async with sidecar.edit():
-                pass
-        assert (await sidecar.read())["Level"] == "root"
+            await sidecar.write({})
+        assert (await sidecar.as_dict())["Level"] == "root"
         async with ds.transaction():
             await sidecar.set("Again", 1)
 
@@ -307,7 +429,7 @@ async def test_late_task_can_read_and_open_its_own(ds):
 async def test_write_during_the_commit_raises(ds, monkeypatch):
     from brainfilter import transaction as T
 
-    real = T._awrite_file
+    real = T.awrite_file
     committing, done = asyncio.Event(), asyncio.Event()
 
     async def awrite(path, data):
@@ -322,7 +444,7 @@ async def test_write_during_the_commit_raises(ds, monkeypatch):
         finally:
             done.set()
 
-    monkeypatch.setattr(T, "_awrite_file", awrite)
+    monkeypatch.setattr(T, "awrite_file", awrite)
     async with ds.transaction():
         await (ds / "T1w.json").set("Edited", 1)
         task = asyncio.create_task(late())
@@ -339,54 +461,53 @@ async def test_two_names_for_one_file_share_an_entry(ds):
     async with ds.transaction() as tx:
         await other.set("A", 1)
         await (ds / "T1w.json").set("B", 2)
-        assert await other.read() is await (ds / "T1w.json").read()
+        assert await other.as_dict() == await (ds / "T1w.json").as_dict()
     assert tx.written == [ds / "T1w.json"]
     assert await on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "A": 1, "B": 2}
 
 
-# -- a joined edit that fails ------------------------------------------------------
-
-async def test_failed_edit_in_a_transaction_is_undone(ds):
-    async with ds.transaction() as tx:
-        await (ds / "T1w.json").set("Before", 1)
-        with pytest.raises(ValueError):
-            async with (ds / "T1w.json").edit() as content:
-                content["Partial"] = 1
-                raise ValueError
-        assert "Partial" not in await (ds / "T1w.json").read()
-        rows = await (ds / "participants.tsv").read()
-        with pytest.raises(ValueError):
-            async with (ds / "participants.tsv").edit() as table:
-                table[0]["sex"] = "M"
-                del table[1]
-                raise ValueError
-        assert await (ds / "participants.tsv").read() is rows
-    assert tx.written == [ds / "T1w.json"]
-    assert await on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "Before": 1}
-    assert await (ds / "participants.tsv").read_text() == PARTICIPANTS
-
-
-# -- sync and async transactions do not overlap ------------------------------------
+# -- sync and async together -------------------------------------------------------
 
 async def test_sync_and_async_transactions_do_not_overlap(local_ds):
-    sync = BidsPath(str(local_ds))
+    sync = BidsPath(str(local_ds), mode="w")
     with sync.transaction():
         with pytest.raises(RuntimeError, match="already open"):
             async with local_ds.transaction():
-                pass
-        with pytest.raises(RuntimeError, match="already open"):
-            async with (local_ds / "T1w.json").edit():
                 pass
     async with (local_ds / "sub-01").transaction():
         with pytest.raises(RuntimeError, match="already open"):
             with sync.transaction():
                 pass
         with pytest.raises(RuntimeError, match="already open"):
-            with (sync / "sub-01" / "sub-01_T1w.json").edit():
+            with sync / "sub-01" / "sub-01_T1w.json":
                 pass
         with (sync / "sub-02").transaction():        # disjoint: fine
             sync["sub-02"]["sub-02_T1w.json"] = {"A": 1}
     assert await on_disk(local_ds / "T1w.json") == FILES["T1w.json"]
+
+
+async def test_a_sync_transaction_keeps_async_writes(local_ds):
+    sync = BidsPath(str(local_ds), mode="w")
+    reader = local_ds.with_mode("r")
+    with sync as tx_root:
+        await (local_ds / "T1w.json").set("Async", 1)
+        await (reader / "dwi.json").as_dict()        # held, read-only
+        await (local_ds / "dwi.json").set("Async", 2)
+        assert tx_root["T1w.json"]["Async"] == 1     # the sync read sees it
+        assert await on_disk(local_ds / "T1w.json") == FILES["T1w.json"]
+    assert (await on_disk(local_ds / "T1w.json"))["Async"] == 1
+    assert (await on_disk(local_ds / "dwi.json"))["Async"] == 2
+
+
+async def test_an_async_transaction_keeps_sync_writes(local_ds):
+    sync = BidsPath(str(local_ds), mode="w")
+    async with local_ds:
+        sync["T1w.json"]["Sync"] = 1
+        sync["participants.tsv"]["x"] = [1, 2]
+        assert await (local_ds / "T1w.json").get("Sync") == 1
+        assert await on_disk(local_ds / "T1w.json") == FILES["T1w.json"]
+    assert (await on_disk(local_ds / "T1w.json"))["Sync"] == 1
+    assert "x" in await (local_ds / "participants.tsv").keys()
 
 
 # -- an interrupted commit ---------------------------------------------------------
@@ -394,7 +515,7 @@ async def test_sync_and_async_transactions_do_not_overlap(local_ds):
 async def test_cancelled_commit_reports_and_propagates(ds, monkeypatch):
     from brainfilter import transaction as T
 
-    real = T._awrite_file
+    real = T.awrite_file
     calls = []
     blocked = asyncio.Event()
 
@@ -405,7 +526,7 @@ async def test_cancelled_commit_reports_and_propagates(ds, monkeypatch):
             await asyncio.Event().wait()        # until cancelled
         await real(path, data)
 
-    monkeypatch.setattr(T, "_awrite_file", awrite)
+    monkeypatch.setattr(T, "awrite_file", awrite)
     holder, raised = [], []
 
     async def run():
@@ -413,9 +534,7 @@ async def test_cancelled_commit_reports_and_propagates(ds, monkeypatch):
             async with ds.transaction() as tx:
                 holder.append(tx)
                 await (ds / "T1w.json").set("Edited", 1)
-                (await (ds / "participants.tsv").read()).append(
-                    {"participant_id": "sub-03"}
-                )
+                await (ds / "participants.tsv").set("Edited", [1, 1])
                 await (ds / "dwi.json").set("Edited", 1)
         except BaseException as error:
             raised.append(error)
@@ -436,32 +555,17 @@ async def test_cancelled_commit_reports_and_propagates(ds, monkeypatch):
     assert await on_disk(ds / "dwi.json") == FILES["dwi.json"]
 
 
-# -- a new file only when it is given content --------------------------------------
+# -- a sidecar that is not there ---------------------------------------------------
 
-async def test_new_file_is_created_only_when_set(ds):
-    new = ds / "new.json"
-    async with new.edit():
-        pass
-    assert not await new.exists()
-    async with ds.transaction() as tx:
-        with pytest.raises(KeyError):
-            await new.delete("k")
-        assert not await ds.has("new.json")
-        with pytest.raises(FileNotFoundError):
-            await new.read()
-    assert tx.written == [] and not await new.exists()
-    async with ds.transaction():
-        await new.write({})
-    assert await on_disk(new) == {}
-
-
-# -- metadata with no sidecar ------------------------------------------------------
-
-async def test_metadata_without_a_sidecar_refuses_writes(ds):
+async def test_sidecar_without_a_sidecar_refuses_writes(ds):
     data = ds / "sub-02" / "anat" / "sub-02_T2w.nii.gz"
     async with ds.transaction() as tx:
-        meta = await data.read_metadata()
-        assert dict(meta) == {}
+        meta = await data.sidecar
+        assert meta == ChainMap() and meta.as_dict() == {}
         with pytest.raises(TypeError, match="no JSON sidecar.*sub-02_T2w.json"):
-            meta["EchoTime"] = 0.03
+            await meta.set("EchoTime", 0.03)
+        with pytest.raises(TypeError, match="no JSON sidecar"):
+            await meta.update(EchoTime=0.03)
+        with pytest.raises(TypeError, match="no JSON sidecar"):
+            await meta.delete("EchoTime")
     assert tx.written == []

@@ -345,7 +345,7 @@ def test_dispatch_memory(memory_root, monkeypatch, rel, kind):
 
 
 def test_memory_listing_dispatches(memory_root):
-    root = BidsPath(memory_root)
+    root = BidsPath(memory_root, mode="w")
     (root / "participants.tsv").write_text("participant_id\nsub-01\n")
     (root / "sub-01" / "anat").mkdir(parents=True)
     (root / "sub-01" / "anat" / "sub-01_T1w.json").write_text("{}")

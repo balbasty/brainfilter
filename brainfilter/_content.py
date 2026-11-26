@@ -331,6 +331,23 @@ def format_value(
     return str(value)
 
 
+# What `Table._match_text` records for a value written as `format_value`
+# writes it, and for a value written two ways.
+_CANONICAL, _AMBIGUOUS = object(), object()
+
+
+def _value_key(value: object) -> tuple:
+    """Return a hashable key for a cell value, equal where `_same` matches."""
+    if isinstance(value, list):
+        return ("list", tuple(_value_key(item) for item in value))
+    return (type(value).__name__, repr(value))
+
+
+def _held(value: object) -> object:
+    """Return a cell value as the table's text record holds it (a list copied)."""
+    return list(value) if isinstance(value, list) else value
+
+
 def _same(value: object, original: object) -> bool:
     """Whether a cell still holds the value it was read with."""
     if type(value) is not type(original):
@@ -343,26 +360,20 @@ def _same(value: object, original: object) -> bool:
 class Table(list):
     """A TSV table: a list of rows, each a `dict` of `column -> value`.
 
-    It is a plain `list` of rows, plus the order of its columns. Values read
-    from a file are typed (`int`, `float`, `bool`, `datetime` objects or
-    `str`, a list of them for a column with a `Delimiter`), and the BIDS
-    missing value `n/a` is `None`; see `TSVContentMixin.read`.
+    It is a plain `list` of rows, plus the order of its columns, and is what
+    a TSV file holds. Pass one to a TSV file's `write()` to give the order
+    of the columns along with the rows.
 
     Edit it as a list (`append`, `del table[i]`, `table[i]["age"] = 31`)
     and with `add_column` and `drop_column`. A key that a row has and
-    `columns` does not becomes a new, last column. When the table is
-    written, a value read from the file and left unchanged keeps its exact
-    text. Any other value is written from its type: `None`, a missing key
-    or a float NaN as `n/a`, a `bool` as `true`/`false`, a `float` in its
-    shortest `repr` form, a date or time in ISO 8601, a list joined with
-    the column's `Delimiter`, and anything else as `str(value)`. A value
-    whose text holds a tab or a line break, and an infinite float, cannot be
-    written (`ValueError`).
-
-    A list in a column is joined with the column's `Delimiter`, from the
-    table's JSON sidecar; a table read from a file knows the `Delimiter` of
-    every column its sidecar describes, including columns it does not have
-    yet.
+    `columns` does not becomes a new, last column. When a table is written,
+    a value read from the file and left unchanged keeps its exact text. Any
+    other value is written from its type: `None`, a missing key or a float
+    NaN as `n/a`, a `bool` as `true`/`false`, a `float` in its shortest
+    `repr` form, a date or time in ISO 8601, a list joined with the
+    column's `Delimiter` (from the table's JSON sidecar), and anything else
+    as `str(value)`. A value whose text holds a tab or a line break, and an
+    infinite float, cannot be written (`ValueError`).
     """
 
     def __init__(
@@ -395,6 +406,46 @@ class Table(list):
                 kept = source._original_text(old)
                 if kept:
                     self._text[id(new)] = (new, dict(kept))
+        if _origin is not None:
+            self._match_text(_origin)
+
+    def _match_text(self, origin: Table) -> None:
+        """Keep the text of cells equal to the cells `origin` was read with.
+
+        A row that is not one of `origin`'s own (a copy of it, say) has no
+        text of its own. Each of its cells takes the text of the cell in the
+        same place in `origin`, if that holds the same value, else the text
+        every cell of the column that holds the value has in `origin`, if
+        they all have the same.
+        """
+        texts: dict[str, dict[tuple, object]] = {}
+        for row in origin:
+            kept = origin._original_text(row)
+            for column, value in row.items():
+                text: object = _CANONICAL
+                if column in kept and _same(value, kept[column][0]):
+                    text = kept[column][1]
+                seen = texts.setdefault(column, {})
+                key = _value_key(value)
+                seen[key] = text if seen.get(key, text) == text else _AMBIGUOUS
+        for index, row in enumerate(self):
+            kept = dict(self._original_text(row))
+            place = (
+                origin._original_text(origin[index])
+                if index < len(origin) else {}
+            )
+            for column, value in row.items():
+                if column in kept:
+                    continue
+                found = place.get(column)
+                if found is not None and _same(value, found[0]):
+                    kept[column] = found
+                    continue
+                text = texts.get(column, {}).get(_value_key(value))
+                if isinstance(text, str):
+                    kept[column] = (_held(value), text)
+            if kept:
+                self._text[id(row)] = (row, kept)
 
     def _original_text(self, row: dict) -> dict[str, tuple[object, str]]:
         kept = self._text.get(id(row))
@@ -443,6 +494,28 @@ class Table(list):
         self._columns = [c for c in self.columns if c != name]
         for row in self:
             row.pop(name, None)
+
+    def _set_column(self, name: str, values: list) -> None:
+        """Set the values of a column, adding it last if it is new.
+
+        A table with no column yet gets one row per value.
+
+        Raises
+        ------
+        ValueError
+            If `values` has not one value per row.
+        """
+        if not self and not self.columns:
+            self.extend({} for _ in values)
+        if len(values) != len(self):
+            raise ValueError(
+                f"column {name!r} is given {len(values)} values, but the "
+                f"table has {len(self)} rows: give one value per row"
+            )
+        if name not in self.columns:
+            self._columns = [*self.columns, name]
+        for row, value in zip(self, values):
+            row[name] = value
 
     def __repr__(self) -> str:
         return f"Table({list(self)!r}, columns={self.columns!r})"
@@ -498,14 +571,6 @@ def copy_json(content: object) -> object:
 
 
 # -- TSV ---------------------------------------------------------------------------
-
-def has_lists(rows: Iterable[Mapping[str, object]]) -> bool:
-    """Whether a value of `rows` is a list (to join with a `Delimiter`)."""
-    return any(
-        isinstance(value, (list, tuple))
-        for row in rows for value in row.values()
-    )
-
 
 def delimiters(descriptions: Mapping | None) -> dict[str, str]:
     """Return the `Delimiter` of each column that `descriptions` gives one."""
@@ -566,8 +631,7 @@ def parse_tsv(
                 continue
             value = row[key] = _convert(spec, cell)
             if cell is not None and format_value(value, spec.delimiter) != cell:
-                original = list(value) if isinstance(value, list) else value
-                kept[key] = (original, cell)
+                kept[key] = (_held(value), cell)
         table.append(row)
         if kept:
             table._text[id(row)] = (row, kept)
@@ -664,7 +728,7 @@ def tsv_dataframe(
         import pandas
     except ImportError:
         raise ImportError(
-            "read_dataframe needs pandas; install it, or use read() "
+            "as_dataframe() needs pandas; install it, or use as_list() "
             "for a list of rows"
         ) from None
     text = _without_bom(text)
