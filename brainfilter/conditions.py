@@ -41,12 +41,17 @@ class Condition:
 
 
 class Regexish(Condition):
+    """A regex, or any-of (`Or`) several regexes.
+
+    `Regexish("a", "b")` matches a value that matches `a` or `b`, the same
+    rule as `Globish`.
+    """
 
     def __new__(cls, *args) -> "Regexish":
         if cls is not Regexish:
             return super().__new__(cls)
         elif len(args) > 1:
-            return And(*map(Regexish, args))
+            return Or(*map(Regexish, args))
         elif len(args) == 0:
             raise ValueError("At least one argument required")
         elif isinstance(args[0], Condition):
@@ -78,6 +83,11 @@ class Regex(Regexish):
 
 
 class Globish(Condition):
+    """A glob, or any-of (`OrGlob`) several globs.
+
+    `Globish("a", "b")` matches a value that matches `a` or `b`, the same
+    rule as `Regexish`.
+    """
 
     def __new__(cls, *args) -> "Globish":
         if cls is not Globish:

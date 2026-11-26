@@ -6,10 +6,18 @@ metadata (`1.2.3+abc`). This module parses and compares such versions and
 tests them against simple specifiers (`>=1.8`, `<2`, `==1.9.*`,
 `>=1.8, <2`).
 
-Ordering follows semver precedence: a pre-release sorts before its release
-(`1.10.0-dev < 1.10.0`), and build metadata is ignored. A version or
-specifier may omit trailing components, which default to zero
-(`1.8` is `1.8.0`).
+Two rules, one per kind of operation:
+
+* **Ordering** (`<`, `==`, `sorted`, ... on `Version`) follows semver
+  precedence: a pre-release sorts before its release
+  (`Version("1.10.0-dev") < Version("1.10.0")`).
+* **Specifier tests** (`compare_versions`, `version_is_satisfied`) compare
+  releases only: a pre-release or dev version counts as its release, on
+  either side. `1.10.0-dev` satisfies `>=1.10` and `==1.10.*`, and does
+  not satisfy `<1.10`.
+
+Build metadata is ignored by both. A version or specifier may omit
+trailing components, which default to zero (`1.8` is `1.8.0`).
 """
 import re
 from functools import total_ordering
@@ -141,6 +149,10 @@ def compare_versions(
 ) -> bool:
     """Test `version <comparator> spec_version`.
 
+    Only releases are compared: a pre-release counts as its release
+    (`1.10.0-dev` satisfies `>=1.10` and `==1.10.0`), and a pre-release
+    in `spec_version` is ignored too.
+
     `spec_version` may end with `.*` (`1.9.*`) with `==` and `!=`: it then
     matches every version, pre-releases included, whose release starts
     with that prefix.
@@ -161,19 +173,19 @@ def compare_versions(
         match = version.release[:len(prefix)] == prefix
         return match if comparator == "==" else not match
 
-    spec_version = Version(spec_version)
+    release, spec = version.release, Version(spec_version).release
     if comparator == "==":
-        return version == spec_version
+        return release == spec
     if comparator == "!=":
-        return version != spec_version
+        return release != spec
     if comparator == ">=":
-        return version >= spec_version
+        return release >= spec
     if comparator == "<=":
-        return version <= spec_version
+        return release <= spec
     if comparator == ">":
-        return version > spec_version
+        return release > spec
     if comparator == "<":
-        return version < spec_version
+        return release < spec
     raise ValueError(f"Unknown comparator: {comparator!r}")
 
 
@@ -181,7 +193,10 @@ def version_is_satisfied(
     specifier: str,
     version: "Version | str | tuple[int | str, ...]",
 ) -> bool:
-    """Whether `version` satisfies every comma-separated specifier."""
+    """Whether `version` satisfies every comma-separated specifier.
+
+    A pre-release counts as its release (see `compare_versions`).
+    """
     return all(
         compare_versions(version, comparator, spec)
         for comparator, spec in split_specifiers(specifier)
