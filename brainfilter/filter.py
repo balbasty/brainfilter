@@ -7,6 +7,7 @@ directory, ...) before anything is downloaded::
     >>> f = Filter(subjects=["01"], datatypes="anat", acq="mprage")
     >>> f.select(listing)                       # relative path strings
     >>> f.walk("s3://openneuro.org/ds000224")   # list a dataset, then select
+    >>> await f.awalk("s3://openneuro.org/ds000224")  # ... asynchronously
 
 Selection rules
 ---------------
@@ -52,7 +53,7 @@ from brainfilter._names import (
     applies_to,
     parse_path,
 )
-from brainfilter.bidspath import BidsPath
+from brainfilter.bidspath import AsyncBidsPath, BidsPath
 from brainfilter.conditions import Condition, Or, Regex
 
 __all__ = ["Filter"]
@@ -266,12 +267,22 @@ class Filter:
         root = root if isinstance(root, BidsPath) else BidsPath(root)
         found: dict[str, BidsPath] = {}
         for dirpath, dirnames, filenames in root.walk():
-            rel_dir = PurePosixPath(str(dirpath.relative_to(root)))
-            top = rel_dir == PurePosixPath(".")
-            dirnames[:] = [d for d in dirnames if self._descend(d, top)]
-            for filename in filenames:
-                rel = (rel_dir / filename).as_posix()
-                found[rel] = dirpath / filename
+            self._visit(root, found, dirpath, dirnames, filenames)
+        return [found[rel] for rel in self._select(found)]
+
+    async def awalk(self, root: object) -> list[AsyncBidsPath]:
+        """List a dataset asynchronously and return the files to keep, sorted.
+
+        The coroutine counterpart of `walk`: `root` is an `AsyncBidsPath`,
+        a path object, or a local path or URL string, and the files are
+        `AsyncBidsPath` objects. On a remote store with a natively async
+        backend the listing runs on its coroutines; there, folders that
+        would be skipped may still be listed, but are never kept.
+        """
+        root = root if isinstance(root, AsyncBidsPath) else AsyncBidsPath(root)
+        found: dict[str, AsyncBidsPath] = {}
+        async for dirpath, dirnames, filenames in root.walk():
+            self._visit(root, found, dirpath, dirnames, filenames)
         return [found[rel] for rel in self._select(found)]
 
     def __call__(self, paths: Iterable[T], root: object = None) -> list[T]:
@@ -279,6 +290,24 @@ class Filter:
         return self.select(paths, root)
 
     # -- engine --------------------------------------------------------------
+    def _visit(
+        self,
+        root: T,
+        found: dict[str, T],
+        dirpath: T,
+        dirnames: list[str],
+        filenames: list[str],
+    ) -> None:
+        """Record one directory of a walk in `found`; prune `dirnames`."""
+        # From the parts: a remote async path spells a relative path as a URL
+        rel = dirpath.relative_to(root)  # type: ignore[attr-defined]
+        rel_dir = PurePosixPath(*rel.parts)
+        top = rel_dir == PurePosixPath(".")
+        dirnames[:] = [d for d in dirnames if self._descend(d, top)]
+        for filename in filenames:
+            rel = (rel_dir / filename).as_posix()
+            found[rel] = dirpath / filename  # type: ignore[operator]
+
     def _descend(self, name: str, top: bool) -> bool:
         """Whether `walk` lists a directory (pruning never changes a result)."""
         if name.startswith("."):
