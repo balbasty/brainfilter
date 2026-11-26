@@ -6,6 +6,7 @@ that do not exist yet.
 """
 from __future__ import annotations
 
+from pathlib import PurePath, PurePosixPath
 from typing import NamedTuple
 
 # Datatype directories (`sub-<label>[/ses-<label>]/<datatype>/`).
@@ -16,6 +17,24 @@ DATATYPES = frozenset({
 
 # Extensions of metadata files (sidecars, tables, gradient tables).
 METADATA_EXTENSIONS = frozenset({".json", ".tsv", ".bval", ".bvec"})
+
+# Metadata suffixes that apply to data files with another suffix
+# (`sub-01_task-x_events.tsv` describes `sub-01_task-x_bold.nii.gz`).
+COMPANION_SUFFIXES = frozenset({
+    "scans", "sessions", "events", "physio", "stim", "channels",
+    "electrodes", "coordsystem", "aslcontext", "asllabeling", "beh",
+})
+
+# Top-level folders that are not part of the raw data.
+OPTIONAL_FOLDERS = ("derivatives", "sourcedata", "code", "stimuli")
+
+# Dataset-level files.
+TOP_LEVEL_FILES = frozenset({
+    "dataset_description.json", "participants.tsv", "participants.json",
+    "samples.tsv", "samples.json", "genetic_info.json",
+    "README", "README.md", "README.txt", "README.rst",
+    "CHANGES", "LICENSE", "CITATION.cff", ".bidsignore",
+})
 
 # Entity keys in the order BIDS 1.11.2 puts them in a file name
 # (`rules/entities.yaml` of the official schema).
@@ -193,3 +212,75 @@ def role_of(name: str, parent_name: str) -> str | None:
     if ext == ".tsv":
         return "table"
     return None
+
+
+class ParsedPath(NamedTuple):
+    """The BIDS components of a path, relative to its dataset root."""
+
+    path: str
+    """The path, `/`-separated."""
+    directory: PurePosixPath
+    """The directory the path is in (`.` at the dataset root)."""
+    entities: dict
+    """The entities of the name; empty for a non-BIDS name."""
+    suffix: str | None
+    """The BIDS suffix of the name, or `None`."""
+    extension: str
+    """Everything from the first dot of the name, or `""`."""
+    datatype: str | None
+    """The datatype directory the path is in (`anat`), or `None`."""
+
+    @property
+    def is_metadata(self) -> bool:
+        """Whether the name is a metadata file (`.json`, `.tsv`, ...)."""
+        return self.extension in METADATA_EXTENSIONS
+
+
+def parse_path(path: object) -> ParsedPath:
+    """Parse a path's name and its datatype directory, lexically.
+
+    `path` is a `/`-separated string or a path object; a `ParsedPath` is
+    returned unchanged. Parsing never raises.
+    """
+    if isinstance(path, ParsedPath):
+        return path
+    if isinstance(path, PurePath):
+        path = path.as_posix()
+    p = PurePosixPath(str(path))
+    parsed = parse_name(p.name)
+    parent = p.parent.name
+    datatype = parent if parent in DATATYPES else None
+    return ParsedPath(
+        p.as_posix(), p.parent, parsed.entities, parsed.suffix,
+        parsed.extension, datatype,
+    )
+
+
+def applies_to(meta: object, data: object) -> bool:
+    """Whether a metadata file applies to a data file (BIDS inheritance).
+
+    It does when all of these hold:
+
+    - its directory is the data file's directory or one of its ancestors;
+    - every entity of its name is in the data file's name, with the same
+      label;
+    - its suffix is the data file's suffix, or a companion suffix
+      (`events`, `scans`, `sessions`, `physio`, ...; see
+      `COMPANION_SUFFIXES`);
+    - if it is in a datatype directory, the data file is in one of the
+      same datatype.
+
+    Both paths are `/`-separated strings, path objects or `ParsedPath`,
+    relative to the same root. Whether `meta` is a metadata file at all is
+    not checked.
+    """
+    meta, data = parse_path(meta), parse_path(data)
+    if meta.directory != data.directory and (
+        meta.directory not in data.directory.parents
+    ):
+        return False
+    if meta.suffix != data.suffix and meta.suffix not in COMPANION_SUFFIXES:
+        return False
+    if meta.datatype and meta.datatype != data.datatype:
+        return False
+    return all(data.entities.get(k) == v for k, v in meta.entities.items())

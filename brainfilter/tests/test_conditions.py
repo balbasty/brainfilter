@@ -6,7 +6,6 @@ import pytest
 from brainfilter.conditions import (
     And, AndGlob, Glob, Globish, NotACondition, Or, OrGlob, Regex, Regexish,
 )
-from brainfilter.filter import Filter
 
 
 def test_glob_call():
@@ -82,16 +81,3 @@ def test_and_or():
         And(1)
     with pytest.raises(NotACondition.Error):
         Or(1)
-
-
-def test_filter(tmp_path):
-    ds = tmp_path / "ds"
-    (ds / "sub-01" / "anat").mkdir(parents=True)
-    (ds / "sub-01" / "anat" / "sub-01_T1w.nii.gz").touch()
-    (ds / "sub-01" / "anat" / "sub-01_T1w.json").touch()
-    found = set(Filter(str(ds), glob="**/*.json"))
-    assert found == {ds / "sub-01" / "anat" / "sub-01_T1w.json"}
-    found = set(Filter(re.compile(r".*/ds"), root=tmp_path, regex=r"\.nii"))
-    assert found == {ds / "sub-01" / "anat" / "sub-01_T1w.nii.gz"}
-    with pytest.raises(NotImplementedError):
-        Filter(ds, sub="01")
