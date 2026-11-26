@@ -62,7 +62,12 @@ def test_factories():
     r = Regex("x")
     assert Regexish(r) is r and r.pattern.pattern == "x"
     assert isinstance(Regexish("x"), Regex)
-    assert isinstance(Regexish("x", "y"), And)
+    # several arguments combine as any-of, for regexes and globs alike
+    either = Regexish("x", "y")
+    assert isinstance(either, Or) and not isinstance(either, And)
+    assert either("x") and either("y") and not either("z")
+    either = Globish("*.json", "*.tsv")
+    assert either("a.json") and either("a.tsv") and not either("a.nii")
     with pytest.raises(ValueError):
         Globish()
     with pytest.raises(ValueError):
