@@ -3,7 +3,8 @@
 A [`Filter`][brainfilter.Filter] describes which part of a BIDS dataset you
 want. This tutorial builds filters for the situations that come up most often:
 picking subjects and sessions, picking a kind of recording, matching on the
-entities in a file name, and cutting a selection down with patterns. The
+entities in a file name, on the values in the sidecars and on the
+participants table, and cutting a selection down with patterns. The
 examples use the small dataset from [First steps](../getting-started/first-steps.md)
 (the collapsed script on that page creates it), opened as `ds`.
 
@@ -161,7 +162,116 @@ sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
 ```
 
 A list may mix plain values, globs and regexes, and selects a label that
-matches any of them.
+matches any of them. A set does the same, and so does a function that takes
+the label and says whether it matches, such as
+`run=lambda run: int(run) > 1`.
+
+## With or without an entity
+
+A filter on an entity keeps only the files that have it, as the section on
+tasks pointed out. Sometimes the files you want are precisely those without
+it, or those with it whatever its label. The markers of the standard `typing`
+module say so: `Never` selects the files that do not have the entity, and
+`Any` the files that have it with any label. Here are the images of subject 2
+with no run number, and then those with one.
+
+```pycon
+>>> from typing import Any, Never
+>>> images(Filter(subjects=2, run=Never).walk(ds))
+sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
+>>> images(Filter(subjects=2, run=Any).walk(ds))
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
+```
+
+`None` means the same as `Never`, since a label is never empty, and
+`typing.Required` the same as `Any`. On Python 3.10, which lacks `Never` and
+`Required`, import them from `typing_extensions`. A marker can sit in a set
+beside ordinary values. The filter below keeps the images that have no
+acquisition label, together with those acquired with the `fse` sequence.
+
+```pycon
+>>> images(Filter(subjects=2, acq={Never, "fse"}).walk(ds))
+sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
+```
+
+## Values in the sidecars
+
+The parameters of a recording live in its JSON sidecars, and a filter can
+select on them too. A keyword that starts with a capital letter names a
+sidecar field, and the value it is compared with is the one the
+recording's merged sidecar holds, the nearest sidecar winning as it does for
+[`sidecar`](read-metadata.md). In the example dataset, the resting-state
+recordings take their repetition time of 2 seconds from the top-level
+`task-rest_bold.json`, while the *n*-back recordings have sidecars of their
+own that say 1.5.
+
+```pycon
+>>> images(Filter(subjects=2, RepetitionTime=1.5).walk(ds))
+sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
+>>> images(Filter(subjects=2, RepetitionTime=2).walk(ds))
+sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
+```
+
+A plain value is compared with `==`, so the integer `2` matches the `2.0` of
+the sidecar, while a string has to match exactly. A function of the value
+expresses a condition, and the markers of the previous section ask whether a
+field is there at all.
+
+```pycon
+>>> images(Filter(subjects=2, EchoTime=lambda echo: echo < 0.01).walk(ds))
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
+>>> images(Filter(subjects=2, RepetitionTime=Never).walk(ds))
+sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
+```
+
+The function is only asked about recordings that have the field, and one that
+fails on a value of the wrong type (a comparison between a number and a
+string, say) does not match it rather than stopping the walk. Two forms
+differ from the label filters, because a sidecar value need not be text. A
+list is a value in its own right, compared as a whole, so
+`SliceTiming=[0.0, 0.5]` selects the recordings with exactly those slice
+times; to accept one of several values, put them in a set, as in
+`PhaseEncodingDirection={"j", "j-"}`. And `None` matches a field whose value
+is the JSON `null`, while `Never` matches one that is absent. A field whose
+name is not a valid keyword goes in a dictionary instead:
+`Filter(sidecar={"Field-Name": 1})`.
+
+A sidecar filter decides which recordings are kept, and the metadata that
+goes with them follows as usual. The sidecars are read only for the
+recordings that pass every other filter, and each file is read once.
+
+## Participants
+
+The `participants` keyword filters on the columns of `participants.tsv`, and
+keeps the recordings of the subjects whose row passes every condition. The
+values take the same forms as for sidecars, and they are compared with the
+typed values of the table, so the ages below are numbers.
+
+```pycon
+>>> images(Filter(participants={"age": lambda age: age > 28}, suffixes="T2w").walk(ds))
+sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
+>>> images(Filter(participants={"sex": "F"}, suffixes="T2w").walk(ds))
+sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
+sub-10/ses-1/anat/sub-10_ses-1_acq-fse_T2w.nii.gz
+sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
+```
+
+A cell written `n/a` reads as `None`, so `None` selects the subjects whose
+value is missing, and a condition on the value does not match them. `Any`
+asks for the column to exist, and `Never` for it not to. A subject that has
+no row in the table is left out, and the filter combines with `subjects` and
+the other keywords: a recording is kept only if it passes them all. A dataset
+without a `participants.tsv` cannot answer the question, and filtering it on
+participants raises `FileNotFoundError`.
 
 ## Include and exclude
 
@@ -204,6 +314,29 @@ A requested folder is kept whole, and the other filters do not apply inside
 it. Ask for several folders with a list, such as
 `folders=["derivatives", "code"]`; a name outside those four is an error that
 lists the valid choices.
+
+## Files the dataset ignores
+
+A dataset can declare files that are not part of it in a `.bidsignore` file
+at its root, which the BIDS validator reads with the same patterns as a
+`.gitignore`. A filter honours it: the files and folders it names are neither
+recordings nor metadata, so they are never selected, and a folder it names is
+not even listed. Lines starting with `#` are comments, a pattern ending in
+`/` names folders, a pattern containing a `/` is matched from the dataset
+root, `**` stands for any number of folders, and a pattern starting with `!`
+brings back a file that an earlier pattern left out. A dataset with the
+`.bidsignore` below keeps its notes and its scanner logs out of every
+selection.
+
+```text
+# not part of the BIDS dataset
+*_notes.txt
+sub-*/logs/
+```
+
+`dataset_description.json` and the `.bidsignore` itself are always kept. To
+see the files that the dataset ignores, build the filter with
+`bidsignore=False`.
 
 ## Filtering a derivatives dataset
 
@@ -284,6 +417,12 @@ listing serves several filters, as the
 Two details apply to `select()`: it expects files, so a list that includes
 directories must be reduced with `is_file()` first, and it returns the result
 sorted by relative path.
+
+Most filters only look at names, so they work on plain strings. The others
+need something to read. A filter on participants reads `participants.tsv`
+under `root`, a filter on sidecar values reads the sidecars of the listing,
+which must then hold path objects, and a `.bidsignore` in the listing is read
+when it is a path object or when `root` is given.
 
 ## Where to go next
 

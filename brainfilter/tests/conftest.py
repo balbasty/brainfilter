@@ -75,3 +75,20 @@ def fail_nth(monkeypatch):
         return calls
 
     return arm
+
+
+@pytest.fixture
+def listed_dirs(monkeypatch):
+    """Record each directory the in-process memory store lists, in order."""
+    pytest.importorskip("fsspec")
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    listed = []
+    real = MemoryFileSystem.ls
+
+    def ls(self, path, *args, **kwargs):
+        listed.append(MemoryFileSystem._strip_protocol(path).rstrip("/"))
+        return real(self, path, *args, **kwargs)
+
+    monkeypatch.setattr(MemoryFileSystem, "ls", ls)
+    return listed

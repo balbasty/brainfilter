@@ -1,7 +1,7 @@
 """Select a subset of a BIDS dataset from its file listing.
 
 A [`Filter`][brainfilter.Filter] works on paths relative to the
-dataset root only, so it applies to any listing (OpenNeuro, S3, a local
+dataset root, so it applies to any listing (OpenNeuro, S3, a local
 directory, ...) before anything is downloaded::
 
     >>> f = Filter(subjects=["01"], datatypes="anat", acq="mprage")
@@ -9,18 +9,24 @@ directory, ...) before anything is downloaded::
     >>> f.walk("s3://openneuro.org/ds000224")   # list a dataset, then select
     >>> await f.awalk("s3://openneuro.org/ds000224")  # ... asynchronously
 
+Besides the listing, a walk reads `.bidsignore`, a filter on
+`participants.tsv` reads that table, and a filter on sidecar values reads
+the sidecars of the data files that pass every other filter, each once.
+
 Selection rules
 ---------------
 The input is a listing of files; see `Filter.select` for directories.
 
 1. *Data files* are files inside `sub-*/` that are not metadata. They are
    kept if they pass every filter: subjects, sessions, datatypes, suffixes,
-   tasks, other entities and the `include` patterns. A table that is a
-   recording (`*_beh.tsv`, `*_motion.tsv`, `*_blood.tsv`) is a data file,
-   and so is a continuous recording (`*_physio.tsv.gz`). A data file that
-   is a directory (a CTF MEG `*_meg.ds/`, an OME-Zarr `*.ome.zarr/`) is one
+   tasks, other entities, the `include` patterns, the participants filter
+   (on the subject's row of `participants.tsv`) and the sidecar filters
+   (on the merged sidecar of the file). A table that is a recording
+   (`*_beh.tsv`, `*_motion.tsv`, `*_blood.tsv`) is a data file, and so is
+   a continuous recording (`*_physio.tsv.gz`). A data file that is a
+   directory (a CTF MEG `*_meg.ds/`, an OME-Zarr `*.ome.zarr/`) is one
    data item: every file inside it is kept or skipped with it, judged on
-   the directory's name and datatype.
+   the directory's name, datatype and sidecar.
 2. *Metadata files* (`.json`, `.tsv`, `.bval`, `.bvec`), wherever they are,
    are kept if they apply to at least one kept data file under the BIDS
    inheritance principle. So is a data file that is also a companion of
@@ -31,8 +37,11 @@ The input is a listing of files; see `Filter.select` for directories.
    recording) is judged on what it names: it is kept if its subject,
    session, datatype, suffix and path pass the filters, and the entity
    filters for the entities it has. An entity filter on an entity it does
-   not have passes. So an empty `Filter()` keeps every file that rule 5
-   does not skip.
+   not have passes, unless all it asks is that the entity be there
+   (`Any`, `Required`); `Never` passes. A sidecar filter is judged the same
+   way, as a filter on a field it does not have, and the participants
+   filter on its subject, when it has one. So an empty `Filter()` keeps
+   every file that rule 5 does not skip.
 4. Dataset-level files (`dataset_description.json`, `participants.tsv`,
    `README`, `CHANGES`, `.bidsignore`, ...), other top-level files that are
    not sidecars, and `phenotype/` are always kept. Top-level sidecars
@@ -41,19 +50,26 @@ The input is a listing of files; see `Filter.select` for directories.
    requested with `folders`. Hidden files and folders (`.datalad/`,
    `.gitattributes`, ...) and other top-level folders are always skipped;
    a hidden name inside a data directory (`.zattrs` in `*.ome.zarr/`) is
-   part of the data file, and kept with it.
+   part of the data file, and kept with it. The files the dataset's
+   `.bidsignore` names are not part of the dataset: they are neither data
+   nor metadata, and are skipped (but `dataset_description.json` and
+   `.bidsignore` itself).
 6. Last, the `exclude` patterns remove any kept file but
    `dataset_description.json`.
 
 Matching values
 ---------------
-Each filter takes a plain value (matched exactly), a list of values (any of
-them), a glob ([`Glob`][brainfilter.Glob]), a regex (a `re.Pattern` or
-[`Regex`][brainfilter.Regex], which must match the whole label:
-`re.compile("1")` matches `sub-1` but not `sub-10`; a
-`Regex(..., full=False)` is found anywhere in it instead) or any other
-condition. Plain labels may keep their `<key>-` prefix (`"sub-01"` is
-`"01"`); a pattern is matched against the bare label.
+Each label filter takes a plain value (matched exactly), several values in
+a list or a set (any of them), a glob ([`Glob`][brainfilter.Glob]), a regex
+(a `re.Pattern` or [`Regex`][brainfilter.Regex], which must match the
+whole label: `re.compile("1")` matches `sub-1` but not `sub-10`; a
+`Regex(..., full=False)` is found anywhere in it instead), a function of
+the label that says whether it matches, or a marker of presence:
+`typing.Never` (or `None`) matches a file that does not have the entity,
+and `typing.Any` (or `typing.Required`) one that has it, whatever its
+label. A list or a set may mix all of these: `acq={Never, "mprage"}`.
+Plain labels may keep their `<key>-` prefix (`"sub-01"` is `"01"`); a
+pattern is matched against the bare label.
 
 Index entities (`run`, `echo`, `flip`, `inv`, `split`, `chunk`) compare
 plain values by number: `run=1`, `run="1"` and `run="01"` all match
@@ -63,6 +79,18 @@ Other entities compare strings as exact text, but an `int` by number on any
 entity: `subjects=1` matches `sub-1`, `sub-01` and `sub-001` (never `sub-1a`)
 where `subjects="1"` matches `sub-1` only.
 
+A filter on a sidecar field or a `participants.tsv` column takes the same
+forms, on the value the JSON or the table holds, with three differences. A
+plain value is compared with `==` (`2` matches `2.0`, a string is exact
+text, and `True` is not `1`). A list is one value, compared whole
+(`SliceTiming=[0.0, 0.5]`), so several values to choose from go in a set.
+And `None` is a value: the JSON `null`, or `n/a` in the table. `Never`
+matches a file whose sidecars lack the field (a table without the column),
+`Any` one that has it, `null` included. A glob or a regex matches text
+only, and a function that raises `TypeError`, `ValueError` or
+`AttributeError` on a value (a number compared with a string, say) does
+not match it.
+
 The `include`/`exclude` patterns are matched against the relative path
 instead, and a regex there is found anywhere in it (`re.search`) unless
 anchored.
@@ -70,10 +98,16 @@ anchored.
 from __future__ import annotations
 
 import asyncio
+import json
+import pathlib
 import re
-from collections.abc import Callable, Iterable
+import typing
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import PurePosixPath
 from typing import TypeVar
+
+import typing_extensions
+from bagof.paths import AsyncPath, Path, PurePath
 
 from brainfilter._family import in_family
 from brainfilter._names import (
@@ -100,18 +134,80 @@ T = TypeVar("T")
 # Never removed by `exclude`.
 _PROTECTED = frozenset({"dataset_description.json"})
 
+# Never ignored by `.bidsignore`.
+_NEVER_IGNORED = frozenset({"dataset_description.json", ".bidsignore"})
+
 # Filter keywords that are entity filters under another name.
 _ALIASES = {"subjects": "sub", "sessions": "ses", "tasks": "task"}
+
+_PARTICIPANTS = "participants.tsv"
+_BIDSIGNORE = ".bidsignore"
+
+# The markers of presence, from `typing` and `typing_extensions` (distinct
+# objects on older Pythons), compared by identity.
+_ABSENT_MARKERS = tuple({
+    id(m): m for m in (
+        typing.NoReturn, getattr(typing, "Never", None),
+        typing_extensions.Never, typing_extensions.NoReturn,
+    ) if m is not None
+}.values())
+_PRESENT_MARKERS = tuple({
+    id(m): m for m in (
+        typing.Any, getattr(typing, "Required", None),
+        typing_extensions.Any, typing_extensions.Required,
+    ) if m is not None
+}.values())
+
+# The exceptions that make a test fail on a value instead of raising: what
+# a test of the wrong type of value raises (`None < 0.03`, `(2).lower()`).
+_WRONG_VALUE = (TypeError, ValueError, AttributeError)
+
+
+class _NoFilter:
+    """The default of a label keyword: no filter on it."""
+
+    def __repr__(self) -> str:
+        return "<no filter>"
+
+
+_NO_FILTER: object = _NoFilter()
+
+
+class _Absent:
+    """The value of a sidecar field or a table column that is not there."""
+
+    def __repr__(self) -> str:
+        return "<absent>"
+
+
+_ABSENT: object = _Absent()
+
+
+def _is_marker(value: object, markers: tuple) -> bool:
+    return any(value is marker for marker in markers)
 
 
 def _is_many(value: object) -> bool:
     return isinstance(value, (list, tuple, set, frozenset))
 
 
-def _as_condition(value: object) -> Condition | None:
-    """Return a filter value as a label condition; `None` for a plain value.
+def _is_test(value: object) -> bool:
+    """Whether a value is a function to call on a label or a value."""
+    return callable(value) and not isinstance(value, type)
 
-    A regex that did not choose (`full=None`) must match the whole label.
+
+def _guarded(test: Callable[[object], object], value: object) -> bool:
+    """Call a test; one that raises on a value of the wrong type fails."""
+    try:
+        return bool(test(value))
+    except _WRONG_VALUE:
+        return False
+
+
+def _as_condition(value: object) -> Condition | None:
+    """Return a filter value as a pattern condition; `None` for another value.
+
+    A regex that did not choose (`full=None`) must match the whole value.
     """
     if isinstance(value, Condition):
         return default_full(value, True)
@@ -120,49 +216,152 @@ def _as_condition(value: object) -> Condition | None:
     return None
 
 
-def _matcher(
-    value: object, key: str | None, index: bool = False
-) -> Callable[[object], bool] | None:
-    """Build `label -> bool` from a filter value; `None` keeps everything.
+class _LabelMatch:
+    """`label -> bool` for a label filter; a label of `None` is absent.
 
     A plain value loses its `<key>-` prefix (when `key` is given). An `int`
     (not a `bool`) matches any all-digit label equal to it as a number, on
     any entity. With `index`, a plain string and the label compare by number
-    too; otherwise a string compares as exact text. Conditions see the label
-    as written; a regex must match all of it.
+    too; otherwise a string compares as exact text. Conditions and tests
+    see the label as written; a regex must match all of it.
     """
-    if value is None:
+
+    def __init__(self, values: list, key: str | None, index: bool) -> None:
+        self.absent = False      # `Never` / `None`: no such entity
+        self.present = False     # `Any` / `Required`: any label
+        self.exact: set[object] = set()
+        self.numbers: set[int] = set()
+        self.tests: list[Callable[[object], bool]] = []
+        self.index = index
+        for item in values:
+            if item is None or _is_marker(item, _ABSENT_MARKERS):
+                self.absent = True
+                continue
+            if _is_marker(item, _PRESENT_MARKERS):
+                self.present = True
+                continue
+            cond = _as_condition(item)
+            if cond is not None:
+                self.tests.append(cond)
+                continue
+            if _is_test(item):
+                self.tests.append(item)  # type: ignore[arg-type]
+                continue
+            if isinstance(item, int) and not isinstance(item, bool):
+                self.numbers.add(item)
+                continue
+            item = str(item)
+            if key and item.startswith(key + "-"):
+                item = item[len(key) + 1:]
+            self.exact.add(index_value(item) if index else item)
+
+    @property
+    def lenient(self) -> bool:
+        """Whether a file without the entity passes, judged on its own name.
+
+        For selection rule 3: every filter but one that only asks for the
+        entity to be there.
+        """
+        return self.absent or bool(self.exact or self.numbers or self.tests)
+
+    def __call__(self, label: object) -> bool:
+        if label is None:
+            return self.absent
+        if self.present:
+            return True
+        text = str(label)
+        number = index_value(text)
+        if isinstance(number, int) and number in self.numbers:
+            return True
+        value = number if self.index else label
+        if value in self.exact:
+            return True
+        return any(_guarded(test, label) for test in self.tests)
+
+
+def _matcher(
+    value: object, key: str | None, index: bool = False
+) -> _LabelMatch | None:
+    """Build the test of a label filter; `None` keeps everything."""
+    if value is _NO_FILTER:
         return None
     values = list(value) if _is_many(value) else [value]
     if not values:
         return None
-    exact: set[object] = set()
-    numbers: set[int] = set()
-    conditions: list[Condition] = []
-    for item in values:
-        cond = _as_condition(item)
-        if cond is not None:
-            conditions.append(cond)
-            continue
-        if isinstance(item, int) and not isinstance(item, bool):
-            numbers.add(item)
-            continue
-        item = str(item)
-        if key and item.startswith(key + "-"):
-            item = item[len(key) + 1:]
-        exact.add(index_value(item) if index else item)
+    return _LabelMatch(values, key, index)
 
-    def match(label: object) -> bool:
-        if label is None:
-            return False
-        text = str(label)
-        number = index_value(text)
-        if isinstance(number, int) and number in numbers:
-            return True
-        value = number if index else label
-        return value in exact or any(cond(label) for cond in conditions)
 
-    return match
+def _equal(value: object, expected: object) -> bool:
+    """Whether a JSON or table value is a plain filter value.
+
+    `==`, but a `bool` is never a number, and a list (or tuple) is compared
+    item by item, the same way.
+    """
+    if isinstance(value, bool) or isinstance(expected, bool):
+        return (
+            isinstance(value, bool) and isinstance(expected, bool)
+            and value == expected
+        )
+    if isinstance(expected, (list, tuple)):
+        return (
+            isinstance(value, (list, tuple)) and len(value) == len(expected)
+            and all(map(_equal, value, expected))
+        )
+    if isinstance(expected, Mapping):
+        return (
+            isinstance(value, Mapping) and set(value) == set(expected)
+            and all(_equal(value[k], expected[k]) for k in expected)
+        )
+    try:
+        return bool(value == expected)
+    except Exception:  # noqa: BLE001 -- a value that cannot be compared
+        return False
+
+
+def _value_test(item: object) -> Callable[[object], bool]:
+    """Build `value -> bool` for one value of a sidecar or table filter."""
+    if _is_marker(item, _ABSENT_MARKERS):
+        return lambda value: value is _ABSENT
+    if _is_marker(item, _PRESENT_MARKERS):
+        return lambda value: value is not _ABSENT
+    if item is None:
+        return lambda value: value is None
+    cond = _as_condition(item)
+    if cond is not None:
+        return lambda value: isinstance(value, str) and cond(value)
+    if _is_test(item):
+        return lambda value: value is not _ABSENT and _guarded(item, value)
+    return lambda value: value is not _ABSENT and _equal(value, item)
+
+
+class _ValueMatch:
+    """`value -> bool` for a sidecar or table filter; `_ABSENT` if not there.
+
+    A set (or frozenset) is any of its members; anything else, a list
+    included, is one value.
+    """
+
+    def __init__(self, value: object) -> None:
+        items = list(value) if isinstance(value, (set, frozenset)) else [value]
+        self.tests = [_value_test(item) for item in items]
+        self.lenient = any(
+            not _is_marker(item, _PRESENT_MARKERS) for item in items
+        )
+
+    def __call__(self, value: object) -> bool:
+        return any(test(value) for test in self.tests)
+
+
+def _value_matchers(given: Mapping, what: str) -> dict[str, _ValueMatch]:
+    tests = {}
+    for key, value in given.items():
+        if not isinstance(key, str):
+            raise TypeError(f"Filter got a {what} filter on {key!r}: a name "
+                            "must be a string")
+        if isinstance(value, (set, frozenset)) and not value:
+            continue
+        tests[key] = _ValueMatch(value)
+    return tests
 
 
 def _patterns(value: object) -> Condition | None:
@@ -190,7 +389,24 @@ class Filter:
     `run="1"` matches `run-01`. A regex must match the whole label
     (`re.fullmatch`): `subjects=re.compile("1")` keeps `sub-1`, not
     `sub-10`; a `Regex(..., full=False)` is found anywhere in the label. A
-    glob or regex on an index entity sees the label as written.
+    glob or regex on an index entity sees the label as written. A list or
+    a set is any of its values, and a function of the label is a test.
+    `typing.Never` (or `None`) keeps the files that do not have the entity,
+    and `typing.Any` (or `typing.Required`) those that have it:
+    `acq={Never, "mprage"}` keeps the files with no `acq` entity and those
+    with `acq-mprage`.
+
+    Sidecar filters, given as keywords that start with a capital letter
+    (`RepetitionTime=2.0`), and the `participants` filters match a value of
+    the merged sidecar of a data file, or of its subject's row of
+    `participants.tsv`. A plain value is compared with `==` (`2` matches
+    `2.0`; `True` is not `1`), and a list is one value, compared whole, so
+    several values go in a set: `PhaseEncodingDirection={"j", "j-"}`. A
+    function of the value is a test (`EchoTime=lambda t: t < 0.03`), and
+    one that raises `TypeError`, `ValueError` or `AttributeError` on a
+    value does not match it. `None` is the JSON `null` or the table's
+    `n/a`; `Never` matches a field (or column) that is not there, and `Any`
+    one that is. A glob or a regex matches text only.
 
     Path filters (`include`, `exclude`) match the path relative to the
     dataset root. A glob must match the whole path (`fnmatch`); a regex is
@@ -211,9 +427,21 @@ class Filter:
         `sourcedata`, `code` and `stimuli`. They are kept whole.
     entities
         Filters on any other entity, `{key: value}`.
+    sidecar
+        Filters on the merged sidecar of each data file, `{field: value}`,
+        for the fields whose name is not a keyword (or to give them all in
+        one mapping).
+    participants
+        Filters on the columns of `participants.tsv`, `{column: value}`:
+        keep the data files of the subjects whose row matches every one.
+        A subject without a row is not kept, and a dataset without
+        `participants.tsv` is an error.
+    bidsignore
+        Whether to skip the files that the dataset's `.bidsignore` names.
     **kwargs
         Filters on a known BIDS entity (`acq="mprage"`, `run=[1, 2]`,
-        `sub=...`, ...).
+        `sub=...`, ...), and on a sidecar field for a keyword that starts
+        with a capital letter (`RepetitionTime=2.0`).
 
     Notes
     -----
@@ -225,23 +453,30 @@ class Filter:
     def __init__(
         self,
         *,
-        subjects: object = None,
-        exclude_subjects: object = None,
-        sessions: object = None,
-        datatypes: object = None,
-        suffixes: object = None,
-        tasks: object = None,
+        subjects: object = _NO_FILTER,
+        exclude_subjects: object = _NO_FILTER,
+        sessions: object = _NO_FILTER,
+        datatypes: object = _NO_FILTER,
+        suffixes: object = _NO_FILTER,
+        tasks: object = _NO_FILTER,
         include: object = None,
         exclude: object = None,
         folders: Iterable[str] = (),
-        entities: dict | None = None,
+        entities: Mapping | None = None,
+        sidecar: Mapping | None = None,
+        participants: Mapping | None = None,
+        bidsignore: bool = True,
         **kwargs: object,
     ) -> None:
+        fields = {k: v for k, v in kwargs.items() if k[:1].isupper()}
+        kwargs = {k: v for k, v in kwargs.items() if k not in fields}
         unknown = set(kwargs) - set(SORTED_ENTITIES)
         if unknown:
             raise TypeError(
                 f"Filter got unknown keywords {', '.join(sorted(unknown))}; "
-                "filter on another entity with entities={key: value}"
+                "filter on another entity with entities={key: value}, and on "
+                "a sidecar field with a keyword that starts with a capital "
+                "letter or with sidecar={field: value}"
             )
         given = dict(entities or {})
         for name, value in kwargs.items():
@@ -251,15 +486,22 @@ class Filter:
         for name, key in _ALIASES.items():
             value = {"subjects": subjects, "sessions": sessions,
                      "tasks": tasks}[name]
-            if value is None:
+            if value is _NO_FILTER:
                 continue
             if key in given:
                 raise TypeError(
                     f"Filter got both {name}= and a filter on entity {key!r}"
                 )
             given[key] = value
+        on_sidecar = dict(sidecar or {})
+        for name, value in fields.items():
+            if name in on_sidecar:
+                raise TypeError(
+                    f"Filter got two filters for sidecar field {name!r}"
+                )
+            on_sidecar[name] = value
 
-        self.entities: dict[str, Callable[[object], bool]] = {}
+        self.entities: dict[str, _LabelMatch] = {}
         for key, value in given.items():
             match = _matcher(value, str(key), str(key) in INDEX_ENTITIES)
             if match is not None:
@@ -269,6 +511,9 @@ class Filter:
         self.suffixes = _matcher(suffixes, None)
         self.include = _patterns(include)
         self.exclude = _patterns(exclude)
+        self.sidecar = _value_matchers(on_sidecar, "sidecar")
+        self.participants = _value_matchers(participants or {}, "participants")
+        self.bidsignore = bool(bidsignore)
         if isinstance(folders, str):
             folders = [folders]
         self.folders = frozenset(folders)
@@ -281,30 +526,35 @@ class Filter:
 
     # -- single files --------------------------------------------------------
     def keep_data(self, path: object) -> bool:
-        """Whether a data file passes every filter (path relative to root).
+        """Whether a data file passes the filters on its path and name.
 
-        A file inside a data file that is a directory (`sub-01_meg.ds/x`) is
-        judged on that directory's name and datatype.
+        `path` is relative to the dataset root. A file inside a data file
+        that is a directory (`sub-01_meg.ds/x`) is judged on that
+        directory's name and datatype. The sidecar and participants filters
+        read files, and are not applied here.
         """
         return self._passes(parse_path(path))
 
     def _passes(self, name: ParsedPath, entities: dict | None = None) -> bool:
-        """Whether a parsed path passes every filter.
+        """Whether a parsed path passes every filter on its name.
 
         With `entities` (for a metadata file that applies to no data file),
         the entity filters read them instead, and one on an entity they do
-        not have passes.
+        not have passes if it is lenient.
         """
         partial = entities is not None
         ent = name.entities if entities is None else entities
         for key, match in self.entities.items():
             label = ent.get(key)
             if label is None and partial:
-                continue
+                if match.lenient:
+                    continue
+                return False
             if not match(label):
                 return False
-        if self.exclude_subjects and self.exclude_subjects(ent.get("sub")):
-            return False
+        if self.exclude_subjects and not (partial and ent.get("sub") is None):
+            if self.exclude_subjects(ent.get("sub")):
+                return False
         if self.datatypes and not self.datatypes(name.datatype):
             return False
         if self.suffixes and not self.suffixes(name.suffix):
@@ -314,7 +564,11 @@ class Filter:
         return True
 
     def keep_subject(self, label: str) -> bool:
-        """Whether a subject (`"01"` or `"sub-01"`) passes the subject filters."""
+        """Whether a subject (`"01"` or `"sub-01"`) passes the subject filters.
+
+        Only `subjects` and `exclude_subjects` are applied; the participants
+        filters read `participants.tsv`, and are not.
+        """
         label = str(label)
         if label.startswith("sub-"):
             label = label[4:]
@@ -322,6 +576,10 @@ class Filter:
         if match and not match(label):
             return False
         return not (self.exclude_subjects and self.exclude_subjects(label))
+
+    def _keep_session(self, label: str) -> bool:
+        match = self.entities.get("ses")
+        return not match or match(label)
 
     # -- listings ------------------------------------------------------------
     def select(self, paths: Iterable[T], root: object = None) -> list[T]:
@@ -333,6 +591,17 @@ class Filter:
         `derivatives`, ...) are skipped, but any other one (a folder inside
         `derivatives/`, say) is treated as a file. So filter the output of
         `root.rglob("*")` on `is_file()` first.
+
+        Most filters need nothing but the names. The others read files:
+
+        - a `.bidsignore` in the listing is read and honoured, from the path
+          object given for it or, for a string, under `root`; with neither,
+          it is not read;
+        - the participants filters read `participants.tsv` under `root`,
+          which they need;
+        - the sidecar filters read the JSON sidecars that are in the
+          listing, so the listing must hold path objects, and the sidecars
+          of the data files.
 
         Parameters
         ----------
@@ -347,31 +616,120 @@ class Filter:
         -------
         list
             The kept items of `paths`, as given, without duplicates.
+
+        Raises
+        ------
+        TypeError
+            With sidecar filters, if a path is a string, and with
+            participants filters, without `root`.
+        FileNotFoundError
+            With participants filters, if the dataset has no
+            `participants.tsv`.
         """
         items: dict[str, T] = {}
         for path in paths:
             rel = _relative(path, root)
             items.setdefault(rel, path)
-        return [items[rel] for rel in self._select(items)]
+        if self.sidecar and not all(map(_readable, items.values())):
+            raise TypeError(
+                "a sidecar filter reads the sidecars of the listing: pass "
+                "path objects that can be read to select(), with the "
+                "dataset root=, or list the dataset with walk()"
+            )
+        base = None
+        if isinstance(root, str) or _readable(root):
+            base = in_family(root, BidsPath)
+        if self.participants and base is None:
+            raise TypeError(
+                "a participants filter reads participants.tsv: pass the "
+                "dataset root= to select(), as a path that can be read, or "
+                "list the dataset with walk()"
+            )
+        ignore = None
+        if self.bidsignore and _BIDSIGNORE in items:
+            given = items[_BIDSIGNORE]
+            source = (
+                in_family(given, BidsPath) if _readable(given)
+                else None if base is None else base / _BIDSIGNORE
+            )
+            if source is not None:
+                try:
+                    text = source.read_text(encoding="utf-8")
+                except FileNotFoundError:
+                    text = ""
+                ignore = _BidsIgnore.parse(text)
+        subjects = None
+        if self.participants:
+            assert base is not None
+            subjects = self._subjects_from(
+                self._participants(base, None, ignore)
+            )
+        plan = _Plan(self, items, ignore, subjects)
+        contents = {rel: _read_json(items[rel]) for rel in plan.reads}
+        return [items[rel] for rel in plan.finish(contents)]
 
     def walk(self, root: object) -> list[BidsPath]:
         """List a dataset and return the files to keep, sorted.
 
         `root` is a `BidsPath`, a path object, or a local path or URL
-        string. Hidden folders and the top-level folders that would be
-        skipped are not listed. An `AsyncBidsPath` or a pure path is listed
-        through the `BidsPath` of its string and storage options. The files
-        have the mode of `root` (read-only for a string).
+        string. Hidden folders, the top-level folders that would be
+        skipped, the folders `.bidsignore` names and the subject and
+        session folders the filters on their labels (and on
+        `participants.tsv`) leave out are not listed. An `AsyncBidsPath` or
+        a pure path is listed through the `BidsPath` of its string and
+        storage options. The files have the mode of `root` (read-only for a
+        string).
+
+        Raises
+        ------
+        FileNotFoundError
+            With participants filters, if the dataset has no
+            `participants.tsv`.
         """
         root = in_family(root, BidsPath)
         found: dict[str, BidsPath] = {}
+        state = _Walk()
         for dirpath, dirnames, filenames in root.walk():
             parts = PurePosixPath(dirpath.relative_to(root).as_posix()).parts
-            dirnames[:] = [d for d in dirnames if self._descend(parts, d)]
+            if not parts and not state.started:
+                state.started = True
+                names = set(filenames)
+                if self.bidsignore and _BIDSIGNORE in names:
+                    state.ignore = _BidsIgnore.parse(
+                        (root / _BIDSIGNORE).read_text(encoding="utf-8")
+                    )
+                if self.participants:
+                    state.subjects = self._subjects_from(self._participants(
+                        root, _PARTICIPANTS in names, state.ignore
+                    ))
+            dirnames[:] = [d for d in dirnames if self._descend(parts, d, state)]
             for filename in filenames:
                 path = dirpath / filename
                 found[path.relative_to(root).as_posix()] = path
-        return [found[rel] for rel in self._select(found)]
+        if self.participants and not state.started:
+            self._participants(root, False, None)
+        plan = _Plan(self, found, state.ignore, state.subjects)
+        unsure = plan.unsure(state.pruned)
+        for pruned in sorted(state.pruned):
+            if not _above_any(unsure, pruned):
+                continue
+            for dirpath, dirnames, filenames in (root / pruned).walk():
+                parts = PurePosixPath(dirpath.relative_to(root).as_posix()).parts
+                dirnames[:] = [
+                    d for d in dirnames if self._descend(parts, d, state, False)
+                ]
+                listed = []
+                for filename in filenames:
+                    path = dirpath / filename
+                    listed.append(rel := path.relative_to(root).as_posix())
+                    found[rel] = path
+                unsure = plan.settle(unsure, listed)
+                if not _above_any(unsure, pruned):
+                    break
+        if state.pruned and len(found) > len(plan.listed):
+            plan = _Plan(self, found, state.ignore, state.subjects)
+        contents = {rel: _read_json(found[rel]) for rel in plan.reads}
+        return [found[rel] for rel in plan.finish(contents)]
 
     async def awalk(self, root: object) -> list[AsyncBidsPath]:
         """List a dataset asynchronously and return the files to keep, sorted.
@@ -382,114 +740,453 @@ class Filter:
         through the `AsyncBidsPath` of its string and storage options, so a
         remote store with a natively async backend is listed on its
         coroutines. The listing goes one level at a time, every directory
-        of a level at once, and lists no folder `walk` would not. The files
+        of a level at once, and lists no folder `walk` would not; the
+        sidecars a sidecar filter reads are read at once too. The files
         have the mode of `root`, as in `walk`.
         """
         root = in_family(root, AsyncBidsPath)
         found: dict[str, AsyncBidsPath] = {}
-        level = [root]
+        state = _Walk()
+        await self._alist_below(root, [root], found, state)
+        plan = _Plan(self, found, state.ignore, state.subjects)
+        unsure = plan.unsure(state.pruned)
+        for pruned in sorted(state.pruned):
+            if _above_any(unsure, pruned):
+                unsure = await self._alist_below(
+                    root, [root / pruned], found, state, plan, unsure, pruned
+                )
+        if state.pruned and len(found) > len(plan.listed):
+            plan = _Plan(self, found, state.ignore, state.subjects)
+        reads = sorted(plan.reads)
+        contents = dict(zip(
+            reads, await asyncio.gather(*(_aread_json(found[r]) for r in reads))
+        ))
+        return [found[rel] for rel in plan.finish(contents)]
+
+    async def _alist_below(
+        self,
+        root: AsyncBidsPath,
+        level: list[AsyncBidsPath],
+        found: dict[str, AsyncBidsPath],
+        state: _Walk,
+        plan: _Plan | None = None,
+        unsure: list[ParsedPath] | None = None,
+        pruned: str = "",
+    ) -> list[ParsedPath]:
+        """List the tree below `level`, one level at a time, into `found`.
+
+        Without `plan`, it is the walk of the dataset: the root listing is
+        read first, and folders are pruned. With `plan`, it lists the
+        pruned folder `pruned` (pruning nothing by label) until no metadata
+        file of `unsure` above it is left unsettled, and returns those left.
+        """
         while level:
             listings = await asyncio.gather(*map(_alist, level))
+            if not state.started:
+                state.started = True
+                await self._aread_root(root, listings[0], state)
             below: list[AsyncBidsPath] = []
+            listed = []
             for directory, children in zip(level, listings):
                 rel_dir = directory.relative_to(root).as_posix()
                 parts = PurePosixPath(rel_dir).parts
                 for child, is_dir, is_link in children:
                     if not is_dir:
-                        found[child.relative_to(root).as_posix()] = child
-                    elif not is_link and self._descend(parts, child.name):
+                        listed.append(rel := child.relative_to(root).as_posix())
+                        found[rel] = child
+                    elif not is_link and self._descend(
+                        parts, child.name, state, plan is None
+                    ):
                         below.append(child)
             level = below
-        return [found[rel] for rel in self._select(found)]
+            if plan is not None:
+                unsure = plan.settle(unsure or [], listed)
+                if not _above_any(unsure, pruned):
+                    break
+        return unsure or []
 
     def __call__(self, paths: Iterable[T], root: object = None) -> list[T]:
         """Alias of `select`."""
         return self.select(paths, root)
 
     # -- engine --------------------------------------------------------------
-    def _descend(self, parts: tuple[str, ...], name: str) -> bool:
+    async def _aread_root(
+        self, root: AsyncBidsPath, children: list[tuple], state: _Walk
+    ) -> None:
+        """Read `.bidsignore` and `participants.tsv` from the root listing."""
+        names = {child.name for child, is_dir, _ in children if not is_dir}
+        read_ignore = self.bidsignore and _BIDSIGNORE in names
+        read_rows = bool(self.participants) and _PARTICIPANTS in names
+        text, rows = await asyncio.gather(
+            (root / _BIDSIGNORE).read_text(encoding="utf-8")
+            if read_ignore else _nothing(),
+            (root / _PARTICIPANTS).as_list() if read_rows else _nothing(),
+        )
+        if read_ignore:
+            state.ignore = _BidsIgnore.parse(text)
+        if self.participants:
+            if not read_rows or (
+                state.ignore and state.ignore.ignores(_PARTICIPANTS)
+            ):
+                raise _no_participants(root)
+            state.subjects = self._subjects_from(rows)
+
+    def _participants(
+        self, root: BidsPath, listed: bool | None, ignore: _BidsIgnore | None
+    ) -> list[dict]:
+        """Read the rows of `participants.tsv` for the participants filters.
+
+        `listed` says whether the listing has the table; `None` when it is
+        not known, and the table is read if it is there.
+        """
+        if listed is False or (ignore and ignore.ignores(_PARTICIPANTS)):
+            raise _no_participants(root)
+        try:
+            return _read_rows(root / _PARTICIPANTS)
+        except FileNotFoundError:
+            if listed:
+                raise
+            raise _no_participants(root) from None
+
+    def _subjects_from(self, rows: Iterable[Mapping]) -> set[str]:
+        """Return the labels of the subjects whose row passes the filters."""
+        subjects: set[str] = set()
+        for row in rows:
+            if "participant_id" not in row:
+                raise ValueError(
+                    "participants.tsv has no participant_id column, so a "
+                    "participants filter cannot tell its subjects apart"
+                )
+            pid = row["participant_id"]
+            if not isinstance(pid, str):
+                continue
+            if all(
+                test(row.get(column, _ABSENT))
+                for column, test in self.participants.items()
+            ):
+                subjects.add(pid[4:] if pid.startswith("sub-") else pid)
+        return subjects
+
+    def _descend(
+        self,
+        parts: tuple[str, ...],
+        name: str,
+        state: _Walk | None = None,
+        prune: bool = True,
+    ) -> bool:
         """Whether a walk lists directory `name` of the directory `parts`.
 
         `parts` is the relative path of the directory being listed (`()` at
-        the root). Pruning never changes a result.
+        the root). Pruning never changes a result. A subject or session
+        folder is left out (with `prune`) when its label fails a filter
+        that every data file inside it is judged on, since BIDS names every
+        file under `sub-<label>/` (and `ses-<label>/`) with that label, and
+        recorded in `state.pruned`: a metadata file above it may apply to
+        a data file inside it and to none of those listed, and the walk
+        then lists it after all (see `_Plan.unsure`).
         """
+        ignore = None if state is None else state.ignore
+        if ignore is not None and ignore.ignores("/".join((*parts, name)), True):
+            return False
         if parts and data_directory((*parts, name)) is not None:
             return True  # inside a data directory, every file is kept with it
         if name.startswith("."):
             return False
-        if parts:
+        key = None
+        if not parts:
+            if not name.startswith("sub-"):
+                return name == "phenotype" or name in self.folders
+            key = "sub"
+        elif len(parts) == 1 and _is_entity_directory(parts[0], "sub"):
+            key = "ses"
+        if key is None or not prune or self._may_hold(name, key, state):
             return True
-        return (
-            name.startswith("sub-") or name == "phenotype"
-            or name in self.folders
-        )
+        if state is not None:
+            state.pruned.append("/".join((*parts, name)))
+        return False
 
-    def _select(self, paths: Iterable[str]) -> list[str]:
-        """Select among relative path strings; return them sorted."""
-        data: dict[str, ParsedPath] = {}     # data item -> how it parses
-        members: dict[str, list[str]] = {}   # data item -> its files
-        meta: list[ParsedPath] = []
-        kept: set[str] = set()
+    def _may_hold(self, name: str, key: str, state: _Walk | None) -> bool:
+        """Whether a `sub-`/`ses-` folder may hold a file the filters keep."""
+        if not _is_entity_directory(name, key):
+            return True
+        label = parse_name(name).entities[key]
+        if key == "ses":
+            return self._keep_session(label)
+        if not self.keep_subject(label):
+            return False
+        subjects = None if state is None else state.subjects
+        return subjects is None or label in subjects
+
+
+class _Walk:
+    """What a walk learns from the root listing, for the levels below it."""
+
+    def __init__(self) -> None:
+        self.started = False
+        self.ignore: _BidsIgnore | None = None
+        self.subjects: set[str] | None = None
+        self.pruned: list[str] = []      # the folders left out, by label
+
+
+def _above_any(metadata: list[ParsedPath], directory: str) -> bool:
+    """Whether a metadata file is in an ancestor of `directory`."""
+    parents = PurePosixPath(directory).parents
+    return any(m.directory in parents for m in metadata)
+
+
+class _Plan:
+    """One selection among relative path strings.
+
+    Built from the listing, it sorts the files into data, metadata and the
+    rest, and applies the filters on names and on `participants.tsv`.
+    `reads` is then the sidecars to read for the sidecar filters, and
+    `finish` takes their contents and returns the kept paths, sorted.
+    """
+
+    def __init__(
+        self,
+        f: Filter,
+        paths: Iterable[str],
+        ignore: _BidsIgnore | None = None,
+        subjects: set[str] | None = None,
+    ) -> None:
+        self.filter = f
+        self.subjects = subjects
+        self.data: dict[str, ParsedPath] = {}     # data item -> how it parses
+        self.members: dict[str, list[str]] = {}   # data item -> its files
+        self.meta: list[ParsedPath] = []
+        self.kept: set[str] = set()
+        self.ignore = ignore
+        self.listed = list(paths)
+        for path in self.listed:
+            self._sort(path)
+        self.passed = {
+            item for item, d in self.data.items()
+            if f._passes(d) and self._has_subject(d)
+        }
+        self.chains: dict[str, tuple[str, ...]] = {}
+        if f.sidecar:
+            self.chains = _sidecar_chains(
+                [self.data[item] for item in self.passed], self.meta
+            )
+        self.reads = {rel for chain in self.chains.values() for rel in chain}
+
+    def _sort(self, path: str) -> None:
+        kind, name = _classify(path, self.ignore, self.filter.folders)
+        if kind == "keep":
+            self.kept.add(path)
+        elif kind == "meta":
+            self.meta.append(name)  # type: ignore[arg-type]
+        elif kind == "data":
+            self.data.setdefault(name.item, name)  # type: ignore[union-attr]
+            self.members.setdefault(name.item, []).append(path)  # type: ignore
+
+    def _kept_alone(self, m: ParsedPath) -> bool:
+        """Whether a metadata file that applies to no data file is kept."""
+        f = self.filter
+        if not all(test.lenient for test in f.sidecar.values()):
+            return False
+        entities = _with_directory_entities(m)
+        return f._passes(m, entities) and self._has_subject(m, entities)
+
+    def unsure(self, pruned: list[str]) -> list[ParsedPath]:
+        """Return the metadata files whose fate depends on pruned folders.
+
+        Those that apply to no data file listed, would be kept for that
+        (rule 3), and are above a folder in `pruned`: if one applies to a
+        data file inside it, it is not kept after all.
+        """
+        if not pruned:
+            return []
+        all_data = _by_directory(self.data.values())
+        candidates = [
+            m for m in self.meta
+            if not _applies(m, all_data) and self._kept_alone(m)
+        ]
+        return [m for m in candidates
+                if any(_above_any([m], p) for p in pruned)]
+
+    def settle(
+        self, unsure: list[ParsedPath], paths: Iterable[str]
+    ) -> list[ParsedPath]:
+        """Return the files of `unsure` that apply to no data file of `paths`."""
         for path in paths:
-            parts = PurePosixPath(path).parts
-            if not parts:
-                continue
-            if path in TOP_LEVEL_FILES:
-                kept.add(path)
-                continue
-            # Names inside a data directory (`.zattrs`) belong to the data
-            boundary = data_directory(parts)
-            named = parts if boundary is None else parts[:boundary + 1]
-            if any(p.startswith(".") for p in named):
-                continue
-            if _is_bids_directory(parts):
-                continue
-            top = parts[0]
-            if len(parts) > 1 and top in OPTIONAL_FOLDERS:
-                if top in self.folders:
-                    kept.add(path)
-                continue
-            name = parse_path(path)
-            if top.startswith("sub-") and len(parts) > 1:
-                if name.is_metadata:
-                    meta.append(name)
-                else:
-                    data.setdefault(name.item, name)
-                    members.setdefault(name.item, []).append(path)
-            elif top == "phenotype":
-                kept.add(path)
-            elif len(parts) == 1:
-                if name.is_metadata and name.suffix:
-                    # top-level sidecar: T1w.json, task-rest_bold.json
-                    meta.append(name)
-                else:
-                    kept.add(path)
-            # other top-level folders (e.g. "models/") are skipped
+            if not unsure:
+                break
+            kind, d = _classify(path, self.ignore, self.filter.folders)
+            if kind == "data":
+                unsure = [m for m in unsure if not applies_to(m, d)]
+        return unsure
 
-        passed = {item for item, d in data.items() if self._passes(d)}
+    def _has_subject(self, name: ParsedPath, entities: dict | None = None) -> bool:
+        """Whether a file's subject passes the participants filters.
+
+        With `entities` (a metadata file judged on its own name), a file
+        without a subject passes.
+        """
+        if self.subjects is None:
+            return True
+        if entities is None:
+            label = _with_directory_entities(name).get("sub")
+        else:
+            label = entities.get("sub")
+        if label is None:
+            return entities is not None
+        return label in self.subjects
+
+    def finish(self, contents: Mapping[str, object]) -> list[str]:
+        """Return the kept paths, sorted, given the sidecars in `reads`."""
+        f, kept = self.filter, set(self.kept)
+        passed = self.passed
+        if f.sidecar:
+            passed = {
+                item for item in passed
+                if _sidecar_passes(f, [contents[r] for r in self.chains[item]])
+            }
         for item in passed:
-            kept.update(members[item])
-        kept_data = _by_directory(data[item] for item in passed)
-        all_data = _by_directory(data.values())
+            kept.update(self.members[item])
+        kept_data = _by_directory(self.data[item] for item in passed)
+        all_data = _by_directory(self.data.values())
 
         # A data file that is also a companion (`physio.tsv.gz` of a run)
         # follows the data it describes, as its metadata does.
-        for item, d in data.items():
+        for item, d in self.data.items():
             if (
                 item not in passed and d.suffix in COMPANION_SUFFIXES
                 and _applies(d, kept_data)
             ):
-                kept.update(members[item])
-        for m in meta:
+                kept.update(self.members[item])
+        for m in self.meta:
             if _applies(m, kept_data) or (
-                not _applies(m, all_data)
-                and self._passes(m, _with_directory_entities(m))
+                not _applies(m, all_data) and self._kept_alone(m)
             ):
                 kept.add(m.path)
 
-        if self.exclude:
-            kept = {p for p in kept if p in _PROTECTED or not self.exclude(p)}
+        if f.exclude:
+            kept = {p for p in kept if p in _PROTECTED or not f.exclude(p)}
         return sorted(kept)
+
+
+def _classify(
+    path: str, ignore: _BidsIgnore | None, folders: frozenset[str]
+) -> tuple[str, ParsedPath | None]:
+    """Sort a relative path into what the selection makes of it.
+
+    `("data", parsed)` or `("meta", parsed)`; `("keep", None)` for a file
+    kept whatever the filters, `("skip", None)` for one never kept.
+    """
+    parts = PurePosixPath(path).parts
+    if not parts or (ignore is not None and ignore.ignores(path)):
+        return "skip", None
+    if path in TOP_LEVEL_FILES:
+        return "keep", None
+    # Names inside a data directory (`.zattrs`) belong to the data
+    boundary = data_directory(parts)
+    named = parts if boundary is None else parts[:boundary + 1]
+    if any(p.startswith(".") for p in named) or _is_bids_directory(parts):
+        return "skip", None
+    top = parts[0]
+    if len(parts) > 1 and top in OPTIONAL_FOLDERS:
+        return ("keep" if top in folders else "skip"), None
+    name = parse_path(path)
+    if top.startswith("sub-") and len(parts) > 1:
+        return ("meta" if name.is_metadata else "data"), name
+    if top == "phenotype":
+        return "keep", None
+    if len(parts) == 1:
+        if name.is_metadata and name.suffix:
+            # top-level sidecar: T1w.json, task-rest_bold.json
+            return "meta", name
+        return "keep", None
+    # other top-level folders (e.g. "models/") are skipped
+    return "skip", None
+
+
+def _sidecar_chains(
+    data: Iterable[ParsedPath], meta: Iterable[ParsedPath]
+) -> dict[str, tuple[str, ...]]:
+    """Return the JSON sidecars of each data item, nearest first.
+
+    The sidecars that apply to it (a `.json` with its suffix and a subset
+    of its entities, in its directory or above), as `path.sidecars` finds
+    them: nearer directories first, and within one directory the sidecars
+    with more entities.
+    """
+    by_dir: dict[PurePosixPath, list[ParsedPath]] = {}
+    for m in meta:
+        if m.extension == ".json" and m.suffix is not None:
+            by_dir.setdefault(m.directory, []).append(m)
+    for sidecars in by_dir.values():
+        sidecars.sort(key=lambda m: (-len(m.entities), PurePosixPath(m.path).name))
+    chains = {}
+    for d in data:
+        chain = []
+        for directory in (d.directory, *d.directory.parents):
+            chain.extend(
+                m.path for m in by_dir.get(directory, ())
+                if applies_to(m, d, companions=False)
+            )
+        chains[d.item] = tuple(chain)
+    return chains
+
+
+def _sidecar_passes(f: Filter, contents: list[object]) -> bool:
+    """Whether the merged content of a chain of sidecars passes `f`."""
+    for key, test in f.sidecar.items():
+        value = _ABSENT
+        for content in contents:
+            if isinstance(content, Mapping) and key in content:
+                value = content[key]
+                break
+        if not test(value):
+            return False
+    return True
+
+
+def _read_json(path: object) -> object:
+    """Read a JSON sidecar of a listing (inside a transaction, as it holds it)."""
+    path = in_family(path, BidsPath)
+    as_dict = getattr(path, "as_dict", None)
+    if as_dict is not None:
+        return as_dict()
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+async def _aread_json(path: object) -> object:
+    """Read a JSON sidecar of a listing, as a coroutine."""
+    path = in_family(path, AsyncBidsPath)
+    as_dict = getattr(path, "as_dict", None)
+    if as_dict is not None:
+        return await as_dict()
+    return json.loads(await path.read_text(encoding="utf-8-sig"))
+
+
+def _read_rows(path: BidsPath) -> list[dict]:
+    """Read the typed rows of a table."""
+    return path.as_list()  # type: ignore[attr-defined]
+
+
+def _no_participants(root: object) -> FileNotFoundError:
+    return FileNotFoundError(
+        f"a participants filter reads participants.tsv, and the dataset "
+        f"{root} has none"
+    )
+
+
+def _readable(path: object) -> bool:
+    """Whether a listing item is a path whose file can be read.
+
+    A string, and a pure path (`PureBidsPath`, `pathlib.PurePath`), cannot.
+    """
+    if path is None or isinstance(path, (str, bytes)):
+        return False
+    if isinstance(path, (Path, AsyncPath, pathlib.Path)):
+        return True
+    return not isinstance(path, (PurePath, pathlib.PurePath))
+
+
+async def _nothing() -> None:
+    return None
 
 
 def _by_directory(data: Iterable[ParsedPath]) -> dict:
@@ -542,6 +1239,124 @@ def _is_bids_directory(parts: tuple[str, ...]) -> bool:
     if len(parts) == 2:
         return session or parts[1] in DATATYPES
     return session and parts[2] in DATATYPES
+
+
+# -- .bidsignore -----------------------------------------------------------------
+
+class _BidsIgnore:
+    """The patterns of a `.bidsignore`, with the rules of `.gitignore`.
+
+    One pattern per line; blank lines and lines starting with `#` are
+    skipped, and a backslash before a leading `#` or `!` makes it part of
+    the pattern. `!`
+    re-includes what an earlier pattern ignored, and the last pattern that
+    matches a path decides; a file inside an ignored directory cannot be
+    re-included. A pattern ending in `/` matches directories only. A
+    pattern with a `/` at its start or in its middle is matched against the
+    path from the dataset root; any other against a name at any depth. `*`
+    and `?` match within one name, `[...]` is a class, and `**` matches any
+    number of directories (`**/x`, `a/**/x`, `a/**`).
+    """
+
+    def __init__(self, rules: list[tuple[re.Pattern, bool, bool]]) -> None:
+        self.rules = rules          # (regex, negated, directories only)
+        self._dirs: dict[str, bool] = {}
+
+    @classmethod
+    def parse(cls, text: str) -> _BidsIgnore | None:
+        """Parse the text of a `.bidsignore`; `None` when it has no pattern."""
+        rules = []
+        for line in text.splitlines():
+            line = line.rstrip()
+            if not line or line.startswith("#"):
+                continue
+            negated = line.startswith("!")
+            if negated:
+                line = line[1:]
+            elif line[:2] in ("\\#", "\\!"):
+                line = line[1:]
+            dir_only = line.endswith("/")
+            line = line.rstrip("/")
+            if not line:
+                continue
+            anchored = "/" in line
+            rules.append((_ignore_regex(line.lstrip("/"), anchored),
+                          negated, dir_only))
+        return cls(rules) if rules else None
+
+    def _decide(self, rel: str, is_dir: bool) -> bool:
+        ignored = False
+        for regex, negated, dir_only in self.rules:
+            if dir_only and not is_dir:
+                continue
+            if regex.match(rel):
+                ignored = not negated
+        return ignored
+
+    def ignores(self, rel: str, is_dir: bool = False) -> bool:
+        """Whether the path `rel` (relative to the root) is ignored.
+
+        It is when the patterns ignore it or one of its directories.
+        """
+        if rel in _NEVER_IGNORED:
+            return False
+        parts = rel.split("/")
+        for i in range(1, len(parts)):
+            directory = "/".join(parts[:i])
+            if directory not in self._dirs:
+                self._dirs[directory] = self._decide(directory, True)
+            if self._dirs[directory]:
+                return True
+        return self._decide(rel, is_dir)
+
+
+def _ignore_regex(pattern: str, anchored: bool) -> re.Pattern:
+    """Translate one `.gitignore` pattern (no `!`, no trailing `/`)."""
+    segments = pattern.split("/")
+    out = ["" if anchored else "(?:.*/)?"]
+    for i, segment in enumerate(segments):
+        last = i == len(segments) - 1
+        if segment == "**":
+            out.append(".*" if last else "(?:.*/)?")
+        else:
+            out.append(_ignore_segment(segment) + ("" if last else "/"))
+    return re.compile("".join(out) + r"\Z")
+
+
+def _ignore_segment(segment: str) -> str:
+    """Translate the glob of one path segment to a regex."""
+    out = []
+    i, n = 0, len(segment)
+    while i < n:
+        c = segment[i]
+        if c == "\\" and i + 1 < n:
+            out.append(re.escape(segment[i + 1]))
+            i += 2
+            continue
+        if c == "*":
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        elif c == "[":
+            start = i + 1
+            if start < n and segment[start] in "!^":
+                start += 1
+            if start < n and segment[start] == "]":
+                start += 1
+            end = segment.find("]", start)
+            if end == -1:
+                out.append(re.escape(c))
+            else:
+                body = segment[i + 1:end]
+                if body[:1] in ("!", "^"):
+                    body = "^" + body[1:]
+                out.append("[" + body.replace("\\", "\\\\") + "]")
+                i = end + 1
+                continue
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return "".join(out)
 
 
 async def _alist(directory: AsyncBidsPath) -> list[tuple]:

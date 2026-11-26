@@ -1,0 +1,181 @@
+"""Walks do not list the subject and session folders the filters leave out.
+
+Pruning changes what is listed, never what is kept: every walk below is
+checked against `select` on the full listing, and against a walk that
+prunes nothing.
+"""
+import re
+import typing
+
+import pytest
+import typing_extensions
+
+from brainfilter.bidspath import AsyncBidsPath, BidsPath
+from brainfilter.conditions import Glob
+from brainfilter.filter import Filter
+
+FILES = {
+    "dataset_description.json": "{}",
+    "participants.tsv": (
+        "participant_id\tgroup\nsub-01\ta\nsub-02\tb\nsub-001\ta\nsub-10\tb\n"
+    ),
+    "README": "x",
+    # describes sub-01's image only, so its fate depends on sub-01
+    "T2w.json": "{}",
+    "task-rest_bold.json": '{"RepetitionTime": 2}',
+    "sub-01/sub-01_sessions.tsv": "session_id\nses-1\nses-2\n",
+    "sub-01/ses-1/anat/sub-01_ses-1_T1w.nii.gz": "x",
+    "sub-01/ses-1/anat/sub-01_ses-1_T2w.nii.gz": "x",
+    "sub-01/ses-2/func/sub-01_ses-2_task-rest_bold.nii.gz": "x",
+    # describes ses-2 only, so its fate depends on ses-2
+    "sub-01/sub-01_task-rest_bold.json": "{}",
+    "sub-02/ses-1/anat/sub-02_ses-1_T1w.nii.gz": "x",
+    "sub-001/anat/sub-001_T1w.nii.gz": "x",
+    "sub-10/ses-1/func/sub-10_ses-1_task-rest_bold.nii.gz": "x",
+    "sub-10/ses-1/func/sub-10_ses-1_task-rest_events.tsv": "onset\n0\n",
+    "sub-10/ses-1/beh/sub-10_ses-1_task-x_events.tsv": "onset\n0\n",
+    "sub-10/ses-2/anat/sub-10_ses-2_T1w.nii.gz": "x",
+}
+ROOT = "memory://pruned"
+
+PRUNING = [
+    Filter(subjects="01"),
+    Filter(subjects=1),
+    Filter(subjects="02"),
+    Filter(subjects=Glob("0*")),
+    Filter(subjects=re.compile("1.")),
+    Filter(subjects={typing_extensions.Never, "02"}),
+    Filter(subjects=lambda s: s.endswith("1")),
+    Filter(exclude_subjects=["01", "10"]),
+    Filter(sessions="1"),
+    Filter(sessions=2),
+    Filter(sessions=typing_extensions.Never),
+    Filter(sessions={"2", typing_extensions.Never}),
+    Filter(subjects="10", sessions="1"),
+    Filter(participants={"group": "a"}),
+    Filter(participants={"group": "b"}, sessions="1"),
+]
+NOT_PRUNING = [
+    Filter(),
+    Filter(subjects=typing.Any),
+    Filter(sessions=typing.Any),
+    Filter(datatypes="anat"),
+    Filter(participants={"group": {"a", "b"}}),
+]
+
+
+@pytest.fixture
+def store():
+    pytest.importorskip("upath")
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    MemoryFileSystem.store.clear()
+    MemoryFileSystem.pseudo_dirs[:] = [""]
+    root = BidsPath(ROOT, mode="w")
+    for rel, content in FILES.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(content)
+    yield
+    MemoryFileSystem.store.clear()
+    MemoryFileSystem.pseudo_dirs[:] = [""]
+
+
+def _rel(paths, root):
+    return [p.relative_to(root).as_posix() for p in paths]
+
+
+@pytest.fixture
+def no_pruning(monkeypatch):
+    """Call to make every walk list every subject and session folder."""
+    def disable():
+        monkeypatch.setattr(Filter, "_may_hold", lambda self, *args: True)
+    return disable
+
+
+def _expected(f):
+    """What `select` keeps of the full listing, reading the store."""
+    root = BidsPath(ROOT)
+    return _rel(f.select([root / rel for rel in FILES], root=root), root)
+
+
+def test_walk_prunes_without_changing_results(store, listed_dirs, no_pruning):
+    root = BidsPath(ROOT)
+    pruned = {}
+    for f in PRUNING + NOT_PRUNING:
+        listed_dirs.clear()
+        pruned[id(f)] = (_rel(f.walk(root), root), len(listed_dirs))
+    expected = {id(f): _expected(f) for f in PRUNING + NOT_PRUNING}
+    no_pruning()
+    for f in PRUNING + NOT_PRUNING:
+        listed_dirs.clear()
+        kept = _rel(f.walk(root), root)
+        assert pruned[id(f)][0] == kept == expected[id(f)]
+        if f in PRUNING:
+            assert pruned[id(f)][1] < len(listed_dirs)
+        else:
+            assert pruned[id(f)][1] == len(listed_dirs)
+
+
+def test_pruned_folders_are_not_listed(store, listed_dirs):
+    Filter(subjects="02", datatypes="anat").walk(ROOT)
+    assert "/pruned/sub-02/ses-1/anat" in listed_dirs
+    assert not any(d.startswith(("/pruned/sub-01", "/pruned/sub-10"))
+                   for d in listed_dirs)
+    listed_dirs.clear()
+    Filter(sessions="1", datatypes="anat").walk(ROOT)
+    assert "/pruned/sub-10/ses-1" in listed_dirs
+    assert not any("ses-2" in d for d in listed_dirs)
+    listed_dirs.clear()
+    Filter(participants={"group": "b"}, datatypes="anat").walk(ROOT)
+    assert not any(d.startswith(("/pruned/sub-01", "/pruned/sub-001"))
+                   for d in listed_dirs)
+
+
+def test_a_pruned_folder_is_listed_when_metadata_above_depends_on_it(
+    store, listed_dirs
+):
+    # T2w.json applies to an image of sub-01 only; with sub-01 left out,
+    # the walk looks into sub-01 to find it, and drops T2w.json as select
+    # does. Nothing below sub-02 needs this.
+    kept = _rel(Filter(subjects="02").walk(ROOT), BidsPath(ROOT))
+    assert "T2w.json" not in kept
+    assert "/pruned/sub-01/ses-1/anat" in listed_dirs
+    # task-rest_bold.json too, and sub-01 settles both: sub-10 is not listed
+    assert "/pruned/sub-10" not in listed_dirs
+    listed_dirs.clear()
+    # a metadata file the other filters drop needs nothing listed
+    Filter(subjects="02", suffixes="T1w").walk(ROOT)
+    assert not any(d.startswith("/pruned/sub-01") for d in listed_dirs)
+
+
+@pytest.mark.anyio
+async def test_awalk_prunes_without_changing_results(
+    store, async_memory, listed_dirs, no_pruning
+):
+    root = AsyncBidsPath(ROOT)
+    assert type(root.wrapped).__name__ == "AsyncFSPath"
+    pruned = {}
+    for f in PRUNING + NOT_PRUNING:
+        listed_dirs.clear()
+        pruned[id(f)] = (_rel(await f.awalk(root), root), len(listed_dirs))
+    no_pruning()
+    for f in PRUNING + NOT_PRUNING:
+        listed_dirs.clear()
+        kept = _rel(await f.awalk(root), root)
+        assert pruned[id(f)][0] == kept
+        if f in PRUNING:
+            assert pruned[id(f)][1] < len(listed_dirs)
+        else:
+            assert pruned[id(f)][1] == len(listed_dirs)
+
+
+@pytest.mark.anyio
+async def test_awalk_matches_walk_when_pruning(store, async_memory, monkeypatch):
+    import sys
+
+    from fsspec.implementations.memory import MemoryFileSystem
+
+    results = [_rel(await f.awalk(ROOT), AsyncBidsPath(ROOT)) for f in PRUNING]
+    registry = sys.modules["fsspec.registry"]._registry
+    monkeypatch.setitem(registry, "memory", MemoryFileSystem)
+    assert results == [_rel(f.walk(ROOT), BidsPath(ROOT)) for f in PRUNING]

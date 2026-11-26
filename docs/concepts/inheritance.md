@@ -233,6 +233,15 @@ always kept. The filtering rules in full, and the cases where a metadata file
 applies to no data file at all, are in
 [Filtering a local dataset](../tutorials/filter-local.md).
 
+A filter can also choose recordings by the values in their sidecars, with a
+keyword such as `RepetitionTime=2.0`. The value it compares is the one the
+merged sidecar holds, found by the rules on this page: the nearest sidecar
+that has the field wins, so a value written once at the top of the dataset
+counts for every recording below it that does not override it. The sidecars
+are those of the listing the filter works on, and a file that the dataset's
+`.bidsignore` names is not part of that listing, so it neither describes a
+recording nor is kept with one.
+
 To see the merged values of a sidecar, rather than which files apply, read
 [Reading sidecars and tables](../tutorials/read-metadata.md). A write to
 `sidecar` goes to the nearest of the files listed here, and the page on
