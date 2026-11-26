@@ -23,6 +23,11 @@ t1w.metadata["RepetitionTime"]          # ChainMap of applicable sidecars
 t1w.sidecars()                          # the sidecars, nearest first
 ```
 
+Sidecars are inherited up to the dataset root: the nearest ancestor with a
+`dataset_description.json`, or the `root=` you pass to `sidecars()` and
+`read_metadata()`. A file with no dataset root above it (a loose file, a
+scratch directory) gets the sidecars in its own directory only.
+
 ## Writing
 
 The tree is read-only, except inside a transaction. Edits to JSON and TSV

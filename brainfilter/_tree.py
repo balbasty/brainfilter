@@ -10,7 +10,8 @@ surface:
   and `table.read_dataframe()` a `pandas.DataFrame` (pandas is optional);
 - any file's effective metadata, `data.metadata`, is a
   `collections.ChainMap` of the JSON sidecars that apply to it, nearest
-  first, up to the dataset root.
+  first, up to the dataset root (or, with no dataset root above it, those
+  in its own directory).
 
 The `Async*` mixins give `AsyncBidsPath` the same surface as coroutines.
 Python has no awaitable indexing or `in`, so a directory's `ds[name]` is
@@ -132,8 +133,8 @@ def _search_sidecars(
     """
     if path.suffix is None:
         return []
-    # Each directory is listed once; `levels` runs from the file's own
-    # directory up to the root.
+    # Each directory is listed once, in one walk up; `levels` runs from the
+    # file's own directory up to the root.
     levels: list[tuple[_P, set[str]]] = []
     for directory in path.parents:
         names = yield directory
@@ -147,10 +148,9 @@ def _search_sidecars(
     else:
         if root_path is not None:
             raise ValueError(f"{root!s} is not an ancestor of {path!s}")
-        raise ValueError(
-            f"no dataset root above {path!s}: no ancestor holds a "
-            f"{DATASET_DESCRIPTION}; pass root= explicitly"
-        )
+        # No dataset root: only the file's own directory counts. Its
+        # listing is the first one, so this costs no more I/O.
+        levels = levels[:1]
 
     # Paths relative to the root, as `applies_to` expects.
     dirs = [d.name for d, _ in levels[:-1]]
@@ -297,12 +297,13 @@ class TreeMixin:
         ----------
         root
             The dataset root. By default, the nearest ancestor that holds a
-            `dataset_description.json`.
+            `dataset_description.json`. If no ancestor holds one, only the
+            sidecars in this file's own directory count.
 
         Raises
         ------
         ValueError
-            If no dataset root is found, or `root` is not an ancestor.
+            If `root` is given and is not an ancestor.
         """
         search = _search_sidecars(self, root, _as_root(self, root))
         try:
@@ -637,7 +638,8 @@ class AsyncTreeMixin:
         """Return the JSON sidecars that apply to this file, nearest first.
 
         The coroutine counterpart of `BidsPath.sidecars`, with the same
-        rules and errors.
+        rules and errors: with no dataset root above the file, only the
+        sidecars in its own directory count.
         """
         search = _search_sidecars(self, root, _as_root(self, root))
         try:
