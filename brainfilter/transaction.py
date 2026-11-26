@@ -7,7 +7,7 @@ with dataset.transaction() as tx:          # many files
     dataset["T1w.json"]["RepetitionTime"] = 2.3
     del dataset["T1w.json"]["Obsolete"]
     rows = dataset["participants.tsv"].read()
-    rows.append({"participant_id": "sub-03", "age": "41"})
+    rows.append({"participant_id": "sub-03", "age": 41})
     rows.add_column("handedness")
     (dataset / "sub-03")["sub-03_T1w.json"] = {"Level": "new"}  # new file
 
@@ -24,7 +24,8 @@ listing (new files included), `sidecars()` and `metadata`. The content a read
 returns *is* the transaction's copy, so changing it in place is an edit, and
 a write to `metadata` lands in the nearest sidecar. Leaving the block with an
 exception discards everything: nothing is written. Leaving it cleanly writes
-each changed file once. A file that was read but not changed is not written.
+each changed file once. A file that was read but not changed is not written,
+and in a table that changed, the cells left unchanged keep their exact text.
 Nothing is ever written outside these blocks: assigning into the tree outside
 one raises `TypeError`.
 
@@ -69,6 +70,7 @@ from typing import TYPE_CHECKING, Any
 from brainfilter import _content
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from types import TracebackType
 
     from brainfilter._content import Table
@@ -136,15 +138,22 @@ class _Buffer:
     def get(self, path: object) -> _Entry | None:
         return self._entries.get(path)
 
-    def load(self, path: object, kind: str, text: str | None) -> _Entry:
+    def load(
+        self,
+        path: object,
+        kind: str,
+        text: str | None,
+        descriptions: Mapping | None = None,
+    ) -> _Entry:
         """Hold the file at `path`, read as `text` (`None`: no file yet).
 
-        If it is already held (another task read it meanwhile), that entry
-        is kept and returned.
+        `descriptions` types the columns of a TSV file. If the file is
+        already held (another task read it meanwhile), that entry is kept
+        and returned.
         """
         entry = self._entries.get(path)
         if entry is None:
-            content = _content.parse(kind, text)
+            content = _content.parse(kind, text, descriptions)
             original = None if text is None else _content.dump(kind, content)
             entry = self._entries[path] = _Entry(path, kind, content, original)
         return entry
