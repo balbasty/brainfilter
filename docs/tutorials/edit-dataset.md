@@ -43,6 +43,40 @@ Writing to a path that does not exist yet creates the file, and any directories
 above it. The two bold sidecars carry a `RepetitionTime` of `20.0`, which should
 have been `2.0`: that is the mistake we are going to fix.
 
+### Putting a new file where it belongs
+
+A BIDS file name already says where the file goes: its subject, its session
+and, through its suffix, its datatype. The `//` operator reads that for you, so
+you write the name once and the directories follow from it. Nothing is read
+from the dataset, and the result is a path like any other, with the same mode.
+
+```pycon
+>>> ds // "sub-03_ses-1_T1w.nii.gz"
+BidsPath('memory://ds/sub-03/ses-1/anat/sub-03_ses-1_T1w.nii.gz', mode='w')
+>>> ds // "sub-03_sessions.tsv"
+BidsSessionsFile('memory://ds/sub-03/sub-03_sessions.tsv', mode='w')
+>>> ds // "task-rest_bold.json"
+BidsSidecarFile('memory://ds/task-rest_bold.json', mode='w')
+```
+
+Some suffixes belong to more than one datatype: an `events.tsv` may describe a
+functional run, an EEG recording or a behavioural task. The name alone cannot
+settle that, so name the datatype in front of it, or start from a datatype
+directory. The left side may be any directory on the way to the file, and the
+directories it already has are reused.
+
+```pycon
+>>> ds // "func/sub-03_task-rest_events.tsv"
+BidsTSVFile('memory://ds/sub-03/func/sub-03_task-rest_events.tsv', mode='w')
+>>> ds / "sub-03" / "func" // "sub-03_task-rest_events.tsv"
+BidsTSVFile('memory://ds/sub-03/func/sub-03_task-rest_events.tsv', mode='w')
+```
+
+A name that cannot be placed, or a starting directory that does not lead to its
+place, raises a `BidsNameError` that says what to write instead. The `/`
+operator never moves anything: it joins a path exactly as written, which is how
+to write a file BIDS does not name, such as a `README`.
+
 If you already have a dataset, build a writable path the same way, from a local
 directory or a URL, or turn a read-only path into a writable one with
 `with_mode`. The original path is left as it was.

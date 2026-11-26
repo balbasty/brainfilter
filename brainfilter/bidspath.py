@@ -46,6 +46,7 @@ driver object (`path.wrapped`) and the backend's own handles (`path.fs`,
 from __future__ import annotations
 
 import copy
+import os
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from bagof.paths import AsyncPath, Path, PurePath
@@ -55,6 +56,8 @@ from brainfilter._names import (
     DATATYPES,
     METADATA_EXTENSIONS,
     SORTED_ENTITIES,
+    SUFFIX_DATATYPES,
+    TABLE_LEVELS,
     ParsedName,
     check_entity,
     check_extension,
@@ -223,6 +226,10 @@ class BidsPathMixin:
     """The lexical BIDS surface shared by every BIDS path family.
 
     `BidsPath`, `PureBidsPath` and `AsyncBidsPath` all use it.
+
+    It includes `path // name`, which puts a BIDS file name where BIDS
+    says it belongs (`dataset // "sub-01_T1w.nii.gz"` is
+    `dataset/sub-01/anat/sub-01_T1w.nii.gz`).
     """
 
     __slots__ = ()
@@ -538,6 +545,175 @@ class BidsPathMixin:
             path = path / (f"{key}-{new}" if name == target else name)
         return path / self.name
 
+    # -- placement -------------------------------------------------------------
+    def __floordiv__(self, other: object) -> Self:
+        """Return the path where BIDS puts a file of this name.
+
+        `dataset // "sub-01_ses-1_T1w.nii.gz"` is
+        `dataset/sub-01/ses-1/anat/sub-01_ses-1_T1w.nii.gz`: the subject and
+        session directories come from the name's `sub` and `ses` entities,
+        and the datatype directory from its suffix. A name with no `sub`
+        entity goes at the top of the dataset, a sessions table in the
+        subject directory and a scans table in the session directory.
+
+        Some suffixes (`events`, `physio`, `channels`, ...) belong to several
+        datatypes. Name the datatype in front of the file name
+        (`dataset // "func/sub-01_task-rest_events.tsv"`), or start from a
+        datatype directory (`dataset / "sub-01" / "func" // name`).
+
+        The path on the left is the dataset, or a directory on the way to
+        the file's place (`sub-01`, `sub-01/ses-1`, `sub-01/ses-1/anat`);
+        the directories it already ends with are reused. Nothing is read
+        from storage. `/` joins a path as written.
+
+        Raises
+        ------
+        BidsNameError
+            If the right side is not a BIDS file name with at most a
+            datatype directory in front of it, if its place cannot be told
+            from the name, or if the path on the left is a file or a
+            directory that does not lead to that place.
+        """
+        try:
+            text = os.fspath(other)  # type: ignore[call-overload]
+        except TypeError:
+            return NotImplemented
+        if not isinstance(text, str):
+            return NotImplemented
+        parts = [p for p in text.split("/") if p]
+        hint = f"write `path / {text!r}` to join it as written"
+        if text.startswith("/") or not 1 <= len(parts) <= 2 or (
+            len(parts) == 2 and parts[0] not in DATATYPES
+        ):
+            raise BidsNameError(
+                f"cannot place {text!r}: write a BIDS file name, optionally "
+                "after its datatype directory (`path // \"func/sub-01_task-"
+                f"rest_events.tsv\"`), or {hint}"
+            )
+        name = parts[-1]
+        given = parts[0] if len(parts) == 2 else None
+        parsed = parse_name(name)
+        if not parsed.is_file_name or not parsed.extension:
+            raise BidsNameError(
+                f"cannot place {name!r}: it is not the BIDS name of a file "
+                f"(<key>-<label>_..._<suffix><extension>); {hint}"
+            )
+        sub = parsed.entities.get("sub")
+        ses = parsed.entities.get("ses")
+        suffix = parsed.suffix
+        if ses is not None and sub is None:
+            raise BidsNameError(
+                f"cannot place {name!r}: it has a session but no subject; "
+                f"add a `sub-<label>` entity in front, or {hint}"
+            )
+        # Where the file goes, as the directories below the dataset.
+        if sub is None:
+            if given is not None:
+                raise BidsNameError(
+                    f"cannot place {text!r}: a name without a subject goes "
+                    f"at the top of the dataset, not in a datatype directory; "
+                    f"write `path // {name!r}`, or {hint}"
+                )
+            target: list[tuple[str, str]] = []
+        else:
+            target = [("sub", f"sub-{sub}")]
+            if ses is not None:
+                target.append(("ses", f"ses-{ses}"))
+            level = TABLE_LEVELS.get(suffix)
+            if level is not None:
+                if given is not None:
+                    raise BidsNameError(
+                        f"cannot place {text!r}: a {suffix} table is in no "
+                        f"datatype directory; write `path // {name!r}`"
+                    )
+                if level == "sub" and ses is not None:
+                    raise BidsNameError(
+                        f"cannot place {name!r}: a sessions table belongs to "
+                        "a subject and has no session entity"
+                    )
+            else:
+                target.append(("datatype", ""))
+        # The directories the left path already ends with.
+        chain = [self, *self.parents]
+        if parse_name(self.name).is_file_name and (
+            parse_name(self.name).extension
+        ):
+            raise BidsNameError(
+                f"cannot place {name!r} in {self.name!r}: it is a file; "
+                "start from the dataset or one of its directories"
+            )
+        have: list[tuple[str, str]] = []
+        for path in chain:
+            pname = path.name
+            kind = (
+                "datatype" if pname in DATATYPES and not have
+                else "ses" if pname.startswith("ses-")
+                and all(k == "datatype" for k, _ in have)
+                else "sub" if pname.startswith("sub-")
+                and all(k != "sub" for k, _ in have)
+                else None
+            )
+            if kind is None:
+                break
+            have.insert(0, (kind, pname))
+        if have and have[0][0] != "sub":
+            raise BidsNameError(
+                f"cannot place {name!r} in {str(self)!r}: a "
+                f"{have[0][1]!r} directory is only meaningful inside a "
+                "subject directory; start from the dataset"
+            )
+        if len(have) > len(target) or any(
+            hk != tk or (tk != "datatype" and hv != tv)
+            for (hk, hv), (tk, tv) in zip(have, target)
+        ):
+            known = SUFFIX_DATATYPES.get(suffix, ())
+            datatype = given or (next(iter(known)) if len(known) == 1 else None)
+            want = "/".join(
+                v or datatype or "<datatype>" for _, v in target
+            ) or "the top"
+            raise BidsNameError(
+                f"cannot place {name!r} in {str(self)!r}: it belongs in "
+                f"{want} of the dataset; start from the dataset or a "
+                f"directory on the way there, or {hint}"
+            )
+        # The datatype.
+        if target and target[-1][0] == "datatype":
+            here = have[-1][1] if len(have) == len(target) else None
+            allowed = SUFFIX_DATATYPES.get(suffix)
+            if allowed is None:
+                raise BidsNameError(
+                    f"cannot place {name!r}: BIDS defines no datatype for "
+                    f"the suffix {suffix!r}; {hint}"
+                )
+            if given is not None and here is not None and given != here:
+                raise BidsNameError(
+                    f"cannot place {text!r} in {str(self)!r}: it is already "
+                    f"in the {here!r} directory; write `path // {name!r}`"
+                )
+            chosen = given or here
+            if chosen is None:
+                if len(allowed) > 1:
+                    options = ", ".join(sorted(allowed))
+                    raise BidsNameError(
+                        f"cannot place {name!r}: a file with the suffix {suffix!r} may "
+                        f"be in any of the datatype directories {options}; name "
+                        f"one in front of it (`path // \"<datatype>/{name}"
+                        "\"`)"
+                    )
+                (chosen,) = allowed
+            elif chosen not in allowed:
+                options = ", ".join(sorted(allowed))
+                raise BidsNameError(
+                    f"cannot place {name!r} in the {chosen!r} directory: a file "
+                    f"with the suffix {suffix!r} belongs in "
+                    + (f"one of {options}" if len(allowed) > 1 else options)
+                )
+            target[-1] = ("datatype", chosen)
+        path = self
+        for _, part in target[len(have):]:
+            path = path / part
+        return path / name
+
     def with_suffix(self, suffix: str) -> Self:  # type: ignore[override]
         """Return a path whose name has another BIDS suffix.
 
@@ -602,6 +778,10 @@ class BidsPath(TreeMixin, BidsPathMixin, Path):
     its columns (`table["age"]`, `as_dict()`, `as_list()`,
     `as_dataframe()`). A file's `sidecars` are the JSON sidecars that apply
     to it, nearest first, and its `sidecar` their merged content.
+
+    `dataset // "sub-01_ses-1_T1w.nii.gz"` is the path where BIDS puts a
+    file of that name (`dataset/sub-01/ses-1/anat/...`), while `/` joins a
+    path exactly as written; see `__floordiv__`.
 
     A path is read-only unless it is built with `mode="w"` (or returned by
     `with_mode("w")`), and every path derived from it has its mode. On a
