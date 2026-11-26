@@ -21,7 +21,7 @@ dynamic = ["version"]
 [project.optional-dependencies]
 # universal-pathlib provides the memory:// backend the tests run against;
 # anyio's pytest plugin runs the async tests.
-test = ["pytest", "universal-pathlib", "anyio"]
+test = ["pytest", "universal-pathlib", "anyio", "pandas"]
 
 
 [project.urls]
