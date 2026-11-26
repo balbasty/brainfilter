@@ -192,15 +192,15 @@ worker joins the transaction. The rules are laid out in
 
 ## Selecting files
 
-A `Filter` has an asynchronous counterpart of `walk`. `Filter.awalk` lists the
-dataset one level at a time, with all the directories of a level listed at once,
-and returns the files to keep as `AsyncBidsPath` objects, with the mode of the
-root you passed.
+`await ds.filter(...)` is the asynchronous counterpart of `filter()`. It
+lists the dataset one level at a time, with all the directories of a level
+listed at once, and returns the files to keep as `AsyncBidsPath` objects, with
+the mode of the dataset. A `Filter` that is reused does the same through its
+`awalk()` method, and `await ds.subjects()` and `await ds.sessions()` list
+the labels, the subjects' sessions all at once.
 
 ```python
-from brainfilter import Filter
-
-kept = await Filter(subjects="01", suffixes="bold").awalk(ds)
+kept = await ds.filter(subjects="01", suffixes="bold")
 [p.name for p in kept]
 # ['dataset_description.json', 'participants.tsv', 'sub-01_task-rest_bold.json',
 #  'sub-01_task-rest_bold.nii.gz', 'task-rest_bold.json']

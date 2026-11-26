@@ -14,7 +14,10 @@ examples use the small dataset from [First steps](../getting-started/first-steps
 
 A filter never changes the dataset, and it holds no reference to one. It is a
 set of rules, and `walk()` applies them: it lists the dataset and returns the
-files that pass. To keep the output short, the examples below print only the
+files that pass. Since the examples below each try a new set of rules once,
+`ds.filter(...)`, which builds the filter from the same keywords and walks the
+dataset with it, would do as well; the tutorial spells out `Filter` because
+the filter itself is the subject. To keep the output short, the examples below print only the
 image files that were selected, through a small helper. Later in the tutorial
 the helper is dropped, to look at everything that comes along with the images.
 
@@ -194,12 +197,34 @@ such as `.datalad`, are never listed.
 >>> print(*[p.relative_to(ds).as_posix() for p in files if "derivatives" in p.parts], sep="\n")
 derivatives/fmriprep/dataset_description.json
 derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz
+derivatives/fmriprep/sub-01/anat/sub-01_space-MNI152NLin2009cAsym_desc-preproc_T1w.nii.gz
 ```
 
 A requested folder is kept whole, and the other filters do not apply inside
 it. Ask for several folders with a list, such as
 `folders=["derivatives", "code"]`; a name outside those four is an error that
 lists the valid choices.
+
+## Filtering a derivatives dataset
+
+A pipeline such as fMRIPrep writes its outputs as a BIDS dataset of their own,
+inside `derivatives`. To filter those outputs rather than the raw data, open
+the derivatives dataset and filter it in the same way. Its folder names and
+entities follow BIDS, so every keyword applies, including the entities that
+only derivatives use, such as `space` and `desc`.
+
+```pycon
+>>> fmriprep = ds["derivatives"]["fmriprep"]
+>>> files = fmriprep.filter(subjects=1, space="MNI152NLin2009cAsym", desc="preproc")
+>>> print(*[p.relative_to(fmriprep).as_posix() for p in files], sep="\n")
+dataset_description.json
+sub-01/anat/sub-01_space-MNI152NLin2009cAsym_desc-preproc_T1w.nii.gz
+```
+
+The direction matters. A filter run on the raw dataset never descends into
+`derivatives`, as the previous section showed, unless the folder is requested
+with `folders=["derivatives"]`, and then it is kept whole. Filtering inside
+the derivatives dataset is the way to select among its files.
 
 ## What comes along with the images
 

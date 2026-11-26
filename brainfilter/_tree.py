@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     from pandas import DataFrame
     from typing_extensions import Self
 
+    from brainfilter.filter import Filter
     from brainfilter.transaction import _Entry
 
 __all__ = ["DATASET_DESCRIPTION", "AsyncJSONContentMixin",
@@ -446,6 +447,41 @@ class TreeMixin:
         def exists(self) -> bool: ...  # noqa: D102
         def read_text(self, encoding: str | None = None) -> str: ...  # noqa: D102
         def __truediv__(self, other: object) -> Self: ...  # noqa: D105
+
+    # -- listings ------------------------------------------------------------
+    def filter(self, *args: Filter, **kwargs: object) -> list[Self]:
+        """Return the files of this dataset that a filter keeps, sorted.
+
+        `ds.filter(subjects=1, suffixes="bold")` builds the
+        `brainfilter.Filter` from its keywords; `ds.filter(f)` uses a
+        filter already made. It lists the dataset as `Filter.walk` does.
+        """
+        return _make_filter(args, kwargs).walk(self)
+
+    def subjects(self) -> list[str]:
+        """Return the subject labels of this dataset, sorted.
+
+        The labels are those of the `sub-<label>` directories directly
+        below this path, without the `sub-` prefix. Numeric labels are
+        sorted as numbers.
+        """
+        return _sorted_labels(_entity_labels(self, "sub"))
+
+    def sessions(self) -> list[str]:
+        """Return the session labels below this path, sorted.
+
+        On a subject directory, the labels of its `ses-<label>`
+        directories; on a dataset, every label any subject has, once.
+        """
+        if _entity_label(self.name, "sub") is not None:
+            return _sorted_labels(_entity_labels(self, "ses"))
+        labels: set[str] = set()
+        for child in self.iterdir():
+            if _entity_label(child.name, "sub") is not None and (
+                child.pathinfo.is_dir()
+            ):
+                labels.update(_entity_labels(child, "ses"))
+        return _sorted_labels(labels)
 
     # -- transactions --------------------------------------------------------
     def transaction(self) -> Transaction:
@@ -943,6 +979,36 @@ class AsyncTreeMixin:
         async def read_text(self, encoding: str | None = None) -> str: ...  # noqa: D102
         def __truediv__(self, other: object) -> Self: ...  # noqa: D105
 
+    # -- listings ------------------------------------------------------------
+    async def filter(self, *args: Filter, **kwargs: object) -> list[Self]:
+        """Return the files of this dataset that a filter keeps, sorted.
+
+        The coroutine counterpart of `BidsPath.filter`, listing the dataset
+        as `Filter.awalk` does.
+        """
+        return await _make_filter(args, kwargs).awalk(self)
+
+    async def subjects(self) -> list[str]:
+        """Return the subject labels of this dataset, sorted.
+
+        The coroutine counterpart of `BidsPath.subjects`.
+        """
+        return _sorted_labels(await _aentity_labels(self, "sub"))
+
+    async def sessions(self) -> list[str]:
+        """Return the session labels below this path, sorted.
+
+        The coroutine counterpart of `BidsPath.sessions`; the subjects of a
+        dataset are listed at once.
+        """
+        if _entity_label(self.name, "sub") is not None:
+            return _sorted_labels(await _aentity_labels(self, "ses"))
+        subjects = await _aentity_dirs(self, "sub")
+        listings = await asyncio.gather(
+            *(_aentity_labels(s, "ses") for s in subjects)
+        )
+        return _sorted_labels(set().union(*listings))
+
     # -- transactions --------------------------------------------------------
     def transaction(self) -> AsyncTransaction:
         """Keep the writes to the JSON and TSV files below this path.
@@ -1361,3 +1427,64 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
 
     def __contains__(self, column: object) -> NoReturn:
         raise _not_awaitable(self, "'in'", "await table.has(column)")
+
+
+# -- listings --------------------------------------------------------------------
+
+def _make_filter(args: tuple, kwargs: dict) -> Filter:
+    """Return the `Filter` given by position, or built from keywords."""
+    from brainfilter.filter import Filter
+
+    if not args:
+        return Filter(**kwargs)
+    if len(args) == 1 and not kwargs and isinstance(args[0], Filter):
+        return args[0]
+    raise TypeError(
+        "filter() takes either one Filter or Filter keywords, not both"
+        if kwargs and args
+        else "filter() takes one Filter, or Filter keywords"
+    )
+
+
+def _entity_label(name: str, key: str) -> str | None:
+    """Return the label of a `<key>-<label>` name, or None."""
+    prefix = f"{key}-"
+    if name.startswith(prefix) and len(name) > len(prefix):
+        return name[len(prefix):]
+    return None
+
+
+def _sorted_labels(labels: Iterable[str]) -> list[str]:
+    """Sort labels as numbers when they all are, else as text."""
+    labels = list(labels)
+    if all(label.isdigit() for label in labels):
+        return sorted(labels, key=lambda label: (int(label), label))
+    return sorted(labels)
+
+
+def _entity_labels(directory: TreeMixin, key: str) -> set[str]:
+    """Return the labels of the `<key>-<label>` directories in `directory`."""
+    return {
+        label
+        for child in directory.iterdir()
+        if (label := _entity_label(child.name, key)) is not None
+        and child.pathinfo.is_dir()
+    }
+
+
+async def _aentity_dirs(directory: AsyncTreeMixin, key: str) -> list:
+    """Return the `<key>-<label>` directories in `directory`."""
+    return [
+        child
+        async for child in directory.iterdir()
+        if _entity_label(child.name, key) is not None
+        and await child.pathinfo.is_dir()
+    ]
+
+
+async def _aentity_labels(directory: AsyncTreeMixin, key: str) -> set[str]:
+    """Return the labels of the `<key>-<label>` directories in `directory`."""
+    return {
+        _entity_label(child.name, key)  # type: ignore[misc]
+        for child in await _aentity_dirs(directory, key)
+    }
