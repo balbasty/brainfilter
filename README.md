@@ -6,31 +6,45 @@ Build, read and filter BIDS trees on any storage backend.
 metadata, and selects files with glob, regex and BIDS-entity conditions.
 Validation is out of scope for now.
 
+The examples below run in order, on a small dataset in memory
+(`memory://`, from universal-pathlib).
+
 ## Reading a dataset
 
 ```python
-from brainfilter.bidspath import BidsPath
+from brainfilter import BidsPath
 
 ds = BidsPath("memory://ds")            # or a local path, s3://, ...
 anat = ds["sub-01"]["anat"]             # children by name; keys(), iteration
 t1w = anat["sub-01_T1w.nii.gz"]
 
-ds["dataset_description.json"]["Name"]  # a JSON file is a mapping
-ds["participants.tsv"].read()           # a TSV file is a Table: a list of rows
-ds["participants.tsv"].read_dataframe() # ... or a DataFrame (needs pandas)
+ds["dataset_description.json"]["Name"]  # a JSON file is a mapping of keys
+ds["dataset_description.json"].as_dict()  # ... loaded as a plain dict
 
-t1w.metadata["RepetitionTime"]          # ChainMap of applicable sidecars
-t1w.sidecars()                          # the sidecars, nearest first
+participants = ds["participants.tsv"]   # a TSV file is a mapping of columns
+participants["age"]                     # one typed column: [30.0, None, ...]
+participants.keys()                     # the column names
+participants.as_dict()                  # every column: {name: [values]}
+participants.as_list()                  # every row: [{column: value}, ...]
+participants.as_dataframe()             # a pandas DataFrame (needs pandas)
+for row in participants.rows(): ...     # the rows, one at a time
+
+t1w.sidecars                            # the JSON sidecars, nearest first
+t1w.sidecar["RepetitionTime"]           # their merged content (a ChainMap)
+t1w.sidecar.as_dict()                   # ... flattened: the nearest wins
 ```
+
+Every read goes to the files again; nothing is cached. A value a read
+returns is a copy: changing it changes nothing on disk.
 
 ### Typed tables
 
-`read()` types each column of a TSV file, and `n/a` reads as `None`:
+A TSV file's columns are typed, and `n/a` reads as `None`:
 
 ```python
-ds["participants.tsv"].read()
+ds["participants.tsv"].as_list()
 # [{"participant_id": "sub-01", "age": 30.0, "sex": "F"}, ...]
-ds["participants.tsv"].read(raw=True)   # every value as its exact text
+ds["participants.tsv"].as_list(raw=True)   # every value as its exact text
 ```
 
 A column's type comes from the first of:
@@ -49,9 +63,9 @@ A column's type comes from the first of:
 
 A declared type is used only if every value parses as it. A column with
 `Levels` keeps its values as text (the keys of `Levels`); a column with a
-`Delimiter` reads as lists. `read_dataframe()` gives the same types as
-pandas dtypes. Both take `root=`, the dataset root up to which sidecars
-describe the columns, as `read_metadata()` does.
+`Delimiter` reads as lists. `as_dataframe()` gives the same types as pandas
+dtypes. `as_dict()`, `as_list()`, `columns()` (the same as `as_dict()`) and
+`rows()` take `raw=True`.
 
 A BIDS table has no quoting: a cell is the exact text between two tabs, so
 `"q"` reads as `"q"`, quotes included. A file may start with a UTF-8
@@ -63,15 +77,14 @@ a float NaN, as pandas holds a missing value) as `n/a`, a `bool` as
 `true`/`false`, a `float` in its shortest form, a list joined with the
 column's `Delimiter` (from the sidecar, for new columns and new tables
 too). A value holding a tab or a line break, and an infinite float, cannot
-be written: the commit raises `ValueError` before writing anything. Files
-are written without a byte-order mark.
+be written: the write raises `ValueError` and writes nothing. Files are
+written without a byte-order mark.
 
 ### Sidecars
 
 Sidecars are inherited up to the dataset root: the nearest ancestor with a
-`dataset_description.json`, or the `root=` you pass to `sidecars()` and
-`read_metadata()`. A file with no dataset root above it (a loose file, a
-scratch directory) gets the sidecars in its own directory only.
+`dataset_description.json`. A file with no dataset root above it (a loose
+file, a scratch directory) gets the sidecars in its own directory only.
 
 ## Selecting files
 
@@ -79,11 +92,14 @@ A `Filter` picks a subset of a dataset from its file listing, before
 anything is downloaded:
 
 ```python
-from brainfilter.filter import Filter
+from brainfilter import Filter, Glob
 
-f = Filter(subjects="01", datatypes="anat", acq="mprage", run=[1, 2])
+f = Filter(subjects="01", datatypes="anat", acq=Glob("mp*"), run=[1, 2])
+listing = ["sub-01/anat/sub-01_acq-mprage_run-1_T1w.nii.gz",
+           "sub-02/anat/sub-02_acq-mprage_run-1_T1w.nii.gz"]
 f.select(listing)                      # relative path strings, or paths
-f.walk("s3://openneuro.org/ds000224")  # list the dataset, then select
+f.walk(ds)                             # list the dataset, then select
+# f.walk("s3://openneuro.org/ds000224") lists a dataset at a URL
 ```
 
 Data files are kept when they pass every filter, and the metadata that
@@ -105,71 +121,117 @@ BIDS rather than the file extension:
 So `Filter().select(listing)` keeps every file but hidden ones and the
 optional folders (`derivatives/`, `sourcedata/`, ...; ask for them with
 `folders=`). `select` expects files: pass `walk()`'s output, or filter
-`rglob("*")` on `is_file()`.
+`rglob("*")` on `is_file()`. The files `walk()` lists have the mode of the
+root it is given.
 
 ## Writing
 
-The tree is read-only, except inside a transaction. Edits to JSON and TSV
-files are kept in memory, and every read sees them, `metadata` included. On
-a clean exit each changed file is written; on an exception, nothing is.
+Paths are read-only by default. A writable path is built with `mode="w"`,
+or made with `with_mode("w")`, and every path derived from it is writable
+too: `/`, `parent`, `with_subject()` and the other `with_*` methods, the
+paths a listing yields (`iterdir()`, `glob()`, `walk()`, a directory's
+children) and `sidecars`.
 
 ```python
-with ds.transaction() as tx:
-    ds["T1w.json"]["RepetitionTime"] = 2.3      # set a key
-    del ds["T1w.json"]["Obsolete"]              # delete a key
-    ds["task-rest_bold.json"].write({"TaskName": "rest"})   # replace a file
-    (ds / "sub-03")["sub-03_T1w.json"] = {"Level": "new"}   # a new file
-    rows = ds["participants.tsv"].read()        # this transaction's copy
-    rows.append({"participant_id": "sub-03", "age": 41})
-    rows.add_column("handedness")
-    rows.drop_column("sex")
-    t1w.metadata["EchoTime"] = 0.03             # lands in the nearest sidecar
+ds = BidsPath("memory://ds", mode="w")  # or BidsPath(...).with_mode("w")
+ds.mode                                 # "w"; "r" for a read-only path
+```
+
+On a writable path, each write to a JSON or TSV file is written at once, in
+one atomic replace: the file is read, changed and replaced in one step, so a
+reader sees the old file or the new one. Two writes to one file at the same
+time, from two threads or two tasks, are made one after the other, so
+neither is lost. This holds within one process (for `AsyncBidsPath`, within
+one event loop), not between processes: there, the last replace wins.
+
+```python
+ds["T1w.json"]["RepetitionTime"] = 2.3          # set a key
+del ds["T1w.json"]["Obsolete"]                  # delete a key
+ds["T1w.json"].update(EchoTime=0.03)            # several keys, one write
+ds["task-rest_bold.json"].write({"TaskName": "rest"})   # replace a file
+(ds / "sub-03")["sub-03_T1w.json"] = {"Level": "new"}   # a new file
+ds["participants.tsv"]["handedness"] = ["R", "L"]       # one value per row
+del ds["participants.tsv"]["sex"]               # drop a column
+rows = ds["participants.tsv"].as_list()
+ds["participants.tsv"].write([*rows, {"participant_id": "sub-03"}])
+t1w = ds["sub-01"]["anat"]["sub-01_T1w.nii.gz"]  # writable, as ds is
+t1w.sidecar["EchoTime"] = 0.03                  # to the nearest sidecar
+```
+
+A column is given as a list of values, one per row: a string (or bytes, or
+a mapping) is refused with `TypeError` rather than split into characters.
+In a table with no row yet (a new file, or a header alone), the first
+column set gives the number of rows, with `n/a` in the other columns.
+
+Changing a value in place (a nested `dict`, a row of `as_list()`) is not
+saved: write it back. On a read-only path, each of the writes above raises
+`ReadOnlyError`, and so do `with path:`, `transaction()` and the `Path`
+members that change the filesystem: `write_text`, `write_bytes`, `open`
+for writing, `touch`, `mkdir`, `unlink`, `rmdir`, `rmtree`, `rename`,
+`replace`, `symlink_to`, `hardlink_to`, `chmod`, `lchmod`, `staged`,
+`upload_from`, and `copy`, `copy_into`, `move`, `move_into`, `link_to` and
+`download_to` onto a read-only path (or, for `move` and `move_into`, from
+one). The mode is a brainfilter rule, not a filesystem permission: the
+wrapped driver object (`path.wrapped`) and the backend's own handles
+(`path.fs`, `path.client`) reach the storage directly and do not check it.
+
+### Transactions
+
+Inside `with path:`, every write to a JSON or TSV file below the path is
+kept in memory, through any path object, and every read sees it, `sidecar`
+included. On a clean exit each changed file is written; on an exception,
+nothing is. This holds in the thread or task that opened the block and the
+tasks started inside it; a write from anywhere else raises (see below).
+
+```python
+with ds:                                        # gives ds itself
+    ds["T1w.json"]["RepetitionTime"] = 2.3
+    ds["participants.tsv"]["age"] = [30, 41, 25]
+    t1w.sidecar["EchoTime"] = 0.03
+
+with ds.transaction() as tx:                    # the same block
+    ...
 tx.written                                      # the files written, in order
 ```
 
-What a read returns inside the block is the transaction's own copy, so
-changing it in place is an edit. A file that was read but not changed is
-not written, and a new file is created only once it is given content (a
-key, a row, or a whole `write()`). Outside a block, assigning into the tree
-raises `TypeError`: nothing is ever written behind your back.
+A file that was read but not changed is not written, and a new file is
+created only once it is given content. A write that raises inside the block
+leaves the file's content as it was.
 
-- A transaction holds while its block is open. A write from a task that
-  outlives the block (or runs during its commit) raises `RuntimeError`
-  instead of being lost: await such tasks inside the block.
+- A transaction holds while its block is open, in the thread or task that
+  opened it and the tasks started inside it. A write to a file it covers
+  from anywhere else raises `RuntimeError` instead of going past it: from
+  another thread (a `ThreadPoolExecutor` worker, say, which does not share
+  the block's context), from a task started outside the block, or from a
+  task that outlives the block (or runs during its commit). Make such
+  writes inside the block, and await its tasks there.
 - A file is known by its location, so `ds["sub-01"] / ".." / "T1w.json"`
   and `ds["T1w.json"]` (or, on a local disk, a symbolic link and its
   target) are one file. A child name is one level down: `ds[".."]` is a
   `KeyError`, and a path that leads out of the transaction's root is not
   covered by it.
-- Transactions on the same files cannot be nested, sync and async alike.
-- A file that no sidecar applies to has an empty `metadata` that cannot be
+- Transactions on the same files cannot be nested, nor be open at once in
+  two threads or tasks, sync and async alike.
+- A file that no sidecar applies to has an empty `sidecar` that cannot be
   written to (`TypeError`): create its sidecar first.
-
-One file can be edited on its own:
-
-```python
-with ds["participants.json"].edit() as content:   # {} for a new file
-    content["age"] = {"Units": "year"}
-```
-
-Inside a transaction, an `edit()` joins it; if the `edit()` block raises,
-the file is put back as it was when the block began, and the rest of the
-transaction carries on.
 
 ### When a write fails
 
 Each file is replaced in one step (bagof-paths' `staged()`), so a reader
-never sees a torn file. A set of files is not replaced atomically, on remote
-stores in particular. Every file is serialized before the first write, so
-bad content fails with nothing written. Then the files are written one at a
-time, in the order the transaction first used them; if one fails, the
-commit **stops**, and `TransactionError` says what happened:
+never sees a torn file. Outside a transaction, a write raises its error
+directly (a `bagof.paths.CommitError` when the store refused the file).
+
+A set of files is not replaced atomically, on remote stores in particular.
+At the end of a transaction, every file is serialized before the first
+write, so bad content fails with nothing written. Then the files are
+written one at a time, in the order the transaction first used them; if one
+fails, the commit **stops**, and `TransactionError` says what happened:
 
 ```python
-from brainfilter.transaction import TransactionError
+from brainfilter import TransactionError
 
 try:
-    with ds.transaction():
+    with ds:
         ...
 except TransactionError as error:
     error.written       # written, in order; not rolled back
@@ -178,40 +240,48 @@ except TransactionError as error:
     error.__cause__     # the store's error (a bagof.paths.CommitError)
 ```
 
-A single-file `edit()` raises its write's error directly. An `edit()` inside
-a transaction that covers the file joins it.
-
 If the commit is interrupted instead (`KeyboardInterrupt`, or the async task
 is cancelled), that exception propagates as itself, with a note listing the
 files written and those not written (`error.__notes__`).
 
 ## Async
 
-`AsyncBidsPath` has the same BIDS surface and classes, with coroutine I/O.
-Indexing and `in` cannot be awaited, so they are `child()` and `has()`;
-everything else keeps its name and is awaited.
+`AsyncBidsPath` has the same BIDS surface, classes and mode, with coroutine
+I/O. Indexing, `in` and assignment cannot be awaited, so they are methods:
+`child()` and `has()` on a directory, `get()`, `has()`, `set()` and
+`delete()` on a JSON or TSV file. Everything else keeps its name and is
+awaited.
 
 ```python
-from brainfilter.bidspath import AsyncBidsPath
-from brainfilter.filter import Filter
+from brainfilter import AsyncBidsPath, Filter
 
-ds = AsyncBidsPath("s3://bucket/ds")          # native async on s3fs, gcsfs, ...
+ds = AsyncBidsPath("memory://ds", mode="w")   # s3:// is native async on s3fs
 anat = await (await ds.child("sub-01")).child("anat")
 names = await anat.keys()                     # also values(), items(), get()
 async for name in ds: ...
-await (ds / "participants.tsv").read()        # rows
-await (ds / "T1w.json").get("RepetitionTime")
-await (anat / "sub-01_T1w.nii.gz").read_metadata()   # ChainMap
+
+sidecar = ds / "T1w.json"
+await sidecar.get("RepetitionTime")           # for sidecar["RepetitionTime"]
+await sidecar.as_dict()
+
+participants = ds / "participants.tsv"
+await participants.get("age")                 # for participants["age"]
+await participants.as_dict()                  # also as_list(), as_dataframe()
+async for row in participants.rows(): ...
+
+t1w = anat / "sub-01_T1w.nii.gz"
+await t1w.sidecars                            # the sidecars, nearest first
+merged = await t1w.sidecar                    # loaded: read without await
+merged["RepetitionTime"], merged.as_dict()
+await merged.set("EchoTime", 0.03)            # to the nearest sidecar
+
+await sidecar.set("RepetitionTime", 2.3)      # for sidecar[key] = value
+await sidecar.delete("EchoTime")              # for del sidecar[key]
+await participants.set("handedness", ["R", "L", "R"])
+await (ds / "sub-03" / "sub-03_T1w.json").write({"Level": "new"})
+
+async with ds:                                # the same transactions
+    await sidecar.set("RepetitionTime", 2.3)
 
 kept = await Filter(subjects="01").awalk(ds)  # list AsyncBidsPath files
-
-async with ds.transaction():                  # the same transactions
-    sidecar = ds / "T1w.json"
-    await sidecar.set("RepetitionTime", 2.3)  # for sidecar[key] = value
-    await sidecar.delete("Obsolete")          # for del sidecar[key]
-    (await (ds / "participants.tsv").read()).append({"participant_id": "sub-03"})
-    await (ds / "sub-03" / "sub-03_T1w.json").write({"Level": "new"})
-
-async with sidecar.edit() as content:
-    content["EchoTime"] = 0.03
 ```

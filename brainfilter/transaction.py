@@ -1,50 +1,66 @@
-"""Explicit write transactions on a BIDS tree.
+"""Writes to a BIDS tree: written at once, or kept until a block ends.
 
-The dataset tree is read-only, except inside one of two blocks:
+A path is read-only unless it is writable (`BidsPath(url, mode="w")`, or
+`path.with_mode("w")`). On a writable path, each write to a JSON or TSV
+file writes it at once, in one atomic replace:
 
 ```python
-with dataset.transaction() as tx:          # many files
-    dataset["T1w.json"]["RepetitionTime"] = 2.3
-    del dataset["T1w.json"]["Obsolete"]
-    rows = dataset["participants.tsv"].read()
-    rows.append({"participant_id": "sub-03", "age": 41})
-    rows.add_column("handedness")
-    (dataset / "sub-03")["sub-03_T1w.json"] = {"Level": "new"}  # new file
+ds = BidsPath("ds", mode="w")
+ds["T1w.json"]["RepetitionTime"] = 2.3       # read, changed, replaced
+ds["participants.tsv"]["handedness"] = ["R", "L"]
+```
 
-with sidecar.edit() as content:            # one file
-    content["RepetitionTime"] = 2.3
+Inside `with path:`, the writes to the files below the path are kept in
+memory instead, and written when the block ends:
+
+```python
+with ds:                                     # gives the path itself
+    ds["T1w.json"]["RepetitionTime"] = 2.3
+    del ds["T1w.json"]["Obsolete"]
+    ds["participants.tsv"]["age"] = [30, 41]
+    (ds / "sub-03")["sub-03_T1w.json"] = {"Level": "new"}  # new file
+
+with ds.transaction() as tx:                 # the same, gives the Transaction
+    ...
+tx.written                                   # the files it wrote
 ```
 
 The async family has the same blocks, with `async with`; see
-[`AsyncTransaction`][brainfilter.transaction.AsyncTransaction].
+[`AsyncTransaction`][brainfilter.AsyncTransaction].
 
-Inside a block, edits to JSON and TSV files are kept in memory, and every
-read of the tree sees them: a file's `read()`, its keys, the directory
-listing (new files included), `sidecars()` and `metadata`. The content a read
-returns *is* the transaction's copy, so changing it in place is an edit, and
-a write to `metadata` lands in the nearest sidecar. Leaving the block with an
-exception discards everything: nothing is written. Leaving it cleanly writes
-each changed file once. A file that was read but not changed is not written,
-and in a table that changed, the cells left unchanged keep their exact text.
-Nothing is ever written outside these blocks: assigning into the tree outside
-one raises `TypeError`.
+Inside a block, every write to a covered file is kept, whichever path object
+it goes through (one derived from the block's path, one built from a string,
+sync or async), and every read of the tree sees them: a file's keys and
+values, `as_dict()`, the directory listing (new files included), `sidecars`
+and `sidecar`. A read returns a copy: changing it in place is not an edit.
+A write that raises leaves the file's content as it was. Leaving the block
+with an exception discards everything: nothing is written. Leaving it
+cleanly writes each changed file once. A file that was read but not changed
+is not written, and in a table that changed, the cells left unchanged keep
+their exact text.
 
 A transaction covers the files below its root, in the thread or task that
 opened it (and the tasks started inside it), while it is open. A write
-through the tree once it has closed (from a task that outlived the block,
-say, or during its commit) raises `RuntimeError` rather than being lost.
-Transactions on overlapping trees cannot be nested, whether sync or async;
-on disjoint trees they can. A file is known by its location: two names for
-one file (`sub-01/../T1w.json` and `T1w.json`, or a symbolic link and its
-target on a local disk) share one entry. A file is read into the transaction
-when it is first used there, and is not read again: a change another writer
-makes meanwhile is overwritten. A file with no sidecar has an empty
-`metadata` that cannot be written to: create a sidecar first.
+through the tree to one of those files from anywhere else raises
+`RuntimeError` rather than being lost or written past the transaction:
+from another thread (a `threading.Thread` or a `ThreadPoolExecutor` worker
+does not share the block's context, so it does not join the transaction),
+from a task started outside the block, and, once the block has closed, from
+a task that outlived it or during its commit. Transactions on overlapping
+trees cannot be nested, nor be open at once in two threads or tasks,
+whether sync or async; on disjoint trees they can. A file is known by its
+location: two names for one file (`sub-01/../T1w.json` and `T1w.json`, or a
+symbolic link and its target on a local disk) share one entry. A file is
+read into the transaction when it is first used there, and is not read
+again: a change another writer makes meanwhile is overwritten. A file that
+did not exist is created only once it is given content. A file with no
+sidecar has an empty `sidecar` that cannot be written to: create a sidecar
+first.
 
 Writing
 -------
 Before the first file is written, every changed file is serialized, so a
-value that cannot be written (not JSON-serializable, say) raises its error
+value that cannot be written (a tab in a TSV cell, say) raises its error
 with nothing written. Then the files are written one at a time, in the order
 the transaction first used them (read or written), each through bagof-paths'
 `staged()`: it is replaced in one step, so a reader sees the old file or the
@@ -54,49 +70,58 @@ directory is created first.
 A set of files is not replaced atomically, on remote stores in particular.
 If writing a file fails, the commit **stops there**: the files before it were
 written, that file and the ones after it were not, and their edits are
-dropped. [`TransactionError`][brainfilter.transaction.TransactionError] then
-says which is which (`written`, `failed`, `not_written`), and its cause is
-the error the write raised (a `bagof.paths.CommitError` when the store
-refused the file). Stopping keeps the outcome a prefix of a known order: a
-file first used after another is never written ahead of it, and a store that
-is down is not tried once per remaining file. Files already written are not
-rolled back. The async family writes the files one at a time too, so the
-report means the same there.
+dropped. [`TransactionError`][brainfilter.TransactionError] then says which
+is which (`written`, `failed`, `not_written`), and its cause is the error
+the write raised (a `bagof.paths.CommitError` when the store refused the
+file). Stopping keeps the outcome a prefix of a known order: a file first
+used after another is never written ahead of it, and a store that is down
+is not tried once per remaining file. Files already written are not rolled
+back. The async family writes the files one at a time too, so the report
+means the same there.
 
 If the commit is interrupted by an exception that is not an error
 (`KeyboardInterrupt`, or the cancellation of an async task), that exception
 propagates as itself, with a note (PEP 678, `__notes__`) saying which files
 were written and which were not.
 
-A single-file `edit()` raises the error of its one write directly. Inside a
-transaction that covers the file, `edit()` joins it: the file is written
-when the transaction commits, and an exception leaving the `edit()` block
-puts the file back as it was when the block was entered.
+A write outside a block raises the error of its one write directly. Two
+writes to one file outside a block are made one after the other, so that
+neither is lost: through the sync family across the threads of the
+process, and through the async family across the tasks of one event loop.
+Writes from other processes are not coordinated: the last replace wins.
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import copy
 import os
+import threading
 from contextvars import ContextVar
 from pathlib import PurePath
 from typing import TYPE_CHECKING, Any
 
 from brainfilter import _content
+from brainfilter._family import in_family
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
     from types import TracebackType
 
-    from brainfilter._content import Table
     from brainfilter.bidspath import AsyncBidsPath, BidsPath
 
-__all__ = ["AsyncEdit", "AsyncTransaction", "Edit", "Transaction",
-           "TransactionError"]
+__all__ = ["AsyncTransaction", "Transaction", "TransactionError"]
 
 # The transactions open in this context (thread or task).
 _ACTIVE: ContextVar[tuple[_TransactionBase, ...]] = ContextVar(
     "brainfilter_transactions", default=()
 )
+
+# Every transaction open (or committing) in the process, whatever context
+# opened it, guarded by `_REGISTRY_LOCK`: a write from another context to a
+# file one of them covers is refused rather than written past it.
+_REGISTRY_LOCK = threading.Lock()
+_REGISTRY: list[_TransactionBase] = []
 
 
 def active_for(
@@ -106,16 +131,39 @@ def active_for(
 
     A transaction that has closed (or is committing) is not active, but a
     task started inside it still sees it: with `write`, such a transaction
-    raises `RuntimeError`, since a write through it would be lost.
+    raises `RuntimeError`, since a write through it would be lost. With
+    `write`, a transaction that covers `path` but was opened in another
+    context (a thread, or a task not started inside its block) raises
+    `RuntimeError` too: the write would go past it.
     """
+    own = _ACTIVE.get()
     closed = None
-    for tx in _ACTIVE.get():
+    for tx in own:
         if tx.covers(path):
             if tx._state == _OPEN:
                 return tx
             closed = closed or tx
-    if write and closed is not None:
-        raise closed._closed_error(path)
+    if write:
+        if closed is not None:
+            raise closed._closed_error(path)
+        elsewhere = _open_elsewhere(path, own)
+        if elsewhere is not None:
+            raise elsewhere._elsewhere_error(path)
+    return None
+
+
+def _open_elsewhere(
+    path: object, own: tuple[_TransactionBase, ...]
+) -> _TransactionBase | None:
+    """Return a transaction covering `path` that this context is not in."""
+    with _REGISTRY_LOCK:
+        others = [tx for tx in _REGISTRY if not any(tx is t for t in own)]
+    if not others:
+        return None
+    location = _location(path)
+    for tx in others:
+        if _within(location, tx._location):
+            return tx
     return None
 
 
@@ -127,9 +175,19 @@ def pending_names(directory: object) -> set[str]:
     """
     names: set[str] = set()
     for tx in _ACTIVE.get():
-        if tx._state == _OPEN and isinstance(directory, tx._family):
+        if tx._state == _OPEN:
             names |= tx._buffer.names_in(directory)
     return names
+
+
+def entered(root: object) -> _TransactionBase:
+    """Return the open transaction that `with root:` opened in this context."""
+    for tx in reversed(_ACTIVE.get()):
+        if tx._root is root and tx._state == _OPEN:
+            return tx
+    raise RuntimeError(
+        f"no transaction was opened by `with` on {str(root)!r} here"
+    )
 
 
 # -- locations (pure, apart from resolving local symbolic links) -------------------
@@ -190,6 +248,86 @@ def _write_path(path: Any, location: tuple[str, Any]) -> Any:  # noqa: ANN401
     return clean if _location(clean) == location else path
 
 
+# -- one write at a time per file ---------------------------------------------------
+
+class _Slot:
+    """A lock, and how many writes hold it or wait for it."""
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self, lock: object) -> None:
+        self.lock = lock
+        self.users = 0
+
+
+# `location -> slot` for the sync family, and `loop -> {location -> slot}`
+# for the async one (an `asyncio.Lock` belongs to one event loop). A slot
+# is dropped when its last user lets it go (a cancelled wait included), and
+# a loop's table with its last slot, so neither holds a file or a loop that
+# no write is using. Both are changed under `_LOCKS_LOCK`.
+_LOCKS_LOCK = threading.Lock()
+_LOCKS: dict[object, _Slot] = {}
+_ALOCKS: dict[asyncio.AbstractEventLoop, dict[object, _Slot]] = {}
+
+
+def _take(table: dict[object, _Slot], location: object,
+          new: Callable[[], object]) -> _Slot:
+    slot = table.get(location)
+    if slot is None:
+        slot = table[location] = _Slot(new())
+    slot.users += 1
+    return slot
+
+
+def _let_go(table: dict[object, _Slot], location: object, slot: _Slot) -> None:
+    slot.users -= 1
+    if not slot.users:
+        del table[location]
+
+
+@contextlib.contextmanager
+def file_lock(path: object) -> Iterator[None]:
+    """Hold the lock on the file at `path` (by location) for a block.
+
+    One write through at a time per file, across the threads of the
+    process: a read, change and replace of the file is not interleaved with
+    another of the same file.
+    """
+    location = _location(path)
+    with _LOCKS_LOCK:
+        slot = _take(_LOCKS, location, threading.Lock)
+    try:
+        with slot.lock:  # type: ignore[attr-defined]
+            yield
+    finally:
+        with _LOCKS_LOCK:
+            _let_go(_LOCKS, location, slot)
+
+
+@contextlib.asynccontextmanager
+async def afile_lock(path: object) -> AsyncIterator[None]:
+    """Hold the lock on the file at `path` for a block, in this event loop.
+
+    The async counterpart of `file_lock`: one write through at a time per
+    file, across the tasks of the running event loop.
+    """
+    location = _location(path)
+    loop = asyncio.get_running_loop()
+    with _LOCKS_LOCK:
+        table = _ALOCKS.get(loop)
+        if table is None:
+            table = _ALOCKS[loop] = {}
+        slot = _take(table, location, asyncio.Lock)
+    try:
+        async with slot.lock:  # type: ignore[attr-defined]
+            yield
+    finally:
+        with _LOCKS_LOCK:
+            _let_go(table, location, slot)
+            if not table:
+                _ALOCKS.pop(loop, None)
+
+
 # -- the buffer (pure) ------------------------------------------------------------
 
 class _Entry:
@@ -215,6 +353,13 @@ class _Entry:
         # created only if its content is set or replaced.
         self.missing = missing
 
+    def replace(self, content: object) -> None:
+        """Hold `content` as the whole new content of the file."""
+        self.content = content
+        if self.missing:
+            # A new file that is written, even empty.
+            self.original = None
+
     def text(self) -> str | None:
         """Return the text to write, or `None` if the file is unchanged."""
         text = _content.dump(self.kind, self.content)
@@ -233,8 +378,7 @@ class _Entry:
     def snapshot(self) -> Callable[[], None]:
         """Return a function that puts this entry back as it is now.
 
-        The content is put back in place, so an object a caller holds (the
-        `dict` or `Table` a read returned) is the entry's content again.
+        The content is put back in place, as the same object.
         """
         content, original, missing = self.content, self.original, self.missing
         restore_content = None
@@ -299,20 +443,6 @@ class _Buffer:
                 missing=text is None,
             )
         return entry
-
-    def replace(self, path: object, kind: str, content: object) -> None:
-        """Hold `content` as the whole new content of `path`."""
-        location = _location(path)
-        entry = self._entries.get(location)
-        if entry is None:
-            self._entries[location] = _Entry(
-                _write_path(path, location), kind, content, None
-            )
-        else:
-            entry.content = content
-            if entry.missing:
-                # A new file that is written, even empty.
-                entry.original = None
 
     def names_in(self, directory: object) -> set[str]:
         """Names, directly in `directory`, of held files or their parents."""
@@ -411,13 +541,11 @@ _NEW, _OPEN, _COMMITTING, _DONE = "new", "open", "committing", "done"
 class _TransactionBase:
     """What the sync and async transactions share: everything but I/O."""
 
-    def __init__(self, root: object, *, _single: bool = False) -> None:
+    def __init__(self, root: object) -> None:
         self._root = root
-        # Paths of this family only: a sync transaction is not seen by an
-        # async path at the same place, nor the reverse.
+        # The family the files are written through, whatever path held them.
         self._family = getattr(type(root), "_root", type(root))
         self._buffer = _Buffer()
-        self._single = _single
         self._state = _NEW
         self._written: list = []
         self._location = _location(root)
@@ -438,12 +566,10 @@ class _TransactionBase:
         return [path for path, _ in self._buffer.plan()]
 
     def covers(self, path: object) -> bool:
-        """Whether `path` is the root or below it, in the same family.
+        """Whether `path` is the root or below it, sync or async alike.
 
         `..` is collapsed, and a local path resolved, before comparing.
         """
-        if not isinstance(path, self._family):
-            return False
         return _within(_location(path), self._location)
 
     def _overlaps(self, other: _TransactionBase) -> bool:
@@ -467,12 +593,29 @@ class _TransactionBase:
                     "transactions on the same files cannot be nested, "
                     "whether sync or async"
                 )
+        with _REGISTRY_LOCK:
+            for other in _REGISTRY:
+                if self._overlaps(other):
+                    raise RuntimeError(
+                        f"a transaction on {str(other._root)!r} is already "
+                        f"{_doing(other)} in another thread or task; "
+                        "transactions on the same files cannot be open at "
+                        "once: open this one after it ends"
+                    )
+            _REGISTRY.append(self)
         _ACTIVE.set((*active, self))
         self._state = _OPEN
 
     def _close(self) -> None:
         _ACTIVE.set(tuple(t for t in _ACTIVE.get() if t is not self))
         self._state = _COMMITTING
+
+    def _finish(self) -> None:
+        """Drop the held files, and let other contexts write the files."""
+        self._buffer.clear()
+        self._state = _DONE
+        with _REGISTRY_LOCK:
+            _REGISTRY[:] = [t for t in _REGISTRY if t is not self]
 
     def _closed_error(self, path: object) -> RuntimeError:
         when = (
@@ -486,11 +629,29 @@ class _TransactionBase:
             "that make them before it ends)"
         )
 
+    def _elsewhere_error(self, path: object) -> RuntimeError:
+        if self._state == _COMMITTING:
+            return self._closed_error(path)
+        return RuntimeError(
+            f"cannot edit {str(path)!r}: a transaction on "
+            f"{str(self._root)!r} is open in another thread or task, and "
+            "this write would go past it (it would be written now, whatever "
+            "the transaction does, and its commit could overwrite it); make "
+            "the edit inside the transaction's block (a task started there "
+            "shares it, a thread does not), or after it ends"
+        )
+
+    def _target(self, path: object) -> Any:  # noqa: ANN401
+        """Return the path to write `path` through: of this family, writable.
+
+        A file may have been held through a path of the other family, or a
+        read-only one; the transaction was opened on a writable path.
+        """
+        return in_family(path, self._family).with_mode("w")
+
     def _failed(
         self, plan: list, index: int, error: Exception
-    ) -> Exception:
-        if self._single:
-            return error
+    ) -> TransactionError:
         return TransactionError(
             self._root,
             [path for path, _ in plan[:index]],
@@ -500,8 +661,6 @@ class _TransactionBase:
 
     def _interrupted(self, plan: list, index: int, error: BaseException) -> None:
         """Note on `error` which files were written before it interrupted."""
-        if self._single:
-            return
         current = str(plan[index][0])
         _add_note(error, (
             f"the transaction on {str(self._root)!r} was interrupted "
@@ -517,7 +676,11 @@ class _TransactionBase:
         return f"{type(self).__name__}({str(self._root)!r})"
 
 
-def _write_file(path: BidsPath, data: bytes) -> None:
+def _doing(tx: _TransactionBase) -> str:
+    return "being committed" if tx._state == _COMMITTING else "open"
+
+
+def write_file(path: BidsPath, data: bytes) -> None:
     """Replace the file at `path` with `data`, in one step."""
     parent = path.parent
     if not parent.exists():
@@ -526,7 +689,8 @@ def _write_file(path: BidsPath, data: bytes) -> None:
         staged.write_bytes(data)
 
 
-async def _awrite_file(path: AsyncBidsPath, data: bytes) -> None:
+async def awrite_file(path: AsyncBidsPath, data: bytes) -> None:
+    """Replace the file at `path` with `data`, in one step (a coroutine)."""
     parent = path.parent
     if not await parent.exists():
         await parent.mkdir(parents=True, exist_ok=True)
@@ -535,10 +699,20 @@ async def _awrite_file(path: AsyncBidsPath, data: bytes) -> None:
 
 
 class Transaction(_TransactionBase):
-    """Edits to the JSON and TSV files below a path, written on success.
+    """The writes to the JSON and TSV files below a path, kept until it ends.
 
-    Returned by `BidsPath.transaction()`; use it as a context manager. See
-    the module documentation for what is buffered and how it is written.
+    Returned by `path.transaction()`, and opened by `with path:`; use it as
+    a context manager. Every write to a file below its root is kept until
+    the block ends, and every read of the tree sees it. On a clean exit,
+    each changed file is written once, in one step; on an exception,
+    nothing is written. If a write fails, the commit stops there and raises
+    [`TransactionError`][brainfilter.TransactionError].
+
+    ```python
+    with ds.transaction() as tx:
+        ds["T1w.json"]["RepetitionTime"] = 2.3
+    tx.written       # the files the commit wrote, in order
+    ```
     """
 
     def __enter__(self) -> Transaction:
@@ -556,14 +730,13 @@ class Transaction(_TransactionBase):
             if exc_type is None:
                 self._commit()
         finally:
-            self._buffer.clear()
-            self._state = _DONE
+            self._finish()
 
     def _commit(self) -> None:
         plan = self._buffer.plan()
         for index, (path, data) in enumerate(plan):
             try:
-                _write_file(path, data)
+                write_file(self._target(path), data)
             except Exception as error:
                 raise self._failed(plan, index, error) from error
             except BaseException as error:
@@ -575,17 +748,16 @@ class Transaction(_TransactionBase):
 class AsyncTransaction(_TransactionBase):
     """The async counterpart of `Transaction`, used with `async with`.
 
-    Returned by `AsyncBidsPath.transaction()`. Reads inside it are awaited
-    as usual and see the buffered edits; the files are written one at a
-    time, as in `Transaction`.
+    Returned by `AsyncBidsPath.transaction()`, and opened by
+    `async with path:`. Reads inside it are awaited as usual and see the
+    kept writes; the files are written one at a time, as in `Transaction`.
 
     ```python
-    async with dataset.transaction():
+    async with dataset:
         sidecar = dataset / "T1w.json"
         await sidecar.set("RepetitionTime", 2.3)
         await sidecar.delete("Obsolete")
-        rows = await (dataset / "participants.tsv").read()
-        rows.append({"participant_id": "sub-03"})
+        await (dataset / "participants.tsv").set("age", [30, 41])
     ```
     """
 
@@ -604,14 +776,13 @@ class AsyncTransaction(_TransactionBase):
             if exc_type is None:
                 await self._commit()
         finally:
-            self._buffer.clear()
-            self._state = _DONE
+            self._finish()
 
     async def _commit(self) -> None:
         plan = self._buffer.plan()
         for index, (path, data) in enumerate(plan):
             try:
-                await _awrite_file(path, data)
+                await awrite_file(self._target(path), data)
             except Exception as error:
                 raise self._failed(plan, index, error) from error
             except BaseException as error:
@@ -619,93 +790,3 @@ class AsyncTransaction(_TransactionBase):
                 self._interrupted(plan, index, error)
                 raise
             self._written.append(path)
-
-
-# -- single files -------------------------------------------------------------------
-
-class Edit:
-    """Edit one JSON or TSV file; returned by `path.edit()`.
-
-    `with sidecar.edit() as content:` gives the content (a `dict`, or a
-    `Table` for a TSV file; empty for a file that does not exist yet), to
-    change in place. On a clean exit the file is replaced in one step; on
-    an exception it is left as it was. Inside a transaction that covers the
-    file, the edit joins it and the file is written when it commits; an
-    exception leaving the edit puts the transaction's copy of the file back
-    as it was when the edit began.
-    """
-
-    def __init__(self, path: BidsPath) -> None:
-        self._path = path
-        self._tx: Transaction | None = None
-        # Puts the joined transaction's entry back, on an exception.
-        self._restore: Callable[[], None] | None = None
-
-    def __enter__(self) -> dict | Table:
-        joined = active_for(self._path, write=True)
-        if joined is None:
-            self._tx = Transaction(self._path, _single=True)
-            self._tx.__enter__()
-        try:
-            content = self._path._tx_writable()
-        except BaseException as error:
-            self._leave(type(error), error, error.__traceback__)
-            raise
-        if joined is not None:
-            self._restore = joined._buffer.get(self._path).snapshot()
-        return content
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        self._leave(exc_type, exc, tb)
-
-    def _leave(self, *exc: object) -> None:
-        tx, self._tx = self._tx, None
-        restore, self._restore = self._restore, None
-        if restore is not None and exc[0] is not None:
-            restore()
-        if tx is not None:
-            tx.__exit__(*exc)
-
-
-class AsyncEdit:
-    """The async counterpart of `Edit`, used with `async with`."""
-
-    def __init__(self, path: AsyncBidsPath) -> None:
-        self._path = path
-        self._tx: AsyncTransaction | None = None
-        self._restore: Callable[[], None] | None = None
-
-    async def __aenter__(self) -> dict | Table:
-        joined = active_for(self._path, write=True)
-        if joined is None:
-            self._tx = AsyncTransaction(self._path, _single=True)
-            await self._tx.__aenter__()
-        try:
-            content = await self._path._tx_writable()
-        except BaseException as error:
-            await self._leave(type(error), error, error.__traceback__)
-            raise
-        if joined is not None:
-            self._restore = joined._buffer.get(self._path).snapshot()
-        return content
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> None:
-        await self._leave(exc_type, exc, tb)
-
-    async def _leave(self, *exc: object) -> None:
-        tx, self._tx = self._tx, None
-        restore, self._restore = self._restore, None
-        if restore is not None and exc[0] is not None:
-            restore()
-        if tx is not None:
-            await tx.__aexit__(*exc)

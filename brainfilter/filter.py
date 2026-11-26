@@ -1,6 +1,6 @@
 """Select a subset of a BIDS dataset from its file listing.
 
-A [`Filter`][brainfilter.filter.Filter] works on paths relative to the
+A [`Filter`][brainfilter.Filter] works on paths relative to the
 dataset root only, so it applies to any listing (OpenNeuro, S3, a local
 directory, ...) before anything is downloaded::
 
@@ -23,9 +23,9 @@ The input is a listing of files; see `Filter.select` for directories.
    the directory's name and datatype.
 2. *Metadata files* (`.json`, `.tsv`, `.bval`, `.bvec`), wherever they are,
    are kept if they apply to at least one kept data file under the BIDS
-   inheritance principle (see `brainfilter._names.applies_to`). So is a
-   data file that is also a companion of another (`*_physio.tsv.gz` of a
-   `*_bold.nii.gz`) and does not pass the filters itself.
+   inheritance principle. So is a data file that is also a companion of
+   another (`*_physio.tsv.gz` of a `*_bold.nii.gz`) and does not pass the
+   filters itself.
 3. A metadata file that applies to no data file of the listing at all
    (`beh/*_events.tsv` alone, `electrodes.tsv` of a session with no
    recording) is judged on what it names: it is kept if its subject,
@@ -48,18 +48,17 @@ The input is a listing of files; see `Filter.select` for directories.
 Matching values
 ---------------
 Each filter takes a plain value (matched exactly), a list of values (any of
-them), a glob ([`Glob`][brainfilter.conditions.Glob]), a regex (a
-`re.Pattern` or [`Regex`][brainfilter.conditions.Regex], which must match
-the whole label: `re.compile("1")` matches `sub-1` but not `sub-10`; a
+them), a glob ([`Glob`][brainfilter.Glob]), a regex (a `re.Pattern` or
+[`Regex`][brainfilter.Regex], which must match the whole label:
+`re.compile("1")` matches `sub-1` but not `sub-10`; a
 `Regex(..., full=False)` is found anywhere in it instead) or any other
-[`Condition`][brainfilter.conditions.Condition]. Plain labels may keep
-their `<key>-` prefix (`"sub-01"` is `"01"`); a pattern is matched against
-the bare label.
+condition. Plain labels may keep their `<key>-` prefix (`"sub-01"` is
+`"01"`); a pattern is matched against the bare label.
 
-Index entities (`run`, `echo`, `flip`, `inv`, `split`, `chunk`; see
-`brainfilter._names.INDEX_ENTITIES`) compare plain values by number:
-`run=1`, `run="1"` and `run="01"` all match `run-1` and `run-01`. A glob or
-regex on an index entity matches its label as written in the file name.
+Index entities (`run`, `echo`, `flip`, `inv`, `split`, `chunk`) compare
+plain values by number: `run=1`, `run="1"` and `run="01"` all match
+`run-1` and `run-01`. A glob or regex on an index entity matches its label
+as written in the file name.
 Other entities compare strings as exact text, but an `int` by number on any
 entity: `subjects=1` matches `sub-1`, `sub-01` and `sub-001` (never `sub-1a`)
 where `subjects="1"` matches `sub-1` only.
@@ -76,8 +75,7 @@ from collections.abc import Callable, Iterable
 from pathlib import PurePosixPath
 from typing import TypeVar
 
-from bagof.paths import AsyncPath, Path, PurePath, UnsupportedPathOperation
-
+from brainfilter._family import in_family
 from brainfilter._names import (
     COMPANION_SUFFIXES,
     DATATYPES,
@@ -359,9 +357,10 @@ class Filter:
         `root` is a `BidsPath`, a path object, or a local path or URL
         string. Hidden folders and the top-level folders that would be
         skipped are not listed. An `AsyncBidsPath` or a pure path is listed
-        through the `BidsPath` of its string and storage options.
+        through the `BidsPath` of its string and storage options. The files
+        have the mode of `root` (read-only for a string).
         """
-        root = _in_family(root, BidsPath)
+        root = in_family(root, BidsPath)
         found: dict[str, BidsPath] = {}
         for dirpath, dirnames, filenames in root.walk():
             parts = PurePosixPath(dirpath.relative_to(root).as_posix()).parts
@@ -380,9 +379,10 @@ class Filter:
         through the `AsyncBidsPath` of its string and storage options, so a
         remote store with a natively async backend is listed on its
         coroutines. The listing goes one level at a time, every directory
-        of a level at once, and lists no folder `walk` would not.
+        of a level at once, and lists no folder `walk` would not. The files
+        have the mode of `root`, as in `walk`.
         """
-        root = _in_family(root, AsyncBidsPath)
+        root = in_family(root, AsyncBidsPath)
         found: dict[str, AsyncBidsPath] = {}
         level = [root]
         while level:
@@ -539,32 +539,6 @@ def _is_bids_directory(parts: tuple[str, ...]) -> bool:
     if len(parts) == 2:
         return session or parts[1] in DATATYPES
     return session and parts[2] in DATATYPES
-
-
-def _in_family(root: object, cls: type) -> object:
-    """`root` as a path of `cls`, `BidsPath` or `AsyncBidsPath`.
-
-    A path of the same front-end (`bagof.paths.Path` for `BidsPath`,
-    `bagof.paths.AsyncPath` for `AsyncBidsPath`) and any driver object or
-    string are wrapped as they are. A path of another front-end is rebuilt
-    from its string and its storage options, so the store is listed by the
-    driver `cls` picks for it: an async driver cannot be wrapped by a
-    synchronous path, and a synchronous one would be run in a thread.
-    """
-    if isinstance(root, cls):
-        return root
-    same = Path if cls is BidsPath else AsyncPath
-    if isinstance(root, same) or not isinstance(root, (Path, AsyncPath, PurePath)):
-        return cls(root)
-    options: dict = {}
-    if not root.is_local():
-        try:
-            options = dict(root.storage_options or {})
-        except UnsupportedPathOperation:
-            options = {}  # a driver with no storage options (cloudpathlib)
-    if options:
-        return cls(str(root), storage_options=options)
-    return cls(str(root))
 
 
 async def _alist(directory: AsyncBidsPath) -> list[tuple]:

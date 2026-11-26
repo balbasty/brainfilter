@@ -334,6 +334,8 @@ def test_select_path_objects():
 
 
 def _make(root, listing):
+    if isinstance(root, BidsPath):
+        root = root.with_mode("w")
     for rel in listing:
         path = root / rel
         path.parent.mkdir(parents=True, exist_ok=True)

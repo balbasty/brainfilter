@@ -65,7 +65,7 @@ def _write_ds(top):
 
 @pytest.fixture
 def local_ds(tmp_path):
-    top = BidsPath(str(tmp_path / "ds"))
+    top = BidsPath(str(tmp_path / "ds"), mode="w")
     top.mkdir()
     return _write_ds(top)
 
@@ -77,7 +77,7 @@ def memory_ds():
 
     MemoryFileSystem.store.clear()
     MemoryFileSystem.pseudo_dirs[:] = [""]
-    top = BidsPath("memory://ds")
+    top = BidsPath("memory://ds", mode="w")
     top.mkdir(parents=True, exist_ok=True)
     yield _write_ds(top)
     MemoryFileSystem.store.clear()
@@ -99,11 +99,14 @@ def column(texts, descriptions=None, name="col"):
 
 def test_typed_read(ds):
     table = ds["participants.tsv"]
-    rows = table.read()
+    rows = table.as_list()
     assert rows == TYPED
     for got, want in zip(rows, TYPED):
         assert [type(v) for v in got.values()] == [type(v) for v in want.values()]
-    assert list(table) == rows
+    assert list(table.rows()) == rows
+    assert list(table) == HEADER
+    assert table["counts"] == [[1, 2], []]
+    assert table.as_dict() == {c: [r[c] for r in TYPED] for c in HEADER}
 
 
 def test_description_format_comes_first():
@@ -217,17 +220,21 @@ def test_dates_and_times():
 
 
 def test_raw_read(ds):
-    table = ds["participants.tsv"].read(raw=True)
-    assert table.columns == HEADER
-    assert [list(row.values()) for row in table] == LINES
-    assert dump_tsv(table) == TEXT
+    rows = ds["participants.tsv"].as_list(raw=True)
+    assert [list(row) for row in rows] == [HEADER, HEADER]
+    assert [list(row.values()) for row in rows] == LINES
+    assert dump_tsv(rows) == TEXT
+    columns = ds["participants.tsv"].as_dict(raw=True)
+    assert list(columns) == HEADER
+    assert columns["weight"] == ["70.50", "1e2"]
 
 
 # -- writing back ------------------------------------------------------------------
 
 def test_unchanged_table_is_not_written(ds):
     with ds.transaction() as tx:
-        assert ds["participants.tsv"].read() == TYPED
+        assert ds["participants.tsv"].as_list() == TYPED
+        ds["participants.tsv"].write(ds["participants.tsv"].as_list())
     assert tx.written == []
     assert dump_tsv(parse_tsv(TEXT, DESCRIPTIONS)) == TEXT
 
@@ -235,29 +242,30 @@ def test_unchanged_table_is_not_written(ds):
 def test_edit_one_cell_keeps_the_others(ds):
     table = ds["participants.tsv"]
     with ds.transaction() as tx:
-        rows = table.read()
-        rows[1]["weight"] = 101.0
+        table["weight"] = [70.5, 101.0]
     assert tx.written == [table]
     lines = [cells[:] for cells in LINES]
     lines[1][HEADER.index("weight")] = "101.0"
     want = "".join("\t".join(c) + "\n" for c in [HEADER, *lines])
     assert table.read_text() == want   # `70.50`, `1e2`, `n/a`, `` kept
+    table["weight"] = [70.5, 102.0]    # the same, written at once
+    assert table.read_text() == want.replace("101.0", "102.0")
 
 
 def test_changed_and_new_cells_are_formatted(ds):
     table = ds["participants.tsv"]
-    with ds.transaction():
-        rows = table.read()
-        rows[0]["channels"].append("Cz")          # a list changed in place
-        rows[0]["weight"] = 70.5                  # equal value: text kept
-        rows[0]["age"] = 30.0                     # equal, another type
-        rows[0]["flag"] = False
-        rows.append({
-            "participant_id": "sub-03", "age": 41, "weight": 1e-7,
-            "flag": True, "channels": ["C3"], "counts": [3, None],
-            "when": date(2025, 2, 1), "onset": 0.1, "notes": "x y",
-        })
-    out = table.read(raw=True)
+    rows = table.as_list()
+    rows[0]["channels"].append("Cz")          # a list changed
+    rows[0]["weight"] = 70.5                  # equal value: text kept
+    rows[0]["age"] = 30.0                     # equal, another type
+    rows[0]["flag"] = False
+    rows.append({
+        "participant_id": "sub-03", "age": 41, "weight": 1e-7,
+        "flag": True, "channels": ["C3"], "counts": [3, None],
+        "when": date(2025, 2, 1), "onset": 0.1, "notes": "x y",
+    })
+    table.write(rows)
+    out = table.as_list(raw=True)
     assert out[0]["channels"] == "C3,C4,Cz"
     assert out[0]["weight"] == "70.50"
     assert out[0]["age"] == "30.0"
@@ -275,8 +283,10 @@ def test_changed_and_new_cells_are_formatted(ds):
 def test_list_without_delimiter_is_refused(ds):
     table = ds["participants.tsv"]
     with pytest.raises(TypeError, match="no Delimiter"):
-        with ds.transaction():
-            table.read()[0]["notes"] = [1, 2]
+        table["notes"] = [[1, 2], 8]
+    with pytest.raises(TypeError, match="no Delimiter"):
+        with ds:
+            table["notes"] = [[1, 2], 8]
     assert table.read_text() == TEXT   # nothing written
 
 
@@ -289,27 +299,57 @@ def test_copied_table_keeps_the_text():
     )
 
 
-@pytest.mark.parametrize("copy, kept", [
-    (lambda rows: rows[::-1], True),             # its own rows, reordered
-    (lambda rows: [dict(r) for r in rows[::-1]], False),   # new rows
-    (lambda rows: Table(rows)[::-1], False),     # rows of another table
+@pytest.mark.parametrize("copy", [
+    lambda rows: rows[::-1],                     # the rows, reordered
+    lambda rows: [dict(r) for r in rows[::-1]],  # copies of them
+    lambda rows: Table(rows)[::-1],              # rows of another table
 ])
-def test_rewritten_table_keeps_the_text(ds, copy, kept):
+@pytest.mark.parametrize("in_transaction", [False, True])
+def test_rewritten_table_keeps_the_text(ds, copy, in_transaction):
     table = ds["participants.tsv"]
-    with ds.transaction():
-        table.write(copy(table.read()))
-    lines = table.read_text().splitlines()
-    assert lines[1].split("\t")[0] == "sub-02"
-    if kept:
-        assert lines[1:] == ["\t".join(c) for c in LINES[::-1]]
+    if in_transaction:
+        with ds:
+            table.write(copy(table.as_list()))
     else:
-        # formatted from the values; lists join with the sidecar's Delimiter
-        assert lines[2].split("\t")[1:3] == ["30", "70.5"]
-        assert lines[2].split("\t")[8:10] == ["C3,C4", "1|2"]
+        table.write(copy(table.as_list()))
+    lines = table.read_text().splitlines()
+    # each value is written as the file wrote it (`70.50`, `1e2`)
+    assert lines[1:] == ["\t".join(c) for c in LINES[::-1]]
+
+
+def test_rewritten_rows_keep_their_own_text():
+    text = "x\ty\n1.50\ta\n1.5\tb\n2.0e0\tc\n"
+    origin = parse_tsv(text, {"x": {"Format": "number"}})
+    # rows in place: each keeps its text, even where a value is written
+    # two ways in the column
+    assert dump_tsv(Table([dict(r) for r in origin], _origin=origin)) == text
+    # moved or new: a value written one way keeps it; one written two ways
+    # keeps the text its place had, else is formatted
+    moved = Table([dict(r) for r in origin[::-1]], _origin=origin)
+    assert dump_tsv(moved) == "x\ty\n2.0e0\tc\n1.5\tb\n1.5\ta\n"
+    added = Table([{"x": 2.0, "y": "d"}, {"x": 1.5, "y": "e"}], _origin=origin)
+    assert dump_tsv(added) == "x\ty\n2.0e0\td\n1.5\te\n"
+    # the table's own rows keep their own text
+    assert dump_tsv(Table(origin[::-1], _origin=origin)) == (
+        "x\ty\n2.0e0\tc\n1.5\tb\n1.50\ta\n"
+    )
+
+
+def test_rewritten_lists_keep_their_text():
+    text = "id\tv\na\t1.50,2\nb\t3,4\n"
+    descriptions = {"v": {"Format": "number", "Delimiter": ","}}
+    origin = parse_tsv(text, descriptions)
+    assert origin[0]["v"] == [1.5, 2.0]
+    copies = [dict(r, v=list(r["v"])) for r in origin]
+    assert dump_tsv(Table(copies, _origin=origin)) == text
+    copies[0]["v"].append(5.0)                   # changed: formatted
+    assert dump_tsv(Table(copies, _origin=origin)).splitlines()[1] == (
+        "a\t1.5,2.0,5.0"
+    )
 
 
 def test_new_table_lists_use_the_sidecar_delimiter(ds):
-    with ds.transaction():
+    with ds:
         ds["participants.tsv"].write([{"participant_id": "sub-9",
                                        "channels": ["a", "b"]}])
     assert ds["participants.tsv"].read_text() == (
@@ -320,19 +360,22 @@ def test_new_table_lists_use_the_sidecar_delimiter(ds):
 def test_raw_read_in_a_transaction_is_a_copy(ds):
     table = ds["participants.tsv"]
     with ds.transaction() as tx:
-        table.read()[0]["score"] = 5
-        raw = table.read(raw=True)
+        table["score"] = [5, 2]
+        raw = table.as_list(raw=True)
         assert raw[0]["score"] == "5" and raw[0]["weight"] == "70.50"
         raw[0]["score"] = "6"                    # not an edit
+        table.as_dict(raw=True)["score"][0] = "6"
+        assert table.as_dict(raw=True)["score"] == ["5", "2"]
+        assert table.keys() == HEADER
     assert tx.written == [table]
-    assert table.read()[0]["score"] == 5
+    assert table["score"] == [5, 2]
 
 
 # -- pandas ------------------------------------------------------------------------
 
 def test_dataframe_dtypes(ds):
     pytest.importorskip("pandas")
-    df = ds["participants.tsv"].read_dataframe()
+    df = ds["participants.tsv"].as_dataframe()
     dtypes = {name: str(dtype) for name, dtype in df.dtypes.items()}
     assert dtypes["age"] == "Int64"            # integer, with a missing value
     assert dtypes["score"] == "int64"
@@ -345,7 +388,7 @@ def test_dataframe_dtypes(ds):
     assert df["channels"][0] == ["C3", "C4"]
     assert df["age"].isna().tolist() == [False, True]
     # dtype= hands the typing back to pandas
-    df = ds["participants.tsv"].read_dataframe(dtype={"code": int})
+    df = ds["participants.tsv"].as_dataframe(dtype={"code": int})
     assert df["code"].tolist() == [2, 10]
 
 
@@ -364,15 +407,16 @@ def test_dataframe_datetime():
 
 @pytest.fixture
 def async_ds(local_ds):
-    return AsyncBidsPath(str(local_ds))
+    return AsyncBidsPath(str(local_ds), mode="w")
 
 
 @pytest.mark.anyio
 async def test_async_typed_read(async_ds):
     table = async_ds / "participants.tsv"
-    assert await table.read() == TYPED
-    assert [row async for row in table] == TYPED
-    raw = await table.read(raw=True)
+    assert await table.as_list() == TYPED
+    assert [row async for row in table.rows()] == TYPED
+    assert [name async for name in table] == HEADER
+    raw = await table.as_list(raw=True)
     assert [list(row.values()) for row in raw] == LINES
 
 
@@ -380,25 +424,26 @@ async def test_async_typed_read(async_ds):
 async def test_async_edit_one_cell_keeps_the_others(async_ds):
     table = async_ds / "participants.tsv"
     async with async_ds.transaction() as tx:
-        rows = await table.read()
-        rows[0]["score"] = 5
-        assert (await table.read(raw=True))[0]["score"] == "5"
+        await table.set("score", [5, 2])
+        assert (await table.as_list(raw=True))[0]["score"] == "5"
     assert tx.written == [table]
     lines = [cells[:] for cells in LINES]
     lines[0][HEADER.index("score")] = "5"
     assert await table.read_text() == "".join(
         "\t".join(c) + "\n" for c in [HEADER, *lines]
     )
-    async with table.edit() as rows:
-        assert rows[0]["score"] == 5
-        rows[1]["counts"] = [1]
-    assert (await table.read(raw=True))[1]["counts"] == "1"
+    rows = await table.as_list()
+    assert rows[0]["score"] == 5
+    rows[1]["counts"] = [1]
+    await table.write(rows)
+    assert (await table.as_list(raw=True))[1]["counts"] == "1"
+    assert (await table.as_list(raw=True))[0]["weight"] == "70.50"
 
 
 @pytest.mark.anyio
 async def test_async_dataframe_dtypes(async_ds):
     pytest.importorskip("pandas")
-    df = await (async_ds / "participants.tsv").read_dataframe()
+    df = await (async_ds / "participants.tsv").as_dataframe()
     assert str(df["age"].dtype) == "Int64"
     assert str(df["weight"].dtype) == "float64"
     assert df["code"].tolist() == ["02", "10"]
@@ -425,12 +470,13 @@ def test_quoted_file_round_trips(ds):
     table = ds / "quoted.tsv"
     table.write_text(QUOTED)
     with ds.transaction() as tx:
-        table.read()[1]["id"] = "sub-09"
-        assert table.read(raw=True)[0]["q"] == '"q"'
+        table["id"] = ["sub-01", "sub-09"]
+        assert table.as_list(raw=True)[0]["q"] == '"q"'
     assert tx.written == [table]
     assert table.read_text() == QUOTED.replace("sub-02", "sub-09")
+    assert table["q"] == ['"q"', '""']
     pytest.importorskip("pandas")
-    assert table.read_dataframe()["q"].tolist() == ['"q"', '""']
+    assert table.as_dataframe()["q"].tolist() == ['"q"', '""']
 
 
 @pytest.mark.parametrize("value", ["a\tb", "a\nb", "a\rb"])
@@ -438,7 +484,9 @@ def test_tab_or_line_break_is_refused(ds, value):
     table = ds["participants.tsv"]
     with pytest.raises(ValueError, match="tab or a line break"):
         with ds.transaction():
-            table.read()[0]["notes"] = value
+            table["notes"] = [value, 8]
+    with pytest.raises(ValueError, match="tab or a line break"):
+        table["notes"] = [value, 8]
     assert table.read_text() == TEXT   # nothing written
     with pytest.raises(ValueError, match="column name"):
         dump_tsv(Table([{value: 1}]))
@@ -461,13 +509,18 @@ def test_nan_is_written_as_na():
 def test_nan_from_a_dataframe(ds):
     pytest.importorskip("pandas")
     table = ds["participants.tsv"]
-    frame = table.read_dataframe()
+    frame = table.as_dataframe()
     rows = frame[["participant_id", "weight"]].to_dict("records")
     rows[1]["weight"] = float("nan")
     with ds.transaction():
         table.write(rows)
-    assert table.read_text() == "participant_id\tweight\nsub-01\t70.5\nsub-02\tn/a\n"
-    assert table.read()[1]["weight"] is None
+    # 70.5 was read from `70.50`: its text is kept
+    assert table.read_text() == (
+        "participant_id\tweight\nsub-01\t70.50\nsub-02\tn/a\n"
+    )
+    assert table.as_list()[1]["weight"] is None
+    table["weight"] = frame["weight"].tolist()       # a column of a frame
+    assert table["weight"] == [70.5, 100.0]
 
 
 # -- the sidecar's Delimiters, for new columns and new tables ----------------------
@@ -482,23 +535,24 @@ def _with_tags(ds):
 def test_new_column_uses_the_sidecar_delimiter(ds):
     _with_tags(ds)
     table = ds["participants.tsv"]
-    with ds.transaction():
-        rows = table.read()
-        rows.add_column("tags", [["a", "b"], []])
-    assert [r["tags"] for r in table.read(raw=True)] == ["a,b", ""]
+    table["tags"] = [["a", "b"], []]
+    assert [r["tags"] for r in table.as_list(raw=True)] == ["a,b", ""]
 
 
 def test_new_table_uses_the_sidecar_delimiter(ds):
     _with_tags(ds)
     new = ds / "sub-01" / "sub-01_sessions.tsv"
-    with new.edit() as rows:
-        rows.append({"session_id": "ses-1", "tags": ["a", "b"]})
+    new.write([{"session_id": "ses-1", "tags": ["a", "b"]}])
     assert new.read_text() == "session_id\ttags\nses-1\ta|b\n"
     # a table written without lists, then given one
     with ds.transaction():
         new.write([{"session_id": "ses-2"}])
-        new.read()[0]["tags"] = ["c", "d"]
+        new["tags"] = [["c", "d"]]
     assert new.read_text() == "session_id\ttags\nses-2\tc|d\n"
+    other = ds / "sub-02" / "sub-02_sessions.tsv"
+    other["session_id"] = ["ses-1"]            # a new table, by column
+    other["tags"] = [["e", "f"]]
+    assert other.read_text() == "session_id\ttags\nses-1\te|f\n"
 
 
 # -- a byte-order mark -------------------------------------------------------------
@@ -507,15 +561,15 @@ def test_byte_order_mark_is_skipped(ds):
     table, sidecar = ds / "bom.tsv", ds / "bom.json"
     table.write_bytes(b"\xef\xbb\xbfparticipant_id\tage\nsub-01\t30\n")
     sidecar.write_bytes(b'\xef\xbb\xbf{"Level": "bom"}')
-    assert table.read().columns == ["participant_id", "age"]
-    assert table.read() == [{"participant_id": "sub-01", "age": 30.0}]
-    assert table.read(raw=True).columns == ["participant_id", "age"]
+    assert table.keys() == ["participant_id", "age"]
+    assert table.as_list() == [{"participant_id": "sub-01", "age": 30.0}]
+    assert list(table.as_dict(raw=True)) == ["participant_id", "age"]
     assert sidecar["Level"] == "bom"
     pytest.importorskip("pandas")
-    assert list(table.read_dataframe().columns) == ["participant_id", "age"]
+    assert list(table.as_dataframe().columns) == ["participant_id", "age"]
     with ds.transaction():
         sidecar["Level"] = "edited"
-        table.read()[0]["participant_id"] = "sub-02"
+        table["participant_id"] = ["sub-02"]
     assert not sidecar.read_bytes().startswith(b"\xef\xbb\xbf")
     assert table.read_bytes() == b"participant_id\tage\nsub-02\t30\n"
 
@@ -525,11 +579,13 @@ async def test_async_byte_order_mark_is_skipped(async_ds):
     table, sidecar = async_ds / "bom.tsv", async_ds / "bom.json"
     await table.write_bytes(b"\xef\xbb\xbfparticipant_id\nsub-01\n")
     await sidecar.write_bytes(b'\xef\xbb\xbf{"Level": "bom"}')
-    assert (await table.read()).columns == ["participant_id"]
+    assert await table.keys() == ["participant_id"]
     assert await sidecar.get("Level") == "bom"
     async with async_ds.transaction():
         await sidecar.set("Level", "edited")
     assert not (await sidecar.read_bytes()).startswith(b"\xef\xbb\xbf")
+    await table.set("participant_id", ["sub-02"])
+    assert await table.read_bytes() == b"participant_id\nsub-02\n"
 
 
 @pytest.mark.anyio
@@ -537,11 +593,10 @@ async def test_async_new_column_uses_the_sidecar_delimiter(async_ds, local_ds):
     _with_tags(local_ds)
     table = async_ds / "participants.tsv"
     async with async_ds.transaction():
-        (await table.read()).add_column("tags", [["a", "b"], None])
-    assert [r["tags"] for r in await table.read(raw=True)] == ["a,b", "n/a"]
+        await table.set("tags", [["a", "b"], None])
+    assert [r["tags"] for r in await table.as_list(raw=True)] == ["a,b", "n/a"]
     new = async_ds / "sub-01" / "sub-01_sessions.tsv"
-    async with new.edit() as rows:
-        rows.append({"session_id": "ses-1", "tags": ["a", "b"]})
+    await new.write([{"session_id": "ses-1", "tags": ["a", "b"]}])
     assert await new.read_text() == "session_id\ttags\nses-1\ta|b\n"
 
 

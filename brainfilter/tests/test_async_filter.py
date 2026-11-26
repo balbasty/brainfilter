@@ -53,9 +53,10 @@ async def test_awalk_results_read_asynchronously(tmp_path):
     (tmp_path / "sub-01" / "anat" / "sub-01_T1w.nii.gz").write_bytes(b"")
     kept = {p.name: p for p in await Filter().awalk(str(tmp_path))}
     assert await kept["dataset_description.json"].get("Name") == "x"
-    assert await kept["participants.tsv"].read() == [
+    assert await kept["participants.tsv"].as_list() == [
         {"participant_id": "sub-01"}
     ]
+    assert all(p.mode == "r" for p in kept.values())
 
 
 @pytest.fixture
@@ -166,10 +167,15 @@ async def test_walk_and_awalk_rebuild_a_root_of_the_other_family(
 
 def test_rebuilt_root_keeps_storage_options():
     pytest.importorskip("upath")
-    from brainfilter.filter import _in_family
+    from brainfilter._family import in_family
 
     root = BidsPath("memory:///ds", storage_options={"skip_instance_cache": True})
-    rebuilt = _in_family(root, AsyncBidsPath)
+    rebuilt = in_family(root, AsyncBidsPath)
     assert isinstance(rebuilt, AsyncBidsPath) and str(rebuilt) == str(root)
     assert dict(rebuilt.storage_options) == {"skip_instance_cache": True}
-    assert _in_family(rebuilt, BidsPath).storage_options == root.storage_options
+    assert in_family(rebuilt, BidsPath).storage_options == root.storage_options
+    assert rebuilt.mode == "r"
+    writable = in_family(root.with_mode("w"), AsyncBidsPath)
+    assert writable.mode == "w"
+    assert in_family(writable, BidsPath).mode == "w"
+    assert dict(writable.storage_options) == {"skip_instance_cache": True}

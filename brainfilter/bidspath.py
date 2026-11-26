@@ -1,7 +1,7 @@
 """BIDS paths: name parsing, entity editing and file-type dispatch.
 
-A [`BidsPath`][brainfilter.bidspath.BidsPath] is a `bagof.paths.Path` that
-also reads its name as a BIDS name::
+A [`BidsPath`][brainfilter.BidsPath] is a `bagof.paths.Path` that also
+reads its name as a BIDS name::
 
     >>> p = BidsPath("ds/sub-01/ses-1/anat/sub-01_ses-1_T1w.nii.gz")
     >>> p.entities, p.suffix, p.extension, p.datatype
@@ -9,9 +9,9 @@ also reads its name as a BIDS name::
     >>> p.with_subject("02")
     BidsPath('ds/sub-02/ses-1/anat/sub-02_ses-1_T1w.nii.gz')
 
-A [`PureBidsPath`][brainfilter.bidspath.PureBidsPath] has the same BIDS
-surface over a `bagof.paths.PurePath`, with no I/O at all, and an
-[`AsyncBidsPath`][brainfilter.bidspath.AsyncBidsPath] over a
+A [`PureBidsPath`][brainfilter.PureBidsPath] has the same BIDS surface
+over a `bagof.paths.PurePath`, with no I/O at all, and an
+[`AsyncBidsPath`][brainfilter.AsyncBidsPath] over a
 `bagof.paths.AsyncPath`, whose I/O members are coroutines (on a remote store
 with a natively async fsspec backend, bagof-paths' native async driver).
 
@@ -22,6 +22,22 @@ as well (`participants.tsv` is a `BidsParticipantsFile`, a `.json` file a
 `BidsSidecarFile`, ...), without touching the filesystem, so a remote path
 or one that does not exist yet gets the same class as a local one.
 
+A path is read-only by default: a write to a file, and every `Path` member
+that changes the filesystem (`write_text`, `mkdir`, `unlink`, ...), raise
+[`ReadOnlyError`][brainfilter.ReadOnlyError]. `BidsPath(url, mode="w")` and
+`path.with_mode("w")` give a writable path, and every path derived from it
+(`/`, `parent`, `with_*`, the paths a listing yields, `sidecars`) is
+writable too::
+
+    >>> BidsPath("ds").mode
+    'r'
+    >>> (BidsPath("ds", mode="w") / "sub-01").mode
+    'w'
+
+The mode is a brainfilter rule, not a filesystem permission: the wrapped
+driver object (`path.wrapped`) and the backend's own handles (`path.fs`,
+`path.client`) reach the storage directly and do not check it.
+
 !!! warning "`suffix` is the BIDS suffix"
     On these paths `suffix` is the BIDS suffix (`T1w`) and `with_suffix`
     replaces it. The file extension is `extension` (`.nii.gz`) and is
@@ -29,10 +45,12 @@ or one that does not exist yet gets the same class as a local one.
 """
 from __future__ import annotations
 
+import copy
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from bagof.paths import AsyncPath, Path, PurePath
 
+from brainfilter._mode import ReadOnlyError, check_mode, guard_members
 from brainfilter._names import (
     DATATYPES,
     METADATA_EXTENSIONS,
@@ -125,6 +143,7 @@ __all__ = [
     "PureBidsSidecarFile",
     "PureBidsTSVFile",
     "PureBidsTableSidecarFile",
+    "ReadOnlyError",
     "Table",
 ]
 
@@ -216,8 +235,10 @@ class BidsPathMixin:
     # The role a class is dispatched for (see `_names.role_of`).
     _role: ClassVar[str | None] = None
 
-    # These are defined by bagof's wrappers, which this mixin is used with.
+    # These are defined by bagof's wrappers, which this mixin is used with,
+    # and `_mode` by the root of each family.
     if TYPE_CHECKING:
+        _mode: str
         name: str
         parent: Self
         parents: tuple[Self, ...]
@@ -225,6 +246,58 @@ class BidsPathMixin:
 
         def with_name(self, name: str) -> Self: ...  # noqa: D102
         def __truediv__(self, other: object) -> Self: ...  # noqa: D105
+
+    # -- construction and mode -----------------------------------------------
+    def __init__(
+        self, path: object, *, mode: str | None = None, **kwargs
+    ) -> None:
+        """Wrap a path object, or build one from a path string or URL.
+
+        Parameters
+        ----------
+        path
+            A path string or URL, a path object, or another BIDS path.
+        mode
+            `"r"` (read-only) or `"w"` (writable). By default, the mode of
+            `path` if it is a BIDS path, else `"r"`.
+        **kwargs
+            `driver=` and `storage_options=`, as `bagof.paths.Path` takes
+            them.
+        """
+        super().__init__(path, **kwargs)  # type: ignore[call-arg]
+        if mode is None:
+            mode = getattr(path, "mode", None)
+            mode = "r" if mode not in ("r", "w") else mode
+        self._mode = check_mode(mode)
+
+    @property
+    def mode(self) -> str:
+        """`"r"` for a read-only path (the default), `"w"` for a writable one.
+
+        Every path derived from this one (`/`, `parent`, `with_*`, the
+        children a listing yields, `sidecars`) has the same mode. The mode
+        is a brainfilter rule, not a filesystem permission: the wrapped
+        driver object (`wrapped`) and the backend's own handles (`fs`,
+        `client`) reach the storage directly and do not check it.
+        """
+        return getattr(self, "_mode", "r")
+
+    def with_mode(self, mode: str) -> Self:
+        """Return this path with another mode: `"r"` or `"w"`.
+
+        ```python
+        ds = BidsPath("ds").with_mode("w")   # writable, as every path below
+        ```
+        """
+        new = copy.copy(self)
+        new._mode = check_mode(mode)
+        return new
+
+    def __repr__(self) -> str:
+        text = super().__repr__()
+        if self.mode == "r":
+            return text
+        return f"{text[:-1]}, mode={self.mode!r})"
 
     # -- dispatch ------------------------------------------------------------
     def __new__(cls, *args: object, **kwargs: object) -> Self:
@@ -517,22 +590,28 @@ def _seal(root: type) -> None:
 
 
 # -- concrete paths ------------------------------------------------------------
+@guard_members
 class BidsPath(TreeMixin, BidsPathMixin, Path):
     """A BIDS file or directory, on any storage `bagof.paths.Path` supports.
 
     The class is picked from the name; see the module documentation.
 
-    A directory is also a mapping of its children
-    (`dataset["sub-01"]["anat"]`, `keys()`, iteration), a JSON file a
-    mapping of its content (`sidecar["RepetitionTime"]`, `read()`), and a
-    TSV file a `Table` of rows (`read()`, `read_dataframe()`). A file's
-    `metadata` is the `ChainMap` of the JSON sidecars that apply to it.
+    A directory is a mapping of its children (`dataset["sub-01"]["anat"]`,
+    `keys()`, iteration), a JSON file a mapping of its content
+    (`sidecar["RepetitionTime"]`, `as_dict()`), and a TSV file a mapping of
+    its columns (`table["age"]`, `as_dict()`, `as_list()`,
+    `as_dataframe()`). A file's `sidecars` are the JSON sidecars that apply
+    to it, nearest first, and its `sidecar` their merged content.
 
-    The tree is read-only, except inside `with dataset.transaction():` or
-    `with sidecar.edit() as content:`; see `brainfilter.transaction`.
+    A path is read-only unless it is built with `mode="w"` (or returned by
+    `with_mode("w")`), and every path derived from it has its mode. On a
+    writable path, `sidecar[key] = value`, `del sidecar[key]`,
+    `table[column] = values` and `del table[column]` write the file at
+    once, in one atomic replace; inside `with dataset:` they are kept until
+    the block ends. See `brainfilter.Transaction`.
     """
 
-    __slots__ = ()
+    __slots__ = ("_mode",)
 
 
 class BidsFile(BidsPath):
@@ -666,9 +745,13 @@ class PureBidsPath(BidsPathMixin, PurePath):
 
     The same BIDS surface as `BidsPath`, over a `bagof.paths.PurePath`: a
     local path or a remote URL is parsed with no backend and no I/O.
+
+    A pure path has a mode too, although it does nothing with it, so that
+    a `BidsPath` or an `AsyncBidsPath` built from it has the same mode:
+    `BidsPath(PureBidsPath("ds", mode="w"))` is writable.
     """
 
-    __slots__ = ()
+    __slots__ = ("_mode",)
 
 
 class PureBidsFile(PureBidsPath):
@@ -797,21 +880,23 @@ _seal(PureBidsPath)
 
 
 # -- async paths ---------------------------------------------------------------
+@guard_members
 class AsyncBidsPath(AsyncTreeMixin, BidsPathMixin, AsyncPath):
     """A BIDS file or directory whose I/O members are coroutines.
 
-    The same BIDS surface and class dispatch as `BidsPath`, over a
-    `bagof.paths.AsyncPath`. The tree, contents and metadata are coroutines
-    too: `await dataset.child("sub-01")`, `await dataset.keys()`,
-    `async for name in dataset`, `await sidecar.read()`,
-    `await sidecar.get("RepetitionTime")`, `await table.read()`,
-    `await data.read_metadata()` and `await data.sidecars()`. Edits go in
-    `async with dataset.transaction():` or
-    `async with sidecar.edit() as content:`, with `await sidecar.set()`,
-    `delete()`, `update()` and `write()`.
+    The same BIDS surface, class dispatch and mode as `BidsPath`, over a
+    `bagof.paths.AsyncPath`. Python cannot await indexing, so the mappings
+    have coroutine methods instead: `await dataset.child("sub-01")`,
+    `await sidecar.get("RepetitionTime")`, `await sidecar.set(key, value)`,
+    `await sidecar.delete(key)`, `await table.get("age")`,
+    `await table.set(column, values)`, `await table.delete(column)`. The
+    rest is awaited under its sync name (`await dataset.keys()`,
+    `await sidecar.as_dict()`, `await table.as_list()`,
+    `await data.sidecars`, `await data.sidecar`), and iteration is
+    `async for`. Writes are kept until the end of `async with dataset:`.
     """
 
-    __slots__ = ()
+    __slots__ = ("_mode",)
 
 
 class AsyncBidsFile(AsyncBidsPath):
