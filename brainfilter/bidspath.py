@@ -10,7 +10,10 @@ also reads its name as a BIDS name::
     BidsPath('ds/sub-02/ses-1/anat/sub-02_ses-1_T1w.nii.gz')
 
 A [`PureBidsPath`][brainfilter.bidspath.PureBidsPath] has the same BIDS
-surface over a `bagof.paths.PurePath`, with no I/O at all.
+surface over a `bagof.paths.PurePath`, with no I/O at all, and an
+[`AsyncBidsPath`][brainfilter.bidspath.AsyncBidsPath] over a
+`bagof.paths.AsyncPath`, whose I/O members are coroutines (on a remote store
+with a natively async fsspec backend, bagof-paths' native async driver).
 
 Every BIDS component is computed from the name when asked for, never
 stored, so a derived path (`/`, `parent`, `with_name`, ...) re-parses its
@@ -28,7 +31,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from bagof.paths import Path, PurePath
+from bagof.paths import AsyncPath, Path, PurePath
 
 from brainfilter._names import (
     DATATYPES,
@@ -43,7 +46,14 @@ from brainfilter._names import (
     role_of,
     sort_entities,
 )
-from brainfilter._tree import JSONContentMixin, TreeMixin, TSVContentMixin
+from brainfilter._tree import (
+    AsyncJSONContentMixin,
+    AsyncTreeMixin,
+    AsyncTSVContentMixin,
+    JSONContentMixin,
+    TreeMixin,
+    TSVContentMixin,
+)
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -51,6 +61,25 @@ if TYPE_CHECKING:
 __all__ = [
     "DATATYPES",
     "METADATA_EXTENSIONS",
+    "AsyncBidsCodeDirectory",
+    "AsyncBidsDatasetDescriptionFile",
+    "AsyncBidsDirectory",
+    "AsyncBidsFile",
+    "AsyncBidsJSONFile",
+    "AsyncBidsParticipantsFile",
+    "AsyncBidsParticipantsSidecarFile",
+    "AsyncBidsPath",
+    "AsyncBidsPhenotypeFile",
+    "AsyncBidsPhenotypeSidecarFile",
+    "AsyncBidsSamplesFile",
+    "AsyncBidsSamplesSidecarFile",
+    "AsyncBidsScansFile",
+    "AsyncBidsScansSidecarFile",
+    "AsyncBidsSessionsFile",
+    "AsyncBidsSessionsSidecarFile",
+    "AsyncBidsSidecarFile",
+    "AsyncBidsTSVFile",
+    "AsyncBidsTableSidecarFile",
     "BidsCodeDirectory",
     "BidsDatasetDescriptionFile",
     "BidsDirectory",
@@ -148,17 +177,24 @@ def _names(path: object) -> tuple[str, str] | None:
     """Read the name of a path and of its parent lexically, or `None`.
 
     A plain `PurePath` view is used so that no BIDS class (and so no
-    dispatch) is involved, and nothing is read from a filesystem.
+    dispatch) is involved, and nothing is read from a filesystem. An async
+    driver has no such view, so its spelling is read instead.
     """
     try:
-        view = PurePath(path)
+        try:
+            view = PurePath(path)
+        except TypeError:
+            view = PurePath(str(path))
         return view.name, view.parent.name
     except (TypeError, ValueError):
         return None
 
 
 class BidsPathMixin:
-    """The lexical BIDS surface shared by `BidsPath` and `PureBidsPath`."""
+    """The lexical BIDS surface shared by every BIDS path family.
+
+    `BidsPath`, `PureBidsPath` and `AsyncBidsPath` all use it.
+    """
 
     __slots__ = ()
 
@@ -721,3 +757,143 @@ class PureBidsPhenotypeSidecarFile(PureBidsTableSidecarFile):
 
 
 _seal(PureBidsPath)
+
+
+# -- async paths ---------------------------------------------------------------
+class AsyncBidsPath(AsyncTreeMixin, BidsPathMixin, AsyncPath):
+    """A BIDS file or directory whose I/O members are coroutines.
+
+    The same BIDS surface and class dispatch as `BidsPath`, over a
+    `bagof.paths.AsyncPath`. The tree, contents and metadata are coroutines
+    too: `await dataset.child("sub-01")`, `await dataset.keys()`,
+    `async for name in dataset`, `await sidecar.read()`,
+    `await sidecar.get("RepetitionTime")`, `await table.read()`,
+    `await data.read_metadata()` and `await data.sidecars()`.
+    """
+
+    __slots__ = ()
+
+
+class AsyncBidsFile(AsyncBidsPath):
+    """A BIDS file, with coroutine I/O."""
+
+    __slots__ = ()
+
+
+class AsyncBidsDirectory(AsyncBidsPath):
+    """A BIDS directory, with coroutine I/O."""
+
+    __slots__ = ()
+
+
+class AsyncBidsCodeDirectory(AsyncBidsDirectory):
+    """A BIDS `code/` directory, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "code"
+
+
+class AsyncBidsJSONFile(AsyncJSONContentMixin, AsyncBidsFile):
+    """A BIDS JSON file, with coroutine I/O."""
+
+    __slots__ = ()
+
+
+class AsyncBidsDatasetDescriptionFile(AsyncBidsJSONFile):
+    """A BIDS `dataset_description.json` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "dataset_description"
+
+
+class AsyncBidsSidecarFile(AsyncBidsJSONFile):
+    """A BIDS JSON sidecar, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "sidecar"
+
+
+class AsyncBidsTableSidecarFile(AsyncBidsSidecarFile):
+    """A BIDS JSON sidecar describing a TSV table, with coroutine I/O."""
+
+    __slots__ = ()
+
+
+class AsyncBidsTSVFile(AsyncTSVContentMixin, AsyncBidsFile):
+    """A BIDS TSV table, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "table"
+
+
+class AsyncBidsParticipantsFile(AsyncBidsTSVFile):
+    """A BIDS `participants.tsv` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "participants"
+
+
+class AsyncBidsParticipantsSidecarFile(AsyncBidsTableSidecarFile):
+    """A BIDS `participants.json` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "participants_sidecar"
+
+
+class AsyncBidsSessionsFile(AsyncBidsTSVFile):
+    """A BIDS `[sub-<label>_]sessions.tsv` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "sessions"
+
+
+class AsyncBidsSessionsSidecarFile(AsyncBidsTableSidecarFile):
+    """A BIDS `[sub-<label>_]sessions.json` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "sessions_sidecar"
+
+
+class AsyncBidsSamplesFile(AsyncBidsTSVFile):
+    """A BIDS `samples.tsv` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "samples"
+
+
+class AsyncBidsSamplesSidecarFile(AsyncBidsTableSidecarFile):
+    """A BIDS `samples.json` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "samples_sidecar"
+
+
+class AsyncBidsScansFile(AsyncBidsTSVFile):
+    """A BIDS `[sub-<label>[_ses-<label>]_]scans.tsv` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "scans"
+
+
+class AsyncBidsScansSidecarFile(AsyncBidsTableSidecarFile):
+    """A BIDS `[sub-<label>[_ses-<label>]_]scans.json` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "scans_sidecar"
+
+
+class AsyncBidsPhenotypeFile(AsyncBidsTSVFile):
+    """A BIDS `phenotype/<measurement>.tsv` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "phenotype"
+
+
+class AsyncBidsPhenotypeSidecarFile(AsyncBidsTableSidecarFile):
+    """A BIDS `phenotype/<measurement>.json` file, with coroutine I/O."""
+
+    __slots__ = ()
+    _role = "phenotype_sidecar"
+
+
+_seal(AsyncBidsPath)
