@@ -32,11 +32,21 @@ Matching values
 ---------------
 Each filter takes a plain value (matched exactly), a list of values (any of
 them), a glob ([`Glob`][brainfilter.conditions.Glob]), a regex (a
-`re.Pattern` or [`Regex`][brainfilter.conditions.Regex], which matches
-anywhere in the label unless anchored) or any other
-[`Condition`][brainfilter.conditions.Condition]. Plain labels may keep
+`re.Pattern` or [`Regex`][brainfilter.conditions.Regex], which must match
+the whole label: `re.compile("1")` matches `sub-1` but not `sub-10`) or any
+other [`Condition`][brainfilter.conditions.Condition]. Plain labels may keep
 their `<key>-` prefix (`"sub-01"` is `"01"`); a pattern is matched against
 the bare label.
+
+Index entities (`run`, `echo`, `flip`, `inv`, `split`, `chunk`; see
+`brainfilter._names.INDEX_ENTITIES`) compare plain values by number:
+`run=1`, `run="1"` and `run="01"` all match `run-1` and `run-01`. A glob or
+regex on an index entity matches its label as written in the file name.
+Other entities compare plain values as exact strings.
+
+The `include`/`exclude` patterns are matched against the relative path
+instead, and a regex there is found anywhere in it (`re.search`) unless
+anchored.
 """
 from __future__ import annotations
 
@@ -46,6 +56,7 @@ from pathlib import PurePosixPath
 from typing import TypeVar
 
 from brainfilter._names import (
+    INDEX_ENTITIES,
     OPTIONAL_FOLDERS,
     SORTED_ENTITIES,
     TOP_LEVEL_FILES,
@@ -54,7 +65,7 @@ from brainfilter._names import (
     parse_path,
 )
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
-from brainfilter.conditions import Condition, Or, Regex
+from brainfilter.conditions import And, Condition, Or, Regex
 
 __all__ = ["Filter"]
 
@@ -71,18 +82,36 @@ def _is_many(value: object) -> bool:
     return isinstance(value, (list, tuple, set, frozenset))
 
 
+def _whole_label(cond: Condition) -> Condition:
+    """Make the regexes in `cond` match a whole label (`re.fullmatch`)."""
+    if isinstance(cond, Regex):
+        return cond if cond.full else Regex(cond.pattern, full=True)
+    if type(cond) in (And, Or):
+        return type(cond)(*map(_whole_label, cond.cond))
+    return cond
+
+
 def _as_condition(value: object) -> Condition | None:
     if isinstance(value, Condition):
-        return value
+        return _whole_label(value)
     if isinstance(value, re.Pattern):
-        return Regex(value)
+        return Regex(value, full=True)
     return None
 
 
-def _matcher(value: object, key: str | None) -> Callable[[object], bool] | None:
+def _index(value: str) -> int | str:
+    """Return the value of an index label (`"01"` is `1`); others as is."""
+    return int(value) if value.isascii() and value.isdigit() else value
+
+
+def _matcher(
+    value: object, key: str | None, index: bool = False
+) -> Callable[[object], bool] | None:
     """Build `label -> bool` from a filter value; `None` keeps everything.
 
-    A plain value loses its `<key>-` prefix (when `key` is given).
+    A plain value loses its `<key>-` prefix (when `key` is given). With
+    `index`, plain values and labels compare by number. Conditions see the
+    label as written; a regex must match all of it.
     """
     if value is None:
         return None
@@ -99,12 +128,13 @@ def _matcher(value: object, key: str | None) -> Callable[[object], bool] | None:
         item = str(item)
         if key and item.startswith(key + "-"):
             item = item[len(key) + 1:]
-        exact.add(item)
+        exact.add(_index(item) if index else item)
 
     def match(label: object) -> bool:
         if label is None:
             return False
-        return label in exact or any(cond(label) for cond in conditions)
+        value = _index(str(label)) if index else label
+        return value in exact or any(cond(label) for cond in conditions)
 
     return match
 
@@ -124,6 +154,17 @@ def _patterns(value: object) -> Condition | None:
 
 class Filter:
     """Filters applied to a BIDS listing. Empty filters select everything.
+
+    Label filters (subjects, sessions, tasks, datatypes, suffixes, other
+    entities) match the bare label of each file. A plain value matches
+    exactly, and on an index entity (`run`, `echo`, ...) by number, so
+    `run=1` matches `run-01`. A regex must match the whole label
+    (`re.fullmatch`): `subjects=re.compile("1")` keeps `sub-1`, not
+    `sub-10`. A glob or regex on an index entity sees the label as written.
+
+    Path filters (`include`, `exclude`) match the path relative to the
+    dataset root. A glob must match the whole path (`fnmatch`); a regex is
+    found anywhere in it (`re.search`) unless anchored.
 
     Parameters
     ----------
@@ -187,7 +228,7 @@ class Filter:
 
         self.entities: dict[str, Callable[[object], bool]] = {}
         for key, value in given.items():
-            match = _matcher(value, str(key))
+            match = _matcher(value, str(key), str(key) in INDEX_ENTITIES)
             if match is not None:
                 self.entities[str(key)] = match
         self.exclude_subjects = _matcher(exclude_subjects, "sub")

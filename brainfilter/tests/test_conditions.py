@@ -54,6 +54,16 @@ def test_regex():
     assert Regex(re.compile("anat"))("sub-01/anat")
 
 
+def test_regex_full():
+    r = Regex("1", full=True)
+    assert r("1") and not r("10") and not r("sub-1")
+    assert Regex(re.compile("sub-1"), full=True)("sub-1")
+    assert not Regex("1")("sub-2") and Regex("1")("sub-10")
+    assert repr(r) == "Regex(re.compile('1'), full=True)"
+    either = Regexish("a", "b", full=True)
+    assert either("a") and either("b") and not either("ab")
+
+
 def test_factories():
     g = Glob("*.json")
     assert Globish(g) is g and g.pattern == "*.json"

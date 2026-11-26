@@ -4,7 +4,7 @@ import pytest
 
 from brainfilter._names import applies_to, parse_path
 from brainfilter.bidspath import BidsPath, PureBidsPath
-from brainfilter.conditions import Glob, Regex
+from brainfilter.conditions import And, Glob, Or, Regex
 from brainfilter.filter import Filter
 
 # -- ported from brainspresso tests/test_bids_select.py ------------------------
@@ -191,17 +191,104 @@ def test_entity_keywords():
 
 
 def test_patterns_as_values():
-    kept = Filter(subjects=Glob("0*"), tasks=re.compile("^mot")).select(LISTING)
+    kept = Filter(subjects=Glob("0*"), tasks=re.compile("mot.*")).select(LISTING)
     assert _data(kept) == {
         "sub-01/ses-2/func/sub-01_ses-2_task-motor_bold.nii.gz",
     }
-    kept = Filter(suffixes=["dwi", Regex("^T2")]).select(LISTING)
+    kept = Filter(suffixes=["dwi", Regex("T2.*")]).select(LISTING)
     assert _data(kept) == {
         "sub-01/ses-1/anat/sub-01_ses-1_T2w.nii.gz",
         "sub-02/ses-1/dwi/sub-02_ses-1_dwi.nii.gz",
     }
+    # a regex must match the whole label, not a part of it
+    assert not _data(Filter(tasks=re.compile("^mot")).select(LISTING))
+    assert not _data(Filter(suffixes=Regex("T2")).select(LISTING))
     kept = Filter(exclude_subjects=Glob("*1")).select(LISTING)
     assert not any(p.startswith("sub-01") for p in kept)
+
+
+REGEX_LISTING = [
+    "sub-1/anat/sub-1_T1w.nii.gz",
+    "sub-10/anat/sub-10_T1w.nii.gz",
+    "sub-1/ses-pre/func/sub-1_ses-pre_task-rest_bold.nii.gz",
+    "sub-1/ses-post/func/sub-1_ses-post_task-restless_bold.nii.gz",
+    "sub-1/dwi/sub-1_acq-b1000_dwi.nii.gz",
+]
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    ({"subjects": re.compile("1")}, {0, 2, 3, 4}),
+    ({"subjects": Regex("1")}, {0, 2, 3, 4}),
+    ({"subjects": re.compile("1.*")}, {0, 1, 2, 3, 4}),
+    ({"exclude_subjects": re.compile("1")}, {1}),
+    ({"sessions": re.compile("p")}, set()),
+    ({"sessions": re.compile("p.*")}, {2, 3}),
+    ({"tasks": re.compile("rest")}, {2}),
+    ({"suffixes": re.compile("T1")}, set()),
+    ({"suffixes": re.compile("T1w|dwi")}, {0, 1, 4}),
+    ({"datatypes": re.compile("an")}, set()),
+    ({"datatypes": re.compile("an.*")}, {0, 1}),
+    ({"acq": re.compile("b1")}, set()),
+    ({"acq": re.compile(r"b\d+")}, {4}),
+    # in any-of conditions too
+    ({"tasks": Or(Regex("rest"), Regex("x"))}, {2}),
+    ({"tasks": And(Regex("rest.*"), Regex(".*less"))}, {3}),
+])
+def test_label_regex_is_fullmatch(kwargs, expected):
+    kept = Filter(**kwargs).select(REGEX_LISTING)
+    assert _data(kept) == {REGEX_LISTING[i] for i in expected}
+
+
+def test_path_regex_is_search():
+    # include/exclude regexes are found anywhere in the relative path
+    kept = Filter(include=re.compile("sub-1/")).select(REGEX_LISTING)
+    assert _data(kept) == set(REGEX_LISTING) - {REGEX_LISTING[1]}
+    kept = Filter(exclude=re.compile("T1w")).select(REGEX_LISTING)
+    assert _data(kept) == set(REGEX_LISTING[2:])
+    # a glob must still match the whole path
+    assert not _data(Filter(include="sub-1").select(REGEX_LISTING))
+
+
+INDEX_LISTING = [
+    "sub-01/anat/sub-01_run-1_T1w.nii.gz",
+    "sub-01/anat/sub-01_run-01_T1w.nii.gz",
+    "sub-01/anat/sub-01_run-2_T1w.nii.gz",
+    "sub-01/anat/sub-01_run-10_T1w.nii.gz",
+    "sub-01/func/sub-01_task-x_echo-001_bold.nii.gz",
+    "sub-01/func/sub-01_task-x_echo-2_bold.nii.gz",
+    "sub-01/func/sub-01_task-01_bold.nii.gz",
+]
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    ({"run": 1}, {0, 1}),
+    ({"run": "1"}, {0, 1}),
+    ({"run": "01"}, {0, 1}),
+    ({"run": "run-001"}, {0, 1}),
+    ({"run": [2, "10"]}, {2, 3}),
+    ({"run": 3}, set()),
+    ({"echo": 1}, {4}),
+    ({"entities": {"echo": "02"}}, {5}),
+    # globs and regexes see the label as written
+    ({"run": Glob("0*")}, {1}),
+    ({"run": re.compile("1")}, {0}),
+    ({"run": re.compile("0?1")}, {0, 1}),
+    ({"run": Glob("1*")}, {0, 3}),
+    # label entities compare exact strings
+    ({"tasks": "01"}, {6}),
+    ({"tasks": "1"}, set()),
+    ({"tasks": 1}, set()),
+    ({"subjects": "1"}, set()),
+])
+def test_index_entities_compare_by_value(kwargs, expected):
+    kept = Filter(**kwargs).select(INDEX_LISTING)
+    assert _data(kept) == {INDEX_LISTING[i] for i in expected}
+
+
+def test_index_entities_from_schema():
+    from brainfilter._names import INDEX_ENTITIES, SORTED_ENTITIES
+    assert INDEX_ENTITIES == {"chunk", "echo", "flip", "inv", "run", "split"}
+    assert INDEX_ENTITIES <= set(SORTED_ENTITIES)
 
 
 def test_include_exclude_regex():

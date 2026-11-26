@@ -44,25 +44,31 @@ class Regexish(Condition):
     """A regex, or any-of (`Or`) several regexes.
 
     `Regexish("a", "b")` matches a value that matches `a` or `b`, the same
-    rule as `Globish`.
+    rule as `Globish`. `full=True` is passed on to each `Regex`.
     """
 
-    def __new__(cls, *args) -> "Regexish":
+    def __new__(cls, *args, **kwargs) -> "Regexish":
         if cls is not Regexish:
             return super().__new__(cls)
         elif len(args) > 1:
-            return Or(*map(Regexish, args))
+            return Or(*(Regexish(arg, **kwargs) for arg in args))
         elif len(args) == 0:
             raise ValueError("At least one argument required")
         elif isinstance(args[0], Condition):
             return args[0]
         else:
-            return Regex(args[0])
+            return Regex(args[0], **kwargs)
 
 
 class Regex(Regexish):
+    """A regex condition.
 
-    def __init__(self, pattern: re.Pattern | str) -> None:
+    By default it matches a value it is found anywhere in
+    (`re.Pattern.search`); with `full=True` it must match the whole value
+    (`re.Pattern.fullmatch`).
+    """
+
+    def __init__(self, pattern: re.Pattern | str, full: bool = False) -> None:
         if pattern is self:
             # `Regexish(regex)` returned `regex`, which Python re-initializes
             return
@@ -71,14 +77,19 @@ class Regex(Regexish):
         if isinstance(pattern, str):
             pattern = re.compile(pattern)
         self.pattern = pattern
+        self.full = full
 
     def __str__(self) -> str:
         return str(self.pattern)
 
     def __repr__(self) -> str:
+        if self.full:
+            return f"Regex({str(self)}, full=True)"
         return f"Regex({str(self)})"
 
     def __call__(self, value: str | Path) -> bool:
+        if self.full:
+            return self.pattern.fullmatch(str(value)) is not None
         return self.pattern.search(str(value)) is not None
 
 
