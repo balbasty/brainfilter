@@ -54,6 +54,8 @@ files where an image would be, which is all the examples need.
 
     write("derivatives/fmriprep/dataset_description.json", "{}")
     write("derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz")
+    write("derivatives/fmriprep/sub-01/anat/"
+          "sub-01_space-MNI152NLin2009cAsym_desc-preproc_T1w.nii.gz")
     write(".datalad/config")
     ```
 
@@ -162,13 +164,26 @@ which sidecars apply to which files.
 
 ## Run a first filter
 
-Suppose you want only the T1-weighted images of one subject. A
-[`Filter`][brainfilter.Filter] describes that selection, and its `walk()`
-method lists the dataset and returns the files to keep.
+Before selecting anything, it helps to know who is in the dataset.
+`subjects()` returns the subject labels, and `sessions()` the session labels,
+either across the whole dataset or for one subject. Labels made only of
+digits are sorted by value.
 
 ```pycon
->>> from brainfilter import Filter
->>> kept = Filter(subjects=1, datatypes="anat", suffixes="T1w").walk(ds)
+>>> ds.subjects()
+['01', '02', '10']
+>>> ds.sessions()
+['1', '2']
+>>> ds["sub-01"].sessions()
+['1']
+```
+
+Suppose you want only the T1-weighted images of one subject. The dataset's
+`filter()` method takes a description of that selection, lists the dataset,
+and returns the files to keep.
+
+```pycon
+>>> kept = ds.filter(subjects=1, datatypes="anat", suffixes="T1w")
 >>> print(*[p.relative_to(ds).as_posix() for p in kept], sep="\n")
 README
 T1w.json
@@ -195,6 +210,18 @@ be read, copied or opened like any other path. Nothing was downloaded to
 build it; the only work was listing the directories. That distinction matters
 on a remote store, where it is the difference between fetching a few
 kilobytes of names and gigabytes of images.
+
+The keywords of `filter()` are those of a
+[`Filter`][brainfilter.Filter], which holds the same selection as an object of
+its own. Build one when a selection is reused, and pass it to `filter()` or
+call its `walk()` method with the dataset; the two give the same files.
+
+```pycon
+>>> from brainfilter import Filter
+>>> t1w_of_01 = Filter(subjects=1, datatypes="anat", suffixes="T1w")
+>>> ds.filter(t1w_of_01) == t1w_of_01.walk(ds) == kept
+True
+```
 
 The next pages go further with each half of this example.
 [Filtering a local dataset](../tutorials/filter-local.md) covers the

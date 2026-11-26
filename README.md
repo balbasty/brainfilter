@@ -28,14 +28,14 @@ The example runs on a small dataset in memory (`memory://`); a local path
 or an `s3://` URL works the same way.
 
 ```python
-from brainfilter import BidsPath, Filter
+from brainfilter import BidsPath
 
 ds = BidsPath("memory://ds")                    # read-only by default
 t1w = ds["sub-01"]["anat"]["sub-01_T1w.nii.gz"]
 t1w.sidecar["RepetitionTime"]                   # merged sidecars, nearest first
 ds["participants.tsv"]["age"]                   # one typed column of a table
 
-kept = Filter(subjects=1, datatypes="anat").walk(ds)
+kept = ds.filter(subjects=1, datatypes="anat")
 [str(p.relative_to(ds)) for p in kept]          # the files and their sidecars
 
 ds = ds.with_mode("w")                          # opt in to writing
