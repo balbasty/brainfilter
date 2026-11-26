@@ -62,6 +62,7 @@ def test_ordering():
     assert Version("1.10.0-dev") < Version("1.10.0")
     assert Version("1.10.0-dev") > Version("1.9.1")
     assert Version("0.7.3-dev") < Version("0.7.3")
+    assert Version("1.10.0-dev") != Version("1.10.0")  # ordering keeps semver
     # semver pre-release precedence
     chain = [
         "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
@@ -90,10 +91,12 @@ def test_compare_versions():
     assert CV("1.1", "==", "1.1")
     assert CV("1.1", "==", "1.1.0")
     assert CV("1.1", "==", "1.1.*")
-    assert CV("1.1.0-a1", "==", "1.1") is False
+    # a pre-release counts as its release, on either side
+    assert CV("1.1.0-a1", "==", "1.1")
     assert CV("1.1.0-a1", "==", "1.1.0-a1")
     assert CV("1.1.0-a1", "==", "1.1.*")
-    assert CV("1.1", "==", "1.1.0-dev") is False
+    assert CV("1.1", "==", "1.1.0-dev")
+    assert CV("1.1.0-a1", "!=", "1.1") is False
 
     assert CV("1.2.0", "!=", "1.1.*")
     assert CV("1.1.5", "!=", "1.1.*") is False
@@ -101,7 +104,9 @@ def test_compare_versions():
     assert CV("1.7.1", ">", "1.7")
     assert CV("1.7.0", ">", "1.7") is False
     assert CV("1.7.1", "<", "1.7.1-rc1") is False
-    assert CV("1.7.1-a1", "<", "1.7.1-rc1")
+    assert CV("1.7.1-a1", "<", "1.7.1-rc1") is False
+    assert CV("1.7.1-a1", "<=", "1.7.1-rc1")
+    assert CV("1.7.1-dev", ">", "1.7.0")
 
     with pytest.raises(ValueError):
         CV("1.9.0", ">=", "1.9.*")
@@ -131,8 +136,14 @@ def test_version_is_satisfied():
     assert not OK("==1.9.*", "1.10.0")
     assert OK(">=1.8, <2", "1.10.0-dev")
     assert not OK(">=1.8, <2", "2.1.0")
-    assert not OK(">=1.10", "1.10.0-dev")  # a dev version precedes its release
+    # a dev version counts as its release
+    assert OK(">=1.10", "1.10.0-dev")
+    assert OK("==1.10.*", "1.10.0-dev")
+    assert not OK("<1.10", "1.10.0-dev")
+    assert OK("==1.10", "1.10.0-dev")
+    assert not OK(">1.10", "1.10.0-dev")
     assert OK(">=1.10.0-dev", "1.10.0-dev")
+    assert OK(">=1.10.0-dev", "1.10.0")
     assert OK(">=0.7, <0.8", "0.7.3-dev")
     assert OK("1.9.0", Version("1.9"))
     assert OK(">=1.8", (1, 9, 0))
