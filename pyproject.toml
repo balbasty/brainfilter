@@ -14,7 +14,7 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-  "bagof-paths >= 0.3",
+  "bagof-paths >= 0.4",
 ]
 dynamic = ["version"]
 
