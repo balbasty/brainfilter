@@ -2,7 +2,7 @@
 name = "brainfilter"
 authors = [{name = "Yael Balbastre", email = "y.balbastre@ucl.ac.uk"}]
 maintainers = [{name = "Yael Balbastre", email = "y.balbastre@ucl.ac.uk"}]
-description = "Filtering and validation of BIDS datasets"
+description = "Build, read and filter BIDS trees on any storage backend"
 readme = "README.md"
 license = {file = "LICENSE"}
 classifiers = [

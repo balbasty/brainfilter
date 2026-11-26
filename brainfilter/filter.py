@@ -60,13 +60,13 @@ class Filter:
             if isinstance(d, re.Pattern):
                 # TODO: detect non-regex prefix and use as root
                 for path in root.glob("**"):
-                    if re.fullmatch(str(path)):
+                    if d.fullmatch(str(path)):
                         dataset.append(path)
             elif isinstance(d, Path):
                 dataset.append(d)
             elif isinstance(d, str):
                 for path in iterglob(d):
-                    dataset.append(Path(d))
+                    dataset.append(Path(path))
 
         self.datasets = dataset
 
@@ -86,6 +86,14 @@ class Filter:
         self.regex = regex
 
         # --- Preprocess specific conditions ---------------------------
+        # TODO: BIDS entities, modality/suffix/ext and JSON fields are
+        # not implemented yet. Refuse them rather than silently keeping
+        # every file.
+        if kwargs:
+            raise NotImplementedError(
+                f"Filter does not support these keywords yet: "
+                f"{', '.join(sorted(kwargs))}"
+            )
         self.condition = (lambda x: True)
 
     def __iter__(self) -> Iterator[Path]:
