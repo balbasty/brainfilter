@@ -7,13 +7,15 @@ them one after the other would see it. A block with a top-level `await`
 
 The README reads and writes `memory://ds`; the dataset it is run on is
 built by `README_DATASET` below (the one setup the examples need) and holds
-only what they read.
+only what they read. The full guide lives on the documentation site; the
+list of operations a read-only path refuses is checked on its modes page.
 """
 import ast
 import asyncio
 import importlib.metadata
 import inspect
 import json
+import os
 import re
 from pathlib import Path
 
@@ -76,9 +78,7 @@ def readme_dataset():
 
 
 def test_the_readme_has_examples():
-    blocks = _blocks(_readme())
-    assert len(blocks) >= 8
-    assert any("await " in block for block in blocks)
+    assert _blocks(_readme())
 
 
 def test_the_readme_runs_top_to_bottom(readme_dataset):
@@ -94,21 +94,33 @@ def test_the_readme_runs_top_to_bottom(readme_dataset):
             exec(code, namespace)
     # What the writes left, read past the README's own paths.
     ds = readme_dataset
-    assert json.loads((ds / "sub-03" / "sub-03_T1w.json").read_text()) == {
-        "Level": "new"
-    }
-    table = ds["participants.tsv"]
-    assert table["participant_id"] == ["sub-01", "sub-02", "sub-03"]
-    assert "sex" not in table.keys()
+    sidecar = json.loads(
+        (ds / "sub-01" / "anat" / "sub-01_T1w.json").read_text()
+    )
+    assert sidecar == {"EchoTime": 0.002, "RepetitionTime": 2.3}
+    assert ds["participants.tsv"]["handedness"] == ["R", "L"]
 
 
-def test_the_readme_names_every_refused_member():
+def _modes_page() -> Path | None:
+    """The modes page of the documentation, when a checkout is at hand."""
+    roots = [Path(__file__).resolve().parents[2]]
+    if os.environ.get("GITHUB_WORKSPACE"):
+        roots.append(Path(os.environ["GITHUB_WORKSPACE"]))
+    for root in roots:
+        page = root / "docs" / "concepts" / "modes-and-transactions.md"
+        if page.is_file():
+            return page
+    return None
+
+
+def test_the_docs_name_every_refused_member():
     from brainfilter._mode import _MEMBERS
 
-    text = " ".join(_readme().split())
-    start = text.index("members that change the filesystem:")
-    listed = text[start:text.index("The mode is a brainfilter rule", start)]
+    page = _modes_page()
+    if page is None:
+        pytest.skip("the documentation pages are not installed with the package")
+    text = " ".join(page.read_text(encoding="utf-8").split())
     for name in [*_MEMBERS, "rmtree"]:
-        assert f"`{name}`" in listed, name
+        assert f"`{name}`" in text, name
     for handle in ("`path.wrapped`", "`path.fs`", "`path.client`"):
-        assert handle in text
+        assert handle in text, handle

@@ -22,6 +22,12 @@ dynamic = ["version"]
 # universal-pathlib provides the memory:// backend the tests run against;
 # anyio's pytest plugin runs the async tests.
 test = ["pytest", "universal-pathlib", "anyio", "pandas"]
+# The documentation site (zensical + mkdocstrings).
+docs = [
+  "zensical >= 0.0.11",
+  "mkdocstrings[python] >= 1.0.0",
+  "markdown-grid-tables",
+]
 
 
 [project.urls]
@@ -36,9 +42,10 @@ requires = [
 ]
 build-backend = "setuptools.build_meta"
 
-# Comment -> use flat-layout auto discovery instead
-# [tool.setuptools]
-# packages = ["brainfilter"]
+# Find packages explicitly: flat-layout auto discovery refuses to build when
+# another top-level directory, such as the docs build output `site/`, exists.
+[tool.setuptools.packages.find]
+include = ["brainfilter*"]
 
 [tool.versioningit]
 default-version = "0+unknown"

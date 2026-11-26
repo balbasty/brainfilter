@@ -215,8 +215,11 @@ class Filter:
         Filters on a known BIDS entity (`acq="mprage"`, `run=[1, 2]`,
         `sub=...`, ...).
 
-    See the module documentation for the selection rules and the values a
-    filter takes.
+    Notes
+    -----
+    The filtering tutorial walks through the selection rules and the values
+    a filter takes; the inheritance page explains which sidecars and
+    companion files come along with the data files that are kept.
     """
 
     def __init__(
