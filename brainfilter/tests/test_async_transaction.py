@@ -94,7 +94,7 @@ async def test_rows_and_columns(ds):
     )
     async with ds.transaction():
         await table.write([{"a": "1"}])
-    assert await table.read() == [{"a": "1"}]
+    assert await table.read() == [{"a": 1}]   # inferred as int
 
 
 async def test_new_files(ds):

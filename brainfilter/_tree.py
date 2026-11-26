@@ -7,6 +7,7 @@ surface:
 - a JSON file maps its keys to values: `sidecar["RepetitionTime"]`, and
   `sidecar.read()` returns the whole object as a `dict`;
 - a TSV file reads as rows: `table.read()` is a list of `dict`, one per row,
+  with typed values (`int`, `float`, ...; `read(raw=True)` for the text),
   and `table.read_dataframe()` a `pandas.DataFrame` (pandas is optional);
 - any file's effective metadata, `data.metadata`, is a
   `collections.ChainMap` of the JSON sidecars that apply to it, nearest
@@ -113,13 +114,27 @@ def _with_pending(
     return _by_name(listed)
 
 
-def _new_content(kind: str, content: object, columns: object) -> object:
-    """Return a copy of `content`, as a transaction holds it."""
+def _new_content(
+    kind: str,
+    content: object,
+    columns: object,
+    origin: object = None,
+    delimiters: dict[str, str] | None = None,
+) -> object:
+    """Return a copy of `content`, as a transaction holds it.
+
+    For a table, `origin` is the table the transaction held so far: rows
+    taken from it keep their original text. `delimiters` join the lists
+    of the columns the rows do not already know a `Delimiter` for.
+    """
     if kind == _content.JSON:
         if columns is not None:
             raise TypeError("columns= is for a TSV file")
         return _content.copy_json(content)
-    return Table(content, columns=columns)
+    origin = origin if isinstance(origin, Table) else None
+    table = Table(content, columns=columns, _origin=origin)
+    table._delimiters = {**(delimiters or {}), **table._delimiters}
+    return table
 
 
 def _search_sidecars(
@@ -343,6 +358,10 @@ class _ContentMixin:
     if TYPE_CHECKING:
         def read_text(self, encoding: str | None = None) -> str: ...  # noqa: D102
 
+    def _descriptions(self) -> Mapping | None:
+        """Return what types the content when parsed (a table's columns)."""
+        return None
+
     def _tx_entry(self, create: bool) -> _Entry | None:
         """Return the transaction's entry for this file (`None` outside one).
 
@@ -360,27 +379,36 @@ class _ContentMixin:
                 if not create:
                     raise
                 text = None
-            entry = tx._buffer.load(self, self._kind, text)
+            descriptions = None if text is None else self._descriptions()
+            entry = tx._buffer.load(self, self._kind, text, descriptions)
         return entry
 
     def _read_content(self) -> object:
         entry = self._tx_entry(create=False)
         if entry is not None:
             return entry.content
-        return _content.parse(self._kind, self.read_text(encoding="utf-8"))
+        text = self.read_text(encoding="utf-8")
+        return _content.parse(self._kind, text, self._descriptions())
 
     def _tx_writable(self) -> object:
         if active_for(self) is None:
             raise _read_only(self)
         return self._tx_entry(create=True).content
 
-    def _tx_replace(self, content: object, columns: object = None) -> None:
+    def _tx_replace(
+        self,
+        content: object,
+        columns: object = None,
+        delimiters: dict[str, str] | None = None,
+    ) -> None:
         tx = active_for(self)
         if tx is None:
             raise _read_only(self)
-        tx._buffer.replace(
-            self, self._kind, _new_content(self._kind, content, columns)
-        )
+        held = tx._buffer.get(self)
+        origin = None if held is None else held.content
+        tx._buffer.replace(self, self._kind, _new_content(
+            self._kind, content, columns, origin, delimiters
+        ))
 
     def edit(self) -> Edit:
         """Edit this file on its own: `with path.edit() as content:`.
@@ -477,14 +505,59 @@ class TSVContentMixin(_ContentMixin):
     __slots__ = ()
     _kind = _content.TSV
 
-    def read(self) -> Table:
+    def read(self, raw: bool = False) -> Table:
         """Read the table as a `Table`: a list of rows, `column -> value`.
 
-        Values are strings, and the BIDS missing value `n/a` reads as
-        `None`. Inside a transaction this is the transaction's copy:
-        changing it edits the file.
+        Values are typed, one type per column, and the BIDS missing value
+        `n/a` reads as `None`. A column's type comes from the first of:
+
+        1. its description in the table's JSON sidecar (`participants.json`
+           for `participants.tsv`, found as `metadata` is), if it has a
+           `Format`: `number` reads as `float`, `integer` and `index` as
+           `int`, `boolean` as `bool` (`true`/`false`), `date`, `datetime`
+           and `time` as `datetime` objects, any other format as `str`;
+        2. its standard BIDS definition (`age` is a number, `onset` too,
+           `participant_id` a string, ...);
+        3. its values: `int` if every value is an integer written as
+           Python writes it, else `float` if every value is, else `str`.
+           So `02`, `1e3`, `1.50` and a column mixing `3` and `1.5` stay
+           text; booleans and dates are never guessed.
+
+        A declared type (1 or 2) is used only if every value of the column
+        parses as it (a date must be ISO 8601: `2024-01-31`,
+        `2024-01-31T10:00:00[.ffffff][Z|+hh:mm]`, `10:00:00[.ffffff]`);
+        otherwise the next one is tried. A column whose description has
+        `Levels` keeps its values as text, the keys of `Levels`. A column
+        whose description has a `Delimiter` reads as lists. A `number`
+        always reads as `float`, even when integral.
+
+        Inside a transaction this is the transaction's copy: changing it
+        edits the file. When the file is written, the cells left unchanged
+        keep their exact text.
+
+        Parameters
+        ----------
+        raw
+            Return every value as its exact text, `n/a` included, without
+            reading any sidecar. Inside a transaction this is a copy of
+            the transaction's table, as it would be written: changing it
+            does not edit the file.
         """
+        if raw:
+            return self._read_raw()
         return self._read_content()
+
+    def _descriptions(self) -> Mapping | None:
+        return self.read_metadata()
+
+    def _read_raw(self) -> Table:
+        tx = active_for(self)
+        entry = None if tx is None else tx._buffer.get(self)
+        if entry is not None:
+            text = _content.dump_tsv(entry.content)
+        else:
+            text = self.read_text(encoding="utf-8")
+        return _content.parse_tsv(text, raw=True)
 
     def write(
         self,
@@ -495,22 +568,37 @@ class TSVContentMixin(_ContentMixin):
 
         `rows` are copied. `columns` sets the order of the columns (by
         default, a `Table`'s own, else the order the keys first appear in).
-        The file is created if it does not exist.
+        The file is created if it does not exist. Rows taken from this
+        file's `read()` keep the text of their unchanged cells. A list value
+        is joined with its column's `Delimiter`, from the table's JSON
+        sidecar.
         """
-        self._tx_replace(rows, columns)
+        if active_for(self) is None:
+            raise _read_only(self)
+        rows = rows if isinstance(rows, Table) else list(rows)
+        delimiters = None
+        if _content.has_lists(rows):
+            delimiters = _content.delimiters(self._descriptions())
+        self._tx_replace(rows, columns, delimiters)
 
     def read_dataframe(self, **kwargs: object) -> DataFrame:
         """Read the table as a `pandas.DataFrame` (needs pandas).
 
-        `n/a` reads as a missing value. Keywords go to `pandas.read_csv`.
-        Inside a transaction, the frame is a copy of the buffered table.
+        `n/a` reads as a missing value, and the columns have the types
+        `read()` gives them, as pandas dtypes: `int64` (`Int64` with a
+        missing value), `float64`, `bool` (`boolean`), `datetime64` for a
+        `datetime` column with one time zone, and `object` for the rest
+        (text, dates, times and the lists of a `Delimiter`). Keywords go to
+        `pandas.read_csv`; with `dtype=` or `converters=`, pandas types the
+        columns as asked instead. Inside a transaction, the frame is a copy
+        of the buffered table.
         """
         entry = self._tx_entry(create=False)
         if entry is not None:
             text = _content.dump_tsv(entry.content)
         else:
             text = self.read_text(encoding="utf-8")
-        return _content.tsv_dataframe(text, kwargs)
+        return _content.tsv_dataframe(text, kwargs, self._descriptions())
 
     def __getitem__(self, key: object) -> NoReturn:
         raise TypeError(
@@ -529,7 +617,7 @@ class TSVContentMixin(_ContentMixin):
             "inside a transaction"
         )
 
-    def __iter__(self) -> Iterator[dict[str, str | None]]:
+    def __iter__(self) -> Iterator[dict[str, object]]:
         return iter(self.read())
 
 
@@ -678,6 +766,9 @@ class _AsyncContentMixin:
     if TYPE_CHECKING:
         async def read_text(self, encoding: str | None = None) -> str: ...  # noqa: D102
 
+    async def _descriptions(self) -> Mapping | None:
+        return None
+
     async def _tx_entry(self, create: bool) -> _Entry | None:
         tx = active_for(self)
         if tx is None:
@@ -690,31 +781,38 @@ class _AsyncContentMixin:
                 if not create:
                     raise
                 text = None
+            descriptions = None if text is None else await self._descriptions()
             # Another task may have read it meanwhile: `load` keeps the
             # first entry, edits included.
-            entry = tx._buffer.load(self, self._kind, text)
+            entry = tx._buffer.load(self, self._kind, text, descriptions)
         return entry
 
     async def _read_content(self) -> object:
         entry = await self._tx_entry(create=False)
         if entry is not None:
             return entry.content
-        return _content.parse(
-            self._kind, await self.read_text(encoding="utf-8")
-        )
+        text = await self.read_text(encoding="utf-8")
+        return _content.parse(self._kind, text, await self._descriptions())
 
     async def _tx_writable(self) -> object:
         if active_for(self) is None:
             raise _read_only(self, "async ")
         return (await self._tx_entry(create=True)).content
 
-    def _tx_replace(self, content: object, columns: object = None) -> None:
+    def _tx_replace(
+        self,
+        content: object,
+        columns: object = None,
+        delimiters: dict[str, str] | None = None,
+    ) -> None:
         tx = active_for(self)
         if tx is None:
             raise _read_only(self, "async ")
-        tx._buffer.replace(
-            self, self._kind, _new_content(self._kind, content, columns)
-        )
+        held = tx._buffer.get(self)
+        origin = None if held is None else held.content
+        tx._buffer.replace(self, self._kind, _new_content(
+            self._kind, content, columns, origin, delimiters
+        ))
 
     def edit(self) -> AsyncEdit:
         """Edit this file on its own: `async with path.edit() as content:`.
@@ -816,33 +914,57 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
     __slots__ = ()
     _kind = _content.TSV
 
-    async def read(self) -> Table:
+    async def read(self, raw: bool = False) -> Table:
         """Read the table as a `Table`: a list of rows, `column -> value`.
 
-        Values are strings, and the BIDS missing value `n/a` reads as
-        `None`. Inside a transaction this is the transaction's copy.
+        The coroutine counterpart of `BidsPath.read`: values are typed the
+        same way, and `raw=True` returns their exact text. Inside a
+        transaction this is the transaction's copy.
         """
+        if raw:
+            return await self._read_raw()
         return await self._read_content()
+
+    async def _descriptions(self) -> Mapping | None:
+        return await self.read_metadata()
+
+    async def _read_raw(self) -> Table:
+        tx = active_for(self)
+        entry = None if tx is None else tx._buffer.get(self)
+        if entry is not None:
+            text = _content.dump_tsv(entry.content)
+        else:
+            text = await self.read_text(encoding="utf-8")
+        return _content.parse_tsv(text, raw=True)
 
     async def write(
         self,
         rows: Iterable[Mapping[str, object]],
         columns: Iterable[str] | None = None,
     ) -> None:
-        """Replace the whole table, in a transaction."""
-        self._tx_replace(rows, columns)
+        """Replace the whole table, in a transaction (see `BidsPath.write`)."""
+        if active_for(self) is None:
+            raise _read_only(self, "async ")
+        rows = rows if isinstance(rows, Table) else list(rows)
+        delimiters = None
+        if _content.has_lists(rows):
+            delimiters = _content.delimiters(await self._descriptions())
+        self._tx_replace(rows, columns, delimiters)
 
     async def read_dataframe(self, **kwargs: object) -> DataFrame:
         """Read the table as a `pandas.DataFrame` (needs pandas).
 
-        `n/a` reads as a missing value. Keywords go to `pandas.read_csv`.
+        The coroutine counterpart of `BidsPath.read_dataframe`, with the
+        same column types.
         """
         entry = await self._tx_entry(create=False)
         if entry is not None:
             text = _content.dump_tsv(entry.content)
         else:
             text = await self.read_text(encoding="utf-8")
-        return _content.tsv_dataframe(text, kwargs)
+        return _content.tsv_dataframe(
+            text, kwargs, await self._descriptions()
+        )
 
     def __getitem__(self, key: object) -> NoReturn:
         raise TypeError(
@@ -861,6 +983,6 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
             "read() inside a transaction"
         )
 
-    async def __aiter__(self) -> AsyncIterator[dict[str, str | None]]:
+    async def __aiter__(self) -> AsyncIterator[dict[str, object]]:
         for row in await self.read():
             yield row

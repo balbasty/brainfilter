@@ -132,8 +132,12 @@ def test_tsv_reads_as_rows(ds):
     table = ds["participants.tsv"]
     rows = table.read()
     assert rows == [
-        {"participant_id": "sub-01", "age": "30", "sex": "F"},
+        {"participant_id": "sub-01", "age": 30.0, "sex": "F"},   # BIDS: number
         {"participant_id": "sub-02", "age": None, "sex": "M"},
+    ]
+    assert table.read(raw=True) == [
+        {"participant_id": "sub-01", "age": "30", "sex": "F"},
+        {"participant_id": "sub-02", "age": "n/a", "sex": "M"},
     ]
     assert list(table) == rows
     with pytest.raises(TypeError, match="read()"):

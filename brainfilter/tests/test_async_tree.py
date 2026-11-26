@@ -165,8 +165,12 @@ async def test_tsv_reads_as_rows(ds):
     table = await ds.child("participants.tsv")
     rows = await table.read()
     assert rows == [
-        {"participant_id": "sub-01", "age": "30", "sex": "F"},
+        {"participant_id": "sub-01", "age": 30.0, "sex": "F"},   # BIDS: number
         {"participant_id": "sub-02", "age": None, "sex": "M"},
+    ]
+    assert await table.read(raw=True) == [
+        {"participant_id": "sub-01", "age": "30", "sex": "F"},
+        {"participant_id": "sub-02", "age": "n/a", "sex": "M"},
     ]
     assert [row async for row in table] == rows
     with pytest.raises(TypeError, match=r"await read\(\)"):
