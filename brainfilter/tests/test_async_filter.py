@@ -3,7 +3,7 @@ import pytest
 
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
 from brainfilter.filter import BidsFilter
-from brainfilter.tests.test_filter import LISTING, _make
+from brainfilter.tests.test_filter import LISTING, SET_UP, _make
 
 pytestmark = pytest.mark.anyio
 
@@ -44,6 +44,17 @@ async def test_awalk_memory_native_async(memory_listing, async_memory):
         assert all(type(p.wrapped).__name__ == "AsyncFSPath" for p in kept)
         assert [p.relative_to(root).as_posix() for p in kept] == f.select(LISTING)
         assert await f.awalk(memory_listing) == kept
+
+
+async def test_awalk_companion_files(tmp_path):
+    _make(tmp_path, SET_UP)
+    root = AsyncBidsPath(str(tmp_path))
+    for f in (BidsFilter(tasks="rest"), BidsFilter(sessions="2"),
+              BidsFilter(suffixes="pet"), BidsFilter(acq="crosstalk"),
+              BidsFilter(suffixes="photo"), BidsFilter(acq="b"),
+              BidsFilter(tasks="noise", sessions="1")):
+        kept = await f.awalk(root)
+        assert [p.relative_to(root).as_posix() for p in kept] == f.select(SET_UP)
 
 
 async def test_awalk_results_read_asynchronously(tmp_path):

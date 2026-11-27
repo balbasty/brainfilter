@@ -13,6 +13,9 @@ FUNC = "sub-01/func/sub-01_"
 DWI_DIR = "sub-01/dwi/sub-01_"
 PERF = "sub-01/perf/sub-01_"
 EEG_DIR = "sub-01/eeg/sub-01_"
+MEG_DIR = "sub-01/ses-1/meg/sub-01_ses-1_"
+PET_DIR = "sub-01/pet/sub-01_"
+MRS_DIR = "sub-01/mrs/sub-01_"
 
 RUN1 = f"{FUNC}task-rest_run-01_bold.nii.gz"
 RUN2 = f"{FUNC}task-rest_run-2_bold.nii.gz"
@@ -23,6 +26,12 @@ ASL = f"{PERF}asl.nii.gz"
 ASL_B = f"{PERF}acq-b_asl.nii.gz"
 EEG = f"{EEG_DIR}task-rest_eeg.edf"
 T1W = "sub-01/anat/sub-01_T1w.nii.gz"
+MEG = f"{MEG_DIR}task-rest_meg.fif"
+MEG_ACQ = f"{MEG_DIR}task-rest_acq-b_meg.fif"
+PET = f"{PET_DIR}pet.nii.gz"
+SVS = f"{MRS_DIR}svs.nii.gz"
+MRSI = f"{MRS_DIR}acq-grid_mrsi.nii.gz"
+UNLOC = f"{MRS_DIR}unloc.nii.gz"
 
 FILES = {
     "dataset_description.json": {"Name": "companion", "BIDSVersion": "1.10.0"},
@@ -62,11 +71,31 @@ FILES = {
     f"{EEG_DIR}space-CapTrak_coordsystem.json": {},
     f"{EEG_DIR}task-rest_recording-cardiac_physio.tsv.gz": b"",
     f"{EEG_DIR}task-rest_recording-cardiac_physio.json": {},
+    # meg: the session's set-up files and two recordings
+    MEG: b"",
+    MEG_ACQ: b"",
+    f"{MEG_DIR}acq-calibration_meg.dat": b"",
+    f"{MEG_DIR}acq-crosstalk_meg.fif": b"",
+    f"{MEG_DIR}headshape.pos": b"",
+    f"{MEG_DIR}photo.jpg": b"",
+    f"{MEG_DIR}task-rest_markers.mrk": b"",
+    # pet: two blood recordings
+    PET: b"",
+    f"{PET_DIR}recording-manual_blood.tsv": "time\n",
+    f"{PET_DIR}recording-manual_blood.json": {},
+    f"{PET_DIR}recording-auto_blood.tsv": "time\n",
+    # mrs: a reference scan for the single-voxel and the grid scans
+    SVS: b"",
+    f"{MRS_DIR}mrsref.nii.gz": b"",
+    MRSI: b"",
+    f"{MRS_DIR}acq-grid_mrsref.nii.gz": b"",
+    UNLOC: b"",
     # anat
     T1W: b"",
 }
 
-DATA = [RUN1, RUN2, OTHER, DWI, MULTI, ASL, ASL_B, EEG, T1W]
+DATA = [RUN1, RUN2, OTHER, DWI, MULTI, ASL, ASL_B, EEG, T1W, MEG, MEG_ACQ,
+        PET, SVS, MRSI, UNLOC]
 
 
 def _write(top, files):
@@ -262,11 +291,63 @@ def test_a_recording_by_its_recording_entity(ds):
     assert eeg.companion("physio", recording="resp") is None
 
 
+@pytest.mark.parametrize("rel", [MEG, MEG_ACQ])
+@pytest.mark.parametrize("name,expected", [
+    ("calibration", "acq-calibration_meg.dat"),
+    ("crosstalk", "acq-crosstalk_meg.fif"),
+    ("headshape", "headshape.pos"),
+    ("photo", "photo.jpg"),
+    ("markers", "task-rest_markers.mrk"),
+])
+def test_meg_set_up_files(ds, rel, name, expected):
+    # the system files belong to every recording, whatever its own `acq`
+    assert _rel((ds / rel).companion(name), ds) == f"{MEG_DIR}{expected}"
+    assert (ds / rel).companion(name) in (ds / rel).companions
+
+
+def test_meg_system_files_belong_to_meg_recordings_only(ds):
+    for rel in (EEG, RUN1, PET, T1W):
+        assert (ds / rel).companion("calibration") is None
+        assert (ds / rel).companion("crosstalk") is None
+    for rel in ("acq-crosstalk_meg.fif", "acq-calibration_meg.dat",
+                "photo.jpg"):
+        path = ds / f"{MEG_DIR}{rel}"
+        assert path.companion("crosstalk") is None
+        assert path.companion("photo") is None
+
+
+def test_two_blood_recordings_are_an_error(ds):
+    pet = ds / PET
+    with pytest.raises(ValueError, match=(
+        r"2 'blood' companions.*sub-01_recording-auto_blood\.tsv, "
+        r"sub-01_recording-manual_blood\.tsv.*companion\('blood', "
+        r"recording='auto'\)"
+    )):
+        pet.companion("blood")
+    blood = pet.companion("blood", recording="manual")
+    assert _rel(blood, ds) == f"{PET_DIR}recording-manual_blood.tsv"   # not .json
+    assert blood in pet.companions
+    assert [p.name for p in blood.sidecars] == ["sub-01_recording-manual_blood.json"]
+    assert pet.companion("blood", recording="other") is None
+
+
+@pytest.mark.parametrize("rel,expected", [
+    (SVS, f"{MRS_DIR}mrsref.nii.gz"),
+    (MRSI, f"{MRS_DIR}acq-grid_mrsref.nii.gz"),
+    (UNLOC, None),                     # a localiser has no reference scan
+])
+def test_mrs_reference_scan(ds, rel, expected):
+    path = ds / rel
+    assert _rel(path.companion("mrsref"), ds) == expected
+    assert path.companion("mrsref") not in path.companions
+
+
 def test_unknown_name():
     path = BidsPath("ds/sub-01/dwi/sub-01_dwi.nii.gz")    # raised before any I/O
     with pytest.raises(ValueError, match=(
         r"unknown companion 'bvals': name one of aslcontext, asllabeling, "
-        r"bval, bvec, .*m0scan.*sbref, scans, sessions, stim"
+        r"blood, bval, bvec, calibration, .*crosstalk, .*headshape, m0scan, "
+        r"markers, mrsref, .*photo, .*sbref, scans, sessions, stim"
     )):
         path.companion("bvals")
     for name in ("dwi", "json", "tsv", "sidecar", ".bval"):
@@ -437,7 +518,8 @@ async def test_async_matches_sync(ads, tmp_path, rel):
         assert _rel(await path.companion(attr), ads) == _rel(
             spath.companion(attr), sync
         )
-    for name in ("events", "physio", "coordsystem", "bval", "sbref"):
+    for name in ("events", "physio", "coordsystem", "bval", "sbref",
+                 "crosstalk", "calibration", "photo", "headshape", "mrsref"):
         assert _rel(await path.companion(name), ads) == _rel(
             spath.companion(name), sync
         )
@@ -461,6 +543,10 @@ async def test_async_errors(ads):
         await eeg.companion("electrodes")
     found = await eeg.companion("electrodes", space="Other")
     assert found.name == "sub-01_space-Other_electrodes.tsv"
+    with pytest.raises(ValueError, match="recording='auto'"):
+        await (ads / PET).companion("blood")
+    found = await (ads / PET).companion("blood", recording="auto")
+    assert found.name == "sub-01_recording-auto_blood.tsv"
 
 
 @pytest.mark.anyio

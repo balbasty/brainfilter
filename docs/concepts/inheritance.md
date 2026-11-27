@@ -188,15 +188,23 @@ runs, other subjects or other tasks.
 The rules of a filter are the ones above with a wider notion of "applies".
 Besides the sidecar of the same suffix, a data file also receives its
 *companion* files, which have a different suffix: `events.tsv`, `channels.tsv`,
-`scans.tsv`, `sessions.tsv`, `physio` recordings and a few others. They are
-matched in the same way, by directory, by a subset of the entities and by index
-numbers. A companion may also have an entity that the data file cannot have
-when that entity names the companion's own space or recording, so that
-`sub-01_space-CapTrak_electrodes.tsv` still goes with an EEG recording that
-has no `space` in its name. The `sidecar` property leaves companions out, since
-an `events.json` describes the events table and not the image, and the
-`companions` property of a data file lists them instead; see
-[Companions and fieldmaps](../tutorials/associated-files.md).
+`scans.tsv`, `sessions.tsv`, `physio` and `blood` recordings, the `photo` of a
+recording's set-up, the `headshape` and `markers` of a MEG session, and a few
+others. They are matched in the same way, by directory, by a subset of the
+entities and by index numbers. A companion may also have an entity that the
+data file cannot have when that entity names the companion's own space or
+recording, so that `sub-01_space-CapTrak_electrodes.tsv` still goes with an EEG
+recording that has no `space` in its name. The fine-calibration and crosstalk
+files of a MEG system are the one exception to matching by entities: they are
+named like a MEG recording with an acquisition of their own
+(`sub-01_acq-crosstalk_meg.fif`), and they go with every MEG recording of
+their subject or session, whatever acquisition the recording names. The
+`sidecar` property leaves companions out, since an `events.json` describes the
+events table and not the image, and the `companions` property of a data file
+lists them instead; see
+[Companions and fieldmaps](../tutorials/associated-files.md). A companion is
+a file of its own as well, so a filter that names it (`suffixes="events"`)
+selects it with its own sidecars, and not the recordings it describes.
 
 ```pycon
 >>> from brainfilter import BidsFilter
@@ -258,7 +266,8 @@ dataset with its own `dataset_description.json`, for full inheritance.
 The dataset's `.bidsignore` decides which files are recordings to select,
 never which metadata applies. A sidecar, a table or a `.bval` file that it
 names still describes the recordings below it, still gives them its values,
-and is still kept with them; it is only never kept on its own. Dataset-level
+and is still kept with them; it is only never kept on its own. The same goes
+for a companion that it names, such as an events table. Dataset-level
 files, such as `participants.tsv` or `README`, are kept whether it names them
 or not.
 

@@ -1,4 +1,5 @@
 import re
+import typing
 
 import pytest
 
@@ -418,6 +419,44 @@ def test_applies_to(meta, data, expected):
     # files inside a directory-shaped data file belong to it
     ("sub-01/meg/sub-01_task-x_meg.json",
      "sub-01/meg/sub-01_task-x_meg.ds/BadChannels", True),
+    # a photo, a headshape, markers or a blood recording is a companion
+    ("sub-01/eeg/sub-01_photo.jpg", "sub-01/eeg/sub-01_task-x_eeg.edf", True),
+    ("sub-01/emg/sub-01_recording-a_photo.png",
+     "sub-01/emg/sub-01_task-x_emg.edf", True),
+    ("sub-01/eeg/sub-01_acq-NAS_photo.jpg",
+     "sub-01/eeg/sub-01_task-x_eeg.edf", False),
+    ("sub-01/meg/sub-01_headshape.pos", "sub-01/meg/sub-01_task-x_meg.fif",
+     True),
+    ("sub-01/meg/sub-01_task-x_space-CapTrak_markers.mrk",
+     "sub-01/meg/sub-01_task-x_run-1_meg.fif", True),
+    ("sub-01/meg/sub-01_task-y_markers.mrk",
+     "sub-01/meg/sub-01_task-x_meg.fif", False),
+    ("sub-01/pet/sub-01_recording-manual_blood.tsv",
+     "sub-01/pet/sub-01_pet.nii.gz", True),
+    ("sub-01/pet/sub-01_trc-a_recording-manual_blood.json",
+     "sub-01/pet/sub-01_trc-b_pet.nii.gz", False),
+    # a MEG system file, of every MEG recording, whatever its `acq`
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+     "sub-01/meg/sub-01_task-x_meg.fif", True),
+    ("sub-01/meg/sub-01_acq-calibration_meg.dat",
+     "sub-01/meg/sub-01_task-x_acq-a_meg.fif", True),
+    ("sub-01/meg/sub-01_acq-calibration_meg.dat",
+     "sub-01/meg/sub-01_task-x_meg.ds/BadChannels", True),
+    ("sub-01/ses-1/meg/sub-01_ses-1_acq-crosstalk_meg.fif",
+     "sub-01/ses-1/meg/sub-01_ses-1_task-x_meg.fif", True),
+    ("sub-01/ses-1/meg/sub-01_ses-1_acq-crosstalk_meg.fif",
+     "sub-01/ses-2/meg/sub-01_ses-2_task-x_meg.fif", False),
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+     "sub-02/meg/sub-02_task-x_meg.fif", False),
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+     "sub-01/meg/sub-01_task-x_physio.tsv.gz", False),
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+     "sub-01/meg/sub-01_acq-calibration_meg.dat", False),
+    # ... with the extension the schema gives it, and no task
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.dat",
+     "sub-01/meg/sub-01_task-x_meg.fif", False),
+    ("sub-01/meg/sub-01_task-x_acq-crosstalk_meg.fif",
+     "sub-01/meg/sub-01_task-x_meg.fif", False),
 ])
 def test_applies_to_index_and_companion_entities(meta, data, expected):
     assert applies_to(meta, data) is expected
@@ -493,9 +532,14 @@ def test_select_all_keeps_non_imaging_data():
     # physio is data, and a companion of the bold run
     ({"suffixes": "physio"}, ("sub-01/func/sub-01_task-x_recording",)),
     ({"suffixes": "bold"}, ("sub-01/func/",)),
-    # the events alone in sub-02 have no `recording`, which never rejects
-    ({"recording": "cardiac"},
-     ("sub-01/func/sub-01_task-x_recording", "sub-02/")),
+    # the events alone in sub-02 are a data file with no `recording`
+    ({"recording": "cardiac"}, ("sub-01/func/sub-01_task-x_recording",)),
+    # a companion is a data file a filter selects, with its JSON sidecar
+    ({"suffixes": "events"}, ("sub-02/beh/",)),
+    ({"suffixes": "channels"}, ("sub-01/motion/sub-01_task-x_tracksys-imu_ch",
+                                "sub-01/eeg/sub-01_task-x_channels")),
+    ({"suffixes": "coordsystem"}, ("sub-01/nirs/sub-01_coordsystem",
+                                   "sub-01/eeg/sub-01_space-CapTrak_coord")),
 ])
 def test_select_non_imaging_data(kwargs, prefixes):
     assert set(BidsFilter(**kwargs).select(OTHER_DATA)) == (
@@ -503,8 +547,8 @@ def test_select_non_imaging_data(kwargs, prefixes):
     )
 
 
-def test_metadata_with_no_data_is_judged_on_what_it_names():
-    # `sub-02/beh/*_events.*` applies to no data file of the listing
+def test_a_companion_with_no_recording_is_judged_as_data():
+    # `sub-02/beh/*_events.tsv` describes no recording of the listing
     events = _under(OTHER_DATA, "sub-02/")
     assert set(BidsFilter(subjects="02").select(OTHER_DATA)) == events
     assert set(BidsFilter(tasks="y").select(OTHER_DATA)) == events
@@ -515,13 +559,28 @@ def test_metadata_with_no_data_is_judged_on_what_it_names():
     assert set(BidsFilter(suffixes="T1w").select(OTHER_DATA)) == {
         "dataset_description.json"
     }
-    # an entity it lacks never rejects it; its directories name its subject
+    # an entity filter on an entity it lacks rejects it, as any data file;
+    # its directories name its subject; it needs no dataset root
     desc = ["dataset_description.json"]
     alone = ["sub-03/ses-1/beh/task-z_events.tsv"]
+    assert BidsFilter(subjects="03", sessions="1").select(desc + alone) == (
+        desc + alone
+    )
+    assert BidsFilter(subjects="03", run=2).select(desc + alone) == desc
+    assert BidsFilter(subjects="01").select(desc + alone) == desc
+    assert BidsFilter(sessions="2").select(desc + alone) == desc
+    assert BidsFilter(subjects="03").select(alone) == alone
+
+
+def test_metadata_with_no_data_is_judged_on_what_it_names():
+    # a sidecar that describes no data file of the listing
+    desc = ["dataset_description.json"]
+    alone = ["sub-03/ses-1/beh/task-z_beh.json"]
     f = BidsFilter(subjects="03", sessions="1", run=2)
     assert f.select(desc + alone) == desc + alone
     assert BidsFilter(subjects="01").select(desc + alone) == desc
     assert BidsFilter(sessions="2").select(desc + alone) == desc
+    assert BidsFilter(suffixes="beh").select(desc + alone) == desc + alone
     # outside every dataset root it is never kept on its own
     assert not f.select(alone)
 
@@ -537,6 +596,138 @@ def test_recording_tables_are_data():
                  "sub-01/func/sub-01_task-x_events.tsv"):
         assert parse_path(path).is_metadata
         assert PureBidsPath(path).is_metadata
+
+
+def test_system_files_need_a_companion():
+    meta = "sub-01/meg/sub-01_acq-crosstalk_meg.fif"
+    data = "sub-01/meg/sub-01_task-x_meg.fif"
+    assert applies_to(meta, data)
+    assert not applies_to(meta, data, companions=False)   # not a sidecar
+
+
+# The files of a MEG session's set-up, a PET image with its blood recordings,
+# and a session holding set-up files alone.
+SET_UP = [
+    "dataset_description.json",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-rest_meg.fif",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-rest_meg.json",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-noise_acq-b_meg.fif",
+    "sub-01/ses-1/meg/sub-01_ses-1_acq-calibration_meg.dat",
+    "sub-01/ses-1/meg/sub-01_ses-1_acq-crosstalk_meg.fif",
+    "sub-01/ses-1/meg/sub-01_ses-1_headshape.pos",
+    "sub-01/ses-1/meg/sub-01_ses-1_photo.jpg",
+    "sub-01/ses-1/meg/sub-01_ses-1_acq-NAS_photo.jpg",
+    "sub-01/ses-1/meg/sub-01_ses-1_acq-b_headshape.pos",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-rest_markers.mrk",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-rest_channels.tsv",
+    "sub-01/ses-2/meg/sub-01_ses-2_acq-crosstalk_meg.fif",
+    "sub-01/ses-2/meg/sub-01_ses-2_headshape.pos",
+    "sub-01/pet/sub-01_trc-FDG_pet.nii.gz",
+    "sub-01/pet/sub-01_trc-FDG_recording-manual_blood.tsv",
+    "sub-01/pet/sub-01_trc-FDG_recording-manual_blood.json",
+    "sub-01/pet/sub-01_trc-FDG_recording-auto_blood.tsv",
+    "sub-01/pet/sub-01_trc-other_recording-auto_blood.tsv",
+]
+MEG1 = "sub-01/ses-1/meg/sub-01_ses-1_"
+MEG2 = "sub-01/ses-2/meg/sub-01_ses-2_"
+PET = "sub-01/pet/sub-01_trc-"
+
+
+def _named(*names):
+    return {"dataset_description.json", *names}
+
+
+SYSTEM = (f"{MEG1}acq-calibration_meg.dat", f"{MEG1}acq-crosstalk_meg.fif",
+          f"{MEG1}headshape.pos", f"{MEG1}photo.jpg",
+          f"{MEG1}acq-NAS_photo.jpg")      # no recording has acq-NAS
+NOISE = f"{MEG1}task-noise_acq-b_meg.fif"
+ACQ_B = f"{MEG1}acq-b_headshape.pos"     # the noise recording has acq-b
+REST = (f"{MEG1}task-rest_meg.fif", f"{MEG1}task-rest_meg.json",
+        f"{MEG1}task-rest_markers.mrk", f"{MEG1}task-rest_channels.tsv")
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    # the set-up files come along with each recording of the session; the
+    # markers and channels of its task too; a headshape whose `acq` one of
+    # the recordings has, with that recording alone
+    ({"tasks": "rest", "sessions": "1"}, _named(*SYSTEM, *REST)),
+    ({"tasks": "noise", "sessions": "1"}, _named(*SYSTEM, NOISE, ACQ_B)),
+    ({"suffixes": "meg", "sessions": "1"}, _named(*SYSTEM, *REST, NOISE, ACQ_B)),
+    ({"acq": "b", "sessions": "1"}, _named(*SYSTEM, NOISE, ACQ_B)),
+    # a companion is a data file too: a filter that names it selects it,
+    # and not the recordings it describes
+    ({"acq": "calibration", "sessions": "1"}, _named(SYSTEM[0])),
+    ({"acq": "crosstalk", "sessions": "1"}, _named(SYSTEM[1])),
+    ({"acq": "NAS"}, _named(f"{MEG1}acq-NAS_photo.jpg")),
+    ({"suffixes": "photo", "sessions": "1"}, _named(
+        f"{MEG1}photo.jpg", f"{MEG1}acq-NAS_photo.jpg",
+    )),
+    ({"suffixes": "headshape"}, _named(
+        f"{MEG1}headshape.pos", ACQ_B, f"{MEG2}headshape.pos",
+    )),
+    ({"suffixes": "markers"}, _named(f"{MEG1}task-rest_markers.mrk")),
+    # a session with set-up files alone: judged as data files
+    ({"sessions": "2"}, _named(
+        f"{MEG2}acq-crosstalk_meg.fif", f"{MEG2}headshape.pos",
+    )),
+    ({"sessions": "2", "suffixes": "meg"}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
+    ({"sessions": "2", "acq": "crosstalk"}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
+    ({"sessions": "2", "acq": typing.Any}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
+    ({"sessions": "2", "tasks": "rest"}, _named()),
+    # blood recordings come along with their PET image, and are data too
+    ({"suffixes": "pet"}, _named(
+        f"{PET}FDG_pet.nii.gz", f"{PET}FDG_recording-manual_blood.tsv",
+        f"{PET}FDG_recording-manual_blood.json",
+        f"{PET}FDG_recording-auto_blood.tsv",
+    )),
+    ({"suffixes": "blood", "recording": "auto"}, _named(
+        f"{PET}FDG_recording-auto_blood.tsv",
+        f"{PET}other_recording-auto_blood.tsv",
+    )),
+    ({"trc": "other"}, _named(f"{PET}other_recording-auto_blood.tsv")),
+    ({"subjects": "02"}, _named()),
+])
+def test_select_companion_files(kwargs, expected):
+    assert set(BidsFilter(**kwargs).select(SET_UP)) == expected
+
+
+def test_walk_companion_files(tmp_path):
+    _make(tmp_path, SET_UP)
+    root = BidsPath(str(tmp_path))
+    for f in (BidsFilter(), BidsFilter(tasks="rest"), BidsFilter(sessions="2"),
+              BidsFilter(suffixes="pet"), BidsFilter(acq="crosstalk"),
+              BidsFilter(subjects="02"), BidsFilter(suffixes="photo"),
+              BidsFilter(tasks="noise", sessions="1")):
+        kept = [p.relative_to(root).as_posix() for p in f.walk(root)]
+        assert kept == f.select(SET_UP)
+
+
+def test_ignored_companion_files_come_along_alone(tmp_path):
+    _make(tmp_path, SET_UP)
+    (tmp_path / ".bidsignore").write_text("*_acq-crosstalk_meg.fif\n")
+    root = BidsPath(str(tmp_path))
+    for f in (BidsFilter(tasks="rest", sessions={"1", "2"}),
+              BidsFilter(sessions={"1", "2"})):
+        kept = [p.relative_to(root).as_posix() for p in f.walk(root)]
+        assert f"{MEG1}acq-crosstalk_meg.fif" in kept     # with its recording
+        assert f"{MEG2}acq-crosstalk_meg.fif" not in kept  # never selected
+    assert f"{MEG2}headshape.pos" in kept           # selected
+    paths = [root / p for p in [*SET_UP, ".bidsignore"]]
+    assert kept == [p.relative_to(root).as_posix() for p in f.select(paths, root)]
+
+
+def test_companion_files_parse_as_such():
+    for path in (f"{MEG1}acq-crosstalk_meg.fif", f"{MEG1}acq-calibration_meg.dat",
+                 f"{MEG1}photo.jpg", f"{MEG1}headshape.pos",
+                 f"{MEG1}task-rest_markers.mrk", "sub-01/micr/sub-01_photo.tif"):
+        assert parse_path(path).is_companion_file
+        assert not parse_path(path).is_metadata
+    for path in (f"{MEG1}task-rest_meg.fif", f"{MEG1}acq-crosstalk_meg.dat",
+                 f"{MEG1}task-rest_acq-crosstalk_meg.fif",
+                 f"{PET}FDG_recording-auto_blood.tsv",
+                 "sub-01/micr/sub-01_photo.json",       # metadata
+                 "sub-01/meg/sub-01_task-x_meg.ds/sub-01_photo.jpg"):
+        assert not parse_path(path).is_companion_file
 
 
 # Data files that are directories: CTF MEG, a MEG directory with no

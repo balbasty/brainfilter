@@ -13,8 +13,9 @@ kinds of file that belong with a data file, its *companions* and its
 ## A dataset to explore
 
 The examples use one subject with two runs of a resting-state task, a diffusion
-image, an arterial spin labelling (ASL) series, an EEG recording, and four
-fieldmap images. It is built in memory with `memory://`, which
+image, an arterial spin labelling (ASL) series, an EEG recording, a MEG
+recording with the files that describe its set-up, a PET scan with two blood
+recordings, a spectroscopy scan, and four fieldmap images. It is built in memory with `memory://`, which
 needs [universal-pathlib](../getting-started/installation.md), and building it
 requires a writable path. You can skip this block and open a dataset of your
 own instead.
@@ -54,6 +55,24 @@ eeg = sub / "eeg"
 for space in ("CapTrak", "EEGLAB"):
     (eeg / f"sub-01_space-{space}_electrodes.tsv").write_text("name\tx\ty\tz\n")
 
+meg = sub / "meg"
+(meg / "sub-01_task-auditory_meg.fif").write_bytes(b"")
+(meg / "sub-01_task-auditory_channels.tsv").write_text("name\ttype\tunits\n")
+(meg / "sub-01_acq-calibration_meg.dat").write_bytes(b"")
+(meg / "sub-01_acq-crosstalk_meg.fif").write_bytes(b"")
+(meg / "sub-01_headshape.pos").write_bytes(b"")
+(meg / "sub-01_photo.jpg").write_bytes(b"")
+
+pet = sub / "pet"
+(pet / "sub-01_trc-FDG_pet.nii.gz").write_bytes(b"")
+for recording in ("autosampler", "manual"):
+    (pet / f"sub-01_trc-FDG_recording-{recording}_blood.tsv").write_text("time\tplasma_radioactivity\n")
+pet["sub-01_trc-FDG_recording-manual_blood.json"] = {"PlasmaAvail": True}
+
+mrs = sub / "mrs"
+(mrs / "sub-01_svs.nii.gz").write_bytes(b"")
+(mrs / "sub-01_mrsref.nii.gz").write_bytes(b"")
+
 fmap = sub / "fmap"
 runs = [f"func/sub-01_task-rest_run-{run}_bold.nii.gz" for run in ("1", "2")]
 for name in ("phasediff", "magnitude1"):
@@ -86,6 +105,36 @@ sidecars. Most have a suffix of their own: the `events` of a task, the
 as the `.bval` and `.bvec` gradient tables of a diffusion image. The
 `companions` property of a data file lists every one that applies to it.
 
+Which companions a data file can have depends on how it was acquired. The
+table lists them by kind of recording, and two kinds apply to almost every
+recording besides: the physiological recordings made at the same time
+(`physio`, `physioevents` and `stim`), and the `scans` and `sessions` tables
+of its subject.
+
+| Recording                         | Its companions                                                      |
+| --------------------------------- | ------------------------------------------------------------------- |
+| functional MRI (`func`)           | `events`                                                            |
+| diffusion MRI (`dwi`)             | the gradient tables, `.bval` and `.bvec`                            |
+| arterial spin labelling (`perf`)  | `aslcontext`, `asllabeling`                                         |
+| EEG, iEEG and EMG                 | `events`, `channels`, `electrodes`, `coordsystem`, `photo`          |
+| MEG                               | `events`, `channels`, `electrodes`, `coordsystem`, `photo`, `headshape`, `markers`, the calibration and crosstalk files |
+| near-infrared spectroscopy        | `events`, `channels`, `optodes`, `coordsystem`, `photo`             |
+| motion capture                    | `events`, `channels`                                                |
+| PET                               | `events`, `blood`                                                   |
+| microscopy                        | `photo`                                                             |
+| behaviour and MR spectroscopy     | `events`                                                            |
+
+A few of these are files of their own kind rather than tables or JSON
+files: a `photo` of the set-up (a `.jpg`, `.png` or `.tif`), the `headshape`
+digitised before a MEG recording and the `markers` of its head coils, and
+the two files that a MEG system needs to process its recordings, its
+fine-calibration file (`*_acq-calibration_meg.dat`) and its crosstalk file
+(`*_acq-crosstalk_meg.fif`). Those two are named like a MEG recording, but
+they have no task and they belong to every MEG recording of their subject
+or session, whatever acquisition the recording names. A `blood` table, on
+the other hand, is a recording in its own right, the radioactivity sampled
+from the blood during a PET scan, and it is also a companion of that scan.
+
 ```pycon
 >>> for path in run1.companions:
 ...     print(path.relative_to(ds))
@@ -112,6 +161,56 @@ The order is the order of closeness. Files in the data file's own directory
 come first, then those in its parent, and so on up to the root, and the files
 of one directory are sorted by name.
 
+A MEG recording lists the files of its set-up next to the description of
+its channels, and a PET scan its blood recordings, with the JSON file that
+describes one of them.
+
+```pycon
+>>> for path in ds["sub-01"]["meg"]["sub-01_task-auditory_meg.fif"].companions:
+...     print(path.relative_to(ds))
+sub-01/meg/sub-01_acq-calibration_meg.dat
+sub-01/meg/sub-01_acq-crosstalk_meg.fif
+sub-01/meg/sub-01_headshape.pos
+sub-01/meg/sub-01_photo.jpg
+sub-01/meg/sub-01_task-auditory_channels.tsv
+sub-01/sub-01_scans.tsv
+>>> pet = ds["sub-01"]["pet"]["sub-01_trc-FDG_pet.nii.gz"]
+>>> for path in pet.companions:
+...     print(path.relative_to(ds))
+sub-01/pet/sub-01_trc-FDG_recording-autosampler_blood.tsv
+sub-01/pet/sub-01_trc-FDG_recording-manual_blood.json
+sub-01/pet/sub-01_trc-FDG_recording-manual_blood.tsv
+sub-01/sub-01_scans.tsv
+```
+
+A photo, a head shape or a set of markers may have an acquisition label
+that names what it shows rather than how a recording was acquired: the
+landmark a photo was taken of (`acq-NAS`, the nasion), the kind of
+digitisation of a head shape (`acq-HEAD`), or markers measured before or
+after the recording (`acq-pre`, `acq-post`, as MNE-BIDS writes them). So
+such a file is matched by its label only when one of the recordings it
+would describe has the same label. When none has it, the label describes the
+file itself, and the file applies to every recording it matches on its
+other entities. Here no recording has `acq-NAS`, so the photo of the nasion
+comes along with both recordings, while the head shape labelled `acq-a`
+belongs to the recording of that acquisition alone.
+
+```pycon
+>>> from brainfilter import BidsFilter
+>>> listing = [
+...     "dataset_description.json",
+...     "sub-01/meg/sub-01_task-rest_acq-a_meg.fif",
+...     "sub-01/meg/sub-01_task-rest_acq-b_meg.fif",
+...     "sub-01/meg/sub-01_acq-NAS_photo.jpg",
+...     "sub-01/meg/sub-01_acq-a_headshape.pos",
+... ]
+>>> for path in BidsFilter(acq="b").select(listing):
+...     print(path)
+dataset_description.json
+sub-01/meg/sub-01_acq-NAS_photo.jpg
+sub-01/meg/sub-01_task-rest_acq-b_meg.fif
+```
+
 A diffusion image has its gradient tables among its companions.
 
 ```pycon
@@ -122,11 +221,16 @@ sub-01/dwi/sub-01_dwi.bvec
 sub-01/sub-01_scans.tsv
 ```
 
-Only a data file has companions. A sidecar, a table or a directory has none,
-and its `companions` is an empty tuple.
+Only a recording has companions. A sidecar, a table, a photo or a directory
+has none, and its `companions` is an empty tuple. A MEG crosstalk file has
+none either, since it describes recordings rather than being one. A filter
+selects such a file when it names it, as the next section shows, but it
+brings only its own sidecars along, never the recordings it describes.
 
 ```pycon
 >>> func["sub-01_task-rest_run-1_events.tsv"].companions
+()
+>>> ds["sub-01"]["meg"]["sub-01_acq-crosstalk_meg.fif"].companions
 ()
 ```
 
@@ -151,10 +255,58 @@ sub-01/sub-01_scans.tsv
 task-rest_events.json
 ```
 
-A single-band reference image (`_sbref`) or an M0 scan of an ASL series
-(`_m0scan`) is an image in its own right, so it is not a companion of the run
-or the series it was acquired with. A filter selects it by its suffix, and
-`companion`, below, finds the one that belongs to an image.
+The files of a MEG set-up come along with the recordings they describe in
+the same way, so selecting the MEG recordings brings them along.
+
+```pycon
+>>> for path in ds.filter(datatypes="meg"):
+...     print(path.relative_to(ds))
+dataset_description.json
+sub-01/meg/sub-01_acq-calibration_meg.dat
+sub-01/meg/sub-01_acq-crosstalk_meg.fif
+sub-01/meg/sub-01_headshape.pos
+sub-01/meg/sub-01_photo.jpg
+sub-01/meg/sub-01_task-auditory_channels.tsv
+sub-01/meg/sub-01_task-auditory_meg.fif
+sub-01/sub-01_scans.tsv
+```
+
+A companion is also a file in its own right, and a filter that names it
+selects it, with its own sidecars and without the recordings it describes.
+Asking for the crosstalk file by its acquisition label keeps that file
+alone, and asking for the events keeps the events of both runs.
+
+```pycon
+>>> [path.name for path in ds.filter(acq="crosstalk")]
+['dataset_description.json', 'sub-01_acq-crosstalk_meg.fif']
+>>> for path in ds.filter(suffixes="events"):
+...     print(path.relative_to(ds))
+dataset_description.json
+sub-01/func/sub-01_task-rest_run-1_events.tsv
+sub-01/func/sub-01_task-rest_run-2_events.tsv
+task-rest_events.json
+```
+
+The `events.json` at the root comes along because it is the sidecar of both
+events files, while the runs they describe stay behind. The same holds for a
+blood recording, which a filter keeps with its PET scan and also selects by
+its own suffix, without the scan.
+
+```pycon
+>>> for path in ds.filter(suffixes="blood"):
+...     print(path.relative_to(ds))
+dataset_description.json
+sub-01/pet/sub-01_trc-FDG_recording-autosampler_blood.tsv
+sub-01/pet/sub-01_trc-FDG_recording-manual_blood.json
+sub-01/pet/sub-01_trc-FDG_recording-manual_blood.tsv
+sub-01/sub-01_scans.tsv
+```
+
+A single-band reference image (`_sbref`), an M0 scan of an ASL series
+(`_m0scan`) or the reference scan of a spectroscopy scan (`_mrsref`) is an
+image in its own right, so it is not a companion of the image it was
+acquired with. A filter selects it by its suffix, and `companion`, below,
+finds the one that belongs to an image.
 
 ## One companion at a time
 
@@ -186,8 +338,21 @@ file is one of the recording's own sidecars.
 ```
 
 The gradient tables of a diffusion image are named by their extension,
-`bval` and `bvec`, since they share the image's suffix. A single-band
-reference and an M0 scan are named by their suffix, `sbref` and `m0scan`.
+`bval` and `bvec`, since they share the image's suffix, and the two system
+files of a MEG recording by their acquisition label, `calibration` and
+`crosstalk`. A photo, a head shape or a set of markers is named by its
+suffix like any other companion.
+
+```pycon
+>>> meg = ds["sub-01"]["meg"]["sub-01_task-auditory_meg.fif"]
+>>> meg.companion("crosstalk").name
+'sub-01_acq-crosstalk_meg.fif'
+>>> meg.companion("headshape").name
+'sub-01_headshape.pos'
+```
+
+A single-band reference, an M0 scan and the reference scan of a
+spectroscopy scan are named by their suffix, `sbref`, `m0scan` and `mrsref`.
 They are not companions, so they are not inherited: each is the image in
 the same directory whose name has the same entities, so the second run, which
 was acquired without one, has none. A run number is compared by value, so
@@ -201,6 +366,8 @@ was acquired without one, has none. A run number is compared by value, so
 'sub-01_task-rest_run-1_sbref.nii.gz'
 >>> print(func["sub-01_task-rest_run-2_bold.nii.gz"].companion("sbref"))
 None
+>>> ds["sub-01"]["mrs"]["sub-01_svs.nii.gz"].companion("mrsref").name
+'sub-01_mrsref.nii.gz'
 ```
 
 ### Shortcuts
@@ -255,6 +422,14 @@ a file without the entity.
 ```pycon
 >>> eeg.companion("electrodes", space="EEGLAB").name
 'sub-01_space-EEGLAB_electrodes.tsv'
+```
+
+Blood recordings are told apart in the same way, by the `recording` entity
+that names how each was sampled.
+
+```pycon
+>>> pet.companion("blood", recording="manual").name
+'sub-01_trc-FDG_recording-manual_blood.tsv'
 ```
 
 ## Fieldmaps

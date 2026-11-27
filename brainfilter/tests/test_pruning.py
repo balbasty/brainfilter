@@ -217,3 +217,34 @@ async def test_awalk_matches_walk_when_pruning(store, async_memory, monkeypatch)
     registry = sys.modules["fsspec.registry"]._registry
     monkeypatch.setitem(registry, "memory", MemoryFileSystem)
     assert results == [_rel(f.walk(ROOT), BidsPath(ROOT)) for f in PRUNING]
+
+
+# A headshape of the subject named by its `acq` label: whether it applies to
+# the recording of session 2 depends on the recording of session 1, which
+# has that label.
+TAGGED = {
+    "dataset_description.json": "{}",
+    "sub-01/sub-01_acq-a_headshape.pos": "x",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-x_acq-a_meg.fif": "x",
+    "sub-01/ses-2/meg/sub-01_ses-2_task-x_meg.fif": "x",
+}
+
+
+@pytest.mark.parametrize("acq", ["a", "b"])
+def test_a_pruned_folder_is_listed_when_an_acq_tag_depends_on_it(
+    store, listed_dirs, acq
+):
+    root = BidsPath("memory://tagged", mode="w")
+    files = {k.replace("acq-a_meg", f"acq-{acq}_meg"): v
+             for k, v in TAGGED.items()}
+    for rel, content in files.items():
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text(content)
+    f = BidsFilter(sessions="2")
+    listed_dirs.clear()
+    kept = _rel(f.walk("memory://tagged"), root)
+    assert kept == _rel(f.select([root / r for r in files], root=root), root)
+    # with acq-a in session 1, the headshape is that recording's alone
+    assert ("sub-01/sub-01_acq-a_headshape.pos" in kept) is (acq == "b")
+    # either way, the walk has to look into session 1 to tell
+    assert "/tagged/sub-01/ses-1/meg" in listed_dirs
