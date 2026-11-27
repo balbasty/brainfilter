@@ -12,8 +12,9 @@ These mixins give `BidsPath` and its file classes a dict-like surface:
   first, up to the dataset root (or, with no dataset root above it, those
   in its own directory), and its `sidecar` is their merged content;
 - a data file's `companions` are the other files that apply to it under
-  the same rules (`events.tsv`, `physio.tsv.gz`, a `.bval`, ...), and its
-  `fieldmaps` the fieldmaps of its subject meant for it.
+  the same rules (`events.tsv`, `physio.tsv.gz`, a `.bval`, ...),
+  `companion(name)` one of them (or an image paired with it, `sbref`,
+  `m0scan`), and its `fieldmaps` the fieldmaps of its subject meant for it.
 
 On a writable path, `sidecar[key] = value`, `del sidecar[key]`,
 `sidecar.update()`, `table[column] = values`, `del table[column]`, any
@@ -65,6 +66,8 @@ from brainfilter import _content
 from brainfilter import transaction as _transaction
 from brainfilter._associated import (
     DATASET_DESCRIPTION,
+    check_companion,
+    search_companion,
     search_companions,
     search_fieldmaps,
     search_sidecars,
@@ -822,7 +825,8 @@ class TreeMixin:
         `space` or `recording` entity that this file lacks. These are the
         files a `BidsFilter` keeps with this file, besides its sidecars. A
         single-band reference (`_sbref`) or an M0 scan (`_m0scan`) is a
-        data file of its own, not a companion.
+        data file of its own, not a companion; `companion("sbref")` finds
+        it.
 
         Files in a nearer directory come first, and within one directory
         they are sorted by name. A file that is not a data file (a sidecar,
@@ -830,6 +834,56 @@ class TreeMixin:
         new files count. The directories are listed each time this is read.
         """
         return self._answer(search_companions(self))
+
+    def companion(self, name: str, /, **entities: object) -> Self | None:
+        """Return one companion of this data file by name, or `None`.
+
+        ```python
+        dwi.companion("bval")                   # the .bval that applies
+        bold.companion("events")                # its events.tsv
+        eeg.companion("electrodes", space="CapTrak")
+        bold.companion("sbref")                 # its single-band reference
+        ```
+
+        It is the file of `companions` with that suffix (or, for `bval`
+        and `bvec`, that extension) in the nearest directory that holds
+        one, so a file inherited from higher up is found too. A table or a
+        recording is the file itself (`events.tsv`, `physio.tsv.gz`), not
+        the JSON that describes it, which is among its own `sidecars`; a
+        `coordsystem` is a JSON file.
+
+        An `sbref` or an `m0scan` is an image of its own, not a companion:
+        it is the `.nii.gz` (or `.nii`) image in this file's directory with
+        the same entities (index entities such as `run` compared by
+        number, so `run-1` is `run-01`) and that suffix.
+
+        `None` when there is no such file, and for a file that is not a
+        data file. Inside a transaction, new files count.
+
+        Parameters
+        ----------
+        name
+            A companion suffix (`events`, `physio`, `stim`, `physioevents`,
+            `channels`, `electrodes`, `coordsystem`, `optodes`,
+            `aslcontext`, `asllabeling`, `scans`, `sessions`), a gradient
+            table (`bval`, `bvec`), or an image paired with this one
+            (`sbref` with a `bold`, `cbv`, `phase` or `dwi` image, `m0scan`
+            with an `asl` series).
+        **entities
+            Entities the file must have, `key=label` (index entities
+            compared by number); a label of `None` asks for a file without
+            that entity.
+
+        Raises
+        ------
+        ValueError
+            If `name` is not one of these, or if the nearest directory
+            that holds such a file holds more than one (two `electrodes`
+            files in different spaces): pass an entity that tells them
+            apart.
+        """
+        entities = check_companion(name, entities)
+        return self._answer(search_companion(self, name, entities))
 
     @property
     def fieldmaps(self) -> tuple[Self, ...]:
@@ -1428,6 +1482,20 @@ class AsyncTreeMixin:
         `BidsPath.companions`.
         """
         return _Deferred(lambda: self._answer(search_companions(self)))
+
+    def companion(
+        self, name: str, /, **entities: object
+    ) -> Awaitable[Self | None]:
+        """Return one companion of this data file by name, or `None`.
+
+        Awaitable: `await bold.companion("events")`. The same rules as
+        `BidsPath.companion`; an unknown `name` raises at once, before
+        anything is awaited.
+        """
+        entities = check_companion(name, entities)
+        return _Deferred(
+            lambda: self._answer(search_companion(self, name, entities))
+        )
 
     @property
     def fieldmaps(self) -> Awaitable[tuple[Self, ...]]:

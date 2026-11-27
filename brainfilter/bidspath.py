@@ -19,8 +19,9 @@ Every BIDS component is computed from the name when asked for, never
 stored, so a derived path (`/`, `parent`, `with_name`, ...) re-parses its
 own name. The class of a path is picked from its name and its parent's name
 as well (`participants.tsv` is a `BidsParticipantsFile`, a `.json` file a
-`BidsSidecarFile`, ...), without touching the filesystem, so a remote path
-or one that does not exist yet gets the same class as a local one.
+`BidsSidecarFile`, a `_dwi.nii.gz` image a `BidsDwiFile`, ...), without
+touching the filesystem, so a remote path or one that does not exist yet gets
+the same class as a local one.
 
 A path is read-only by default: a write to a file, and every `Path` member
 that changes the filesystem (`write_text`, `mkdir`, `unlink`, ...), raise
@@ -86,14 +87,19 @@ from brainfilter._tree import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
     from typing_extensions import Self
 
 __all__ = [
     "DATATYPES",
     "METADATA_EXTENSIONS",
+    "AsyncBidsAslFile",
+    "AsyncBidsBoldFile",
     "AsyncBidsCodeDirectory",
     "AsyncBidsDatasetDescriptionFile",
     "AsyncBidsDirectory",
+    "AsyncBidsDwiFile",
     "AsyncBidsFile",
     "AsyncBidsJSONFile",
     "AsyncBidsParticipantsFile",
@@ -110,9 +116,12 @@ __all__ = [
     "AsyncBidsSidecarFile",
     "AsyncBidsTSVFile",
     "AsyncBidsTableSidecarFile",
+    "BidsAslFile",
+    "BidsBoldFile",
     "BidsCodeDirectory",
     "BidsDatasetDescriptionFile",
     "BidsDirectory",
+    "BidsDwiFile",
     "BidsEntities",
     "BidsFile",
     "BidsJSONFile",
@@ -132,9 +141,12 @@ __all__ = [
     "BidsSidecarFile",
     "BidsTSVFile",
     "BidsTableSidecarFile",
+    "PureBidsAslFile",
+    "PureBidsBoldFile",
     "PureBidsCodeDirectory",
     "PureBidsDatasetDescriptionFile",
     "PureBidsDirectory",
+    "PureBidsDwiFile",
     "PureBidsFile",
     "PureBidsJSONFile",
     "PureBidsParticipantsFile",
@@ -794,6 +806,12 @@ class BidsPath(TreeMixin, BidsPathMixin, Path):
     (`events.tsv`, `physio.tsv.gz`, a `.bval`, ...), nearest first, and its
     `fieldmaps` the fieldmap images meant to correct it, named by their
     `IntendedFor` or matched by `B0FieldIdentifier`, sorted by path.
+    `companion(name)` gives one companion by its suffix, or the image
+    paired with this one (`dwi.companion("bval")`,
+    `bold.companion("sbref")`), and a diffusion image, a functional run and
+    an ASL series have shortcuts to theirs: `dwi.bval`, `dwi.bvec` and
+    `dwi.sbref`; `bold.events` and `bold.sbref`; `asl.aslcontext` and
+    `asl.m0scan`. Other files have none of these attributes.
 
     `dataset // "sub-01_ses-1_T1w.nii.gz"` is the path where BIDS puts a
     file of that name (`dataset/sub-01/ses-1/anat/...`), while `/` joins a
@@ -930,6 +948,100 @@ class BidsPhenotypeSidecarFile(BidsTableSidecarFile):
 
     __slots__ = ()
     _role = "phenotype_sidecar"
+
+
+class BidsDwiFile(BidsFile):
+    """A BIDS diffusion image (`*_dwi.nii.gz`).
+
+    Its gradient tables and its single-band reference are a property away:
+    `dwi.bval`, `dwi.bvec` and `dwi.sbref` (see `companion`).
+    """
+
+    __slots__ = ()
+    _role = "dwi"
+
+    @property
+    def bval(self) -> Self | None:
+        """The `.bval` file that applies to this image, or `None`.
+
+        The same file as `companion("bval")`: the nearest one, so a
+        `.bval` shared from higher up is found too.
+        """
+        return self.companion("bval")
+
+    @property
+    def bvec(self) -> Self | None:
+        """The `.bvec` file that applies to this image, or `None`.
+
+        The same file as `companion("bvec")`.
+        """
+        return self.companion("bvec")
+
+    @property
+    def sbref(self) -> Self | None:
+        """The single-band reference image of this image, or `None`.
+
+        The same file as `companion("sbref")`: the `_sbref` image in this
+        directory with the same entities.
+        """
+        return self.companion("sbref")
+
+
+class BidsBoldFile(BidsFile):
+    """A BIDS functional image (`*_bold.nii.gz`).
+
+    Its events and its single-band reference are a property away:
+    `bold.events` and `bold.sbref` (see `companion`).
+    """
+
+    __slots__ = ()
+    _role = "bold"
+
+    @property
+    def events(self) -> Self | None:
+        """The `events.tsv` file that applies to this run, or `None`.
+
+        The same file as `companion("events")`: the nearest one, so the
+        events of a task shared from higher up are found too.
+        """
+        return self.companion("events")
+
+    @property
+    def sbref(self) -> Self | None:
+        """The single-band reference image of this run, or `None`.
+
+        The same file as `companion("sbref")`: the `_sbref` image in this
+        directory with the same entities.
+        """
+        return self.companion("sbref")
+
+
+class BidsAslFile(BidsFile):
+    """A BIDS arterial spin labelling series (`*_asl.nii.gz`).
+
+    Its volume types and its M0 scan are a property away:
+    `asl.aslcontext` and `asl.m0scan` (see `companion`).
+    """
+
+    __slots__ = ()
+    _role = "asl"
+
+    @property
+    def aslcontext(self) -> Self | None:
+        """The `aslcontext.tsv` file that applies to this series, or `None`.
+
+        The same file as `companion("aslcontext")`.
+        """
+        return self.companion("aslcontext")
+
+    @property
+    def m0scan(self) -> Self | None:
+        """The M0 scan of this series, or `None`.
+
+        The same file as `companion("m0scan")`: the `_m0scan` image in this
+        directory with the same entities.
+        """
+        return self.companion("m0scan")
 
 
 _seal(BidsPath)
@@ -1072,6 +1184,27 @@ class PureBidsPhenotypeSidecarFile(PureBidsTableSidecarFile):
     _role = "phenotype_sidecar"
 
 
+class PureBidsDwiFile(PureBidsFile):
+    """A BIDS diffusion image name (`*_dwi.nii.gz`)."""
+
+    __slots__ = ()
+    _role = "dwi"
+
+
+class PureBidsBoldFile(PureBidsFile):
+    """A BIDS functional image name (`*_bold.nii.gz`)."""
+
+    __slots__ = ()
+    _role = "bold"
+
+
+class PureBidsAslFile(PureBidsFile):
+    """A BIDS arterial spin labelling series name (`*_asl.nii.gz`)."""
+
+    __slots__ = ()
+    _role = "asl"
+
+
 _seal(PureBidsPath)
 
 
@@ -1089,8 +1222,10 @@ class AsyncBidsPath(AsyncTreeMixin, BidsPathMixin, AsyncPath):
     rest is awaited under its sync name (`await dataset.keys()`,
     `await sidecar.as_dict()`, `await table.as_list()`,
     `await data.sidecars`, `await data.sidecar`, `await data.companions`,
-    `await data.fieldmaps`), and iteration is `async for`. Writes are kept
-    until the end of `async with dataset:`.
+    `await data.fieldmaps`, `await data.companion("events")`, and the
+    shortcuts `await dwi.bval`, `await bold.events`, `await asl.m0scan`,
+    ...), and iteration is `async for`. Writes are kept until the end of
+    `async with dataset:`.
     """
 
     __slots__ = ("_mode",)
@@ -1216,6 +1351,94 @@ class AsyncBidsPhenotypeSidecarFile(AsyncBidsTableSidecarFile):
 
     __slots__ = ()
     _role = "phenotype_sidecar"
+
+
+class AsyncBidsDwiFile(AsyncBidsFile):
+    """A BIDS diffusion image (`*_dwi.nii.gz`), with coroutine I/O.
+
+    `await dwi.bval`, `await dwi.bvec` and `await dwi.sbref`, as on
+    `BidsDwiFile`.
+    """
+
+    __slots__ = ()
+    _role = "dwi"
+
+    @property
+    def bval(self) -> Awaitable[Self | None]:
+        """The `.bval` file that applies to this image, or `None`.
+
+        Awaitable: `await dwi.bval`, as `await dwi.companion("bval")`.
+        """
+        return self.companion("bval")
+
+    @property
+    def bvec(self) -> Awaitable[Self | None]:
+        """The `.bvec` file that applies to this image, or `None`.
+
+        Awaitable: `await dwi.bvec`, as `await dwi.companion("bvec")`.
+        """
+        return self.companion("bvec")
+
+    @property
+    def sbref(self) -> Awaitable[Self | None]:
+        """The single-band reference image of this image, or `None`.
+
+        Awaitable: `await dwi.sbref`, as `await dwi.companion("sbref")`.
+        """
+        return self.companion("sbref")
+
+
+class AsyncBidsBoldFile(AsyncBidsFile):
+    """A BIDS functional image (`*_bold.nii.gz`), with coroutine I/O.
+
+    `await bold.events` and `await bold.sbref`, as on `BidsBoldFile`.
+    """
+
+    __slots__ = ()
+    _role = "bold"
+
+    @property
+    def events(self) -> Awaitable[Self | None]:
+        """The `events.tsv` file that applies to this run, or `None`.
+
+        Awaitable: `await bold.events`, as `await bold.companion("events")`.
+        """
+        return self.companion("events")
+
+    @property
+    def sbref(self) -> Awaitable[Self | None]:
+        """The single-band reference image of this run, or `None`.
+
+        Awaitable: `await bold.sbref`, as `await bold.companion("sbref")`.
+        """
+        return self.companion("sbref")
+
+
+class AsyncBidsAslFile(AsyncBidsFile):
+    """A BIDS arterial spin labelling series (`*_asl.nii.gz`), with coroutine I/O.
+
+    `await asl.aslcontext` and `await asl.m0scan`, as on `BidsAslFile`.
+    """
+
+    __slots__ = ()
+    _role = "asl"
+
+    @property
+    def aslcontext(self) -> Awaitable[Self | None]:
+        """The `aslcontext.tsv` file that applies to this series, or `None`.
+
+        Awaitable: `await asl.aslcontext`, as
+        `await asl.companion("aslcontext")`.
+        """
+        return self.companion("aslcontext")
+
+    @property
+    def m0scan(self) -> Awaitable[Self | None]:
+        """The M0 scan of this series, or `None`.
+
+        Awaitable: `await asl.m0scan`, as `await asl.companion("m0scan")`.
+        """
+        return self.companion("m0scan")
 
 
 _seal(AsyncBidsPath)

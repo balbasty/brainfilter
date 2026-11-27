@@ -12,6 +12,8 @@ back, so that one search serves the sync and the async surfaces (see
   under the same inheritance rules, as `BidsFilter` keeps them: its
   companion metadata (`events.tsv`, `channels.tsv`, `scans.tsv`, a `.bval`,
   ...) and the companion recordings that apply to it (`physio.tsv.gz`).
+- `search_companion`: one of them by name (`events`, `bval`), or an image
+  paired with the data file (`sbref`, `m0scan`).
 - `search_fieldmaps`: the fieldmaps of the subject that name a data file,
   through `IntendedFor` or `B0FieldIdentifier`/`B0FieldSource`.
 """
@@ -22,15 +24,23 @@ from collections.abc import Generator, Iterable
 from typing import Any, TypeVar
 
 from brainfilter._names import (
+    COMPANION_SUFFIXES,
+    IMAGE_EXTENSIONS,
+    JSON_COMPANIONS,
+    METADATA_EXTENSIONS,
+    PAIRED_IMAGES,
     applies_to,
+    check_entity,
     data_directory,
     is_companion_recording,
     is_metadata,
     parse_name,
+    same_label,
 )
 
-__all__ = ["DATASET_DESCRIPTION", "search_companions", "search_fieldmaps",
-           "search_sidecars"]
+__all__ = ["DATASET_DESCRIPTION", "check_companion", "companion_names",
+           "search_companion", "search_companions", "search_fieldmaps",
+           "search_paired", "search_sidecars"]
 
 DATASET_DESCRIPTION = "dataset_description.json"
 
@@ -123,8 +133,18 @@ def search_companions(path: _P) -> _Search:
     `BidsFilter` keeps along with `path`, but its sidecars. Nearer
     directories first, by name within one.
     """
+    levels = yield from _companion_levels(path)
+    return tuple(file for level in levels for file in level)
+
+
+def _companion_levels(path: _P) -> _Search:
+    """Return the companions of `path` per directory, nearest first.
+
+    A list of lists, one per directory the inheritance reaches that holds
+    a companion, each sorted by name (see `search_companions`).
+    """
     if not _is_data_file(path):
-        return ()
+        return []
     levels, data_rel, _ = yield from _levels(path)
     found = []
     for directory, names, rel_dir in levels:
@@ -143,8 +163,135 @@ def search_companions(path: _P) -> _Search:
             meta_rel = f"{rel_dir}/{name}".lstrip("/")
             if applies_to(meta_rel, data_rel):
                 level.append(name)
-        found.extend(directory / name for name in sorted(level))
-    return tuple(found)
+        if level:
+            found.append([directory / name for name in sorted(level)])
+    return found
+
+
+# -- one companion -------------------------------------------------------------
+
+def companion_names() -> list[str]:
+    """Return every name `companion` takes, sorted."""
+    extensions = {e[1:] for e in METADATA_EXTENSIONS} - {"json", "tsv"}
+    return sorted(COMPANION_SUFFIXES | extensions | set(PAIRED_IMAGES))
+
+
+def check_companion(name: object, entities: dict) -> dict[str, str | None]:
+    """Check a `companion` request; return its entities as strings.
+
+    `name` must be one of `companion_names()`, and each entity a valid
+    `key-label` (a label of `None` asks for a file without that entity).
+    """
+    names = companion_names()
+    if name not in names:
+        raise ValueError(
+            f"unknown companion {name!r}: name one of {', '.join(names)}"
+        )
+    checked: dict[str, str | None] = {}
+    for key, label in entities.items():
+        if label is None:
+            checked[str(key)] = None
+        else:
+            key, label = check_entity(key, label)
+            checked[key] = label
+    return checked
+
+
+def _wanted(name: str, path: Any, entities: dict) -> Any:  # noqa: ANN401
+    """Return a test of whether a file name is the `name` companion of `path`."""
+    extension = f".{name}"
+
+    def test(file: str) -> bool:
+        parsed = parse_name(file)
+        if name in COMPANION_SUFFIXES:
+            if parsed.suffix != name:
+                return False
+            is_json = parsed.extension == ".json"
+            if is_json != (name in JSON_COMPANIONS):
+                return False
+        elif parsed.suffix != path.suffix or parsed.extension != extension:
+            return False
+        return _has_entities(parsed.entities, entities)
+
+    return test
+
+
+def _has_entities(have: dict, entities: dict) -> bool:
+    """Whether a name's entities have these labels (`None`: not the entity)."""
+    for key, label in entities.items():
+        other = have.get(key)
+        if label is None:
+            if other is not None:
+                return False
+        elif other is None or not same_label(key, other, label):
+            return False
+    return True
+
+
+def _ambiguous(path: Any, name: str, files: list) -> ValueError:  # noqa: ANN401
+    """Build the error for several `name` companions in one directory."""
+    parsed = [parse_name(file.name).entities for file in files]
+    keys = sorted({key for entities in parsed for key in entities})
+    hint = "they differ only in their extension"
+    for key in keys:
+        labels = [entities.get(key) for entities in parsed]
+        if len(set(labels)) > 1:
+            label = next(label for label in labels if label is not None)
+            hint = (
+                "name the one you want by an entity, e.g. "
+                f"companion({name!r}, {key}={label!r})"
+            )
+            break
+    listed = ", ".join(file.name for file in files)
+    return ValueError(
+        f"{path.name} has {len(files)} {name!r} companions in "
+        f"{str(files[0].parent)!r}: {listed}; {hint}"
+    )
+
+
+def search_companion(path: _P, name: str, entities: dict) -> _Search:
+    """Find one companion of a data file (`TreeMixin.companion`), or `None`.
+
+    `name` and `entities` are checked by `check_companion`. A paired image
+    (`sbref`, `m0scan`) is looked for by `search_paired`; any other name in
+    `companions`: the files of the nearest directory that holds one, which
+    must hold only one.
+    """
+    if name in PAIRED_IMAGES:
+        found = yield from search_paired(path, name, entities)
+    else:
+        test = _wanted(name, path, entities)
+        found = []
+        for level in (yield from _companion_levels(path)):
+            found = [file for file in level if test(file.name)]
+            if found:
+                break
+    if len(found) > 1:
+        raise _ambiguous(path, name, found)
+    return found[0] if found else None
+
+
+def search_paired(path: _P, name: str, entities: dict) -> _Search:
+    """Find the `name` images paired with a data file (`sbref`, `m0scan`).
+
+    Those in its own directory with the same entities (index entities
+    compared by number) and an image extension, sorted by name; none when
+    the schema pairs no `name` image with this file's suffix.
+    """
+    if path.suffix not in PAIRED_IMAGES[name] or not _is_data_file(path):
+        return []
+    own = parse_name(path.name).entities
+    found = []
+    for file in sorted((yield from _list(path.parent))):
+        parsed = parse_name(file)
+        if (
+            parsed.suffix == name and parsed.extension in IMAGE_EXTENSIONS
+            and set(parsed.entities) == set(own)
+            and _has_entities(parsed.entities, own)
+            and _has_entities(parsed.entities, entities)
+        ):
+            found.append(path.parent / file)
+    return found
 
 
 # -- fieldmaps ---------------------------------------------------------------------

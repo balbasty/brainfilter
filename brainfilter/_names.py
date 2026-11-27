@@ -186,6 +186,28 @@ COMPANION_SUFFIXES = frozenset({
 # recording, so a data file that lacks one is still described by it.
 COMPANION_ONLY_ENTITIES = frozenset({"space", "recording"})
 
+# Companion suffixes whose file is the JSON itself (`*_coordsystem.json`).
+# Every other companion is a table or a recording, and its `.json` describes
+# that file: `*_events.json` documents the columns of `*_events.tsv`.
+JSON_COMPANIONS = frozenset({"coordsystem"})
+
+# Images acquired with a data image and paired with it by name: the same
+# directory, the same entities, another suffix. In `rules.files.raw` of the
+# official BIDS 1.11.2 schema, `sbref` sits with the `func` images (`bold`,
+# `cbv`, `phase`) and with `dwi`, and `m0scan` with `asl` in `perf`. Each is
+# a data file of its own, so it is not one of the image's companions.
+PAIRED_IMAGES: dict[str, frozenset[str]] = {
+    "sbref": frozenset({"bold", "cbv", "phase", "dwi"}),
+    "m0scan": frozenset({"asl"}),
+}
+
+# Extensions of the paired images (`objects.extensions` of the schema).
+IMAGE_EXTENSIONS = (".nii.gz", ".nii")
+
+# Data suffixes whose files have a class of their own, with shortcuts to
+# their companions (`dwi.bval`, `bold.events`, `asl.m0scan`).
+DATA_ROLES = frozenset({"dwi", "bold", "asl"})
+
 # Extensions of data "files" that are directories (`sub-01_meg.ds/`): those
 # ending in `/` in `objects.extensions` of the official BIDS 1.11.2 schema.
 # The schema's bare `/` (a MEG directory without an extension) is recognised
@@ -411,6 +433,12 @@ def role_of(name: str, parent_name: str) -> str | None:
         return "sidecar"
     if ext == ".tsv":
         return "table"
+    if (
+        parsed.suffix in DATA_ROLES and parsed.extension
+        and not is_metadata(parsed.suffix, ext)
+        and ext not in DIRECTORY_EXTENSIONS
+    ):
+        return parsed.suffix    # a data file: `sub-01_dwi.nii.gz`
     return None
 
 
