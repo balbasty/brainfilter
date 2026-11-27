@@ -10,6 +10,7 @@ nav = [
     {"Filtering a local dataset" = "tutorials/filter-local.md"},
     {"Filtering a remote dataset (S3 / OpenNeuro)" = "tutorials/filter-remote.md"},
     {"Reading sidecars and tables" = "tutorials/read-metadata.md"},
+    {"Companions and fieldmaps" = "tutorials/associated-files.md"},
     {"Editing a dataset safely" = "tutorials/edit-dataset.md"},
     {"Async access" = "tutorials/async.md"},
   ]},

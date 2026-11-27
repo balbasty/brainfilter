@@ -10,7 +10,10 @@ These mixins give `BidsPath` and its file classes a dict-like surface:
   rows) and `table.as_dataframe()` (pandas) load it;
 - a file's `sidecars` are the JSON sidecars that apply to it, nearest
   first, up to the dataset root (or, with no dataset root above it, those
-  in its own directory), and its `sidecar` is their merged content.
+  in its own directory), and its `sidecar` is their merged content;
+- a data file's `companions` are the other files that apply to it under
+  the same rules (`events.tsv`, `physio.tsv.gz`, a `.bval`, ...), and its
+  `fieldmaps` the fieldmaps of its subject meant for it.
 
 On a writable path, `sidecar[key] = value`, `del sidecar[key]`,
 `sidecar.update()`, `table[column] = values`, `del table[column]`, any
@@ -35,8 +38,8 @@ Python has no awaitable indexing or `in`, so a directory's `ds[name]` is
 `await f.delete(key)` and `key in f` is `await f.has(key)`; every other
 method keeps its name and is awaited (`await ds.keys()`,
 `await sidecar.as_dict()`, `await data.sidecars`), and iteration is
-`async for`. Both surfaces share the parsing and the sidecar search below;
-only the reads and writes differ.
+`async for`. Both surfaces share the parsing below and the searches of
+`brainfilter._associated`; only the reads and writes differ.
 """
 from __future__ import annotations
 
@@ -56,13 +59,18 @@ from collections.abc import (
     ValuesView,
 )
 from datetime import date, datetime, time
-from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, NoReturn
 
 from brainfilter import _content
 from brainfilter import transaction as _transaction
+from brainfilter._associated import (
+    DATASET_DESCRIPTION,
+    search_companions,
+    search_fieldmaps,
+    search_sidecars,
+)
 from brainfilter._content import Table, json_object
 from brainfilter._mode import require_writable
-from brainfilter._names import applies_to, parse_name
 from brainfilter.transaction import (
     AsyncTransaction,
     Transaction,
@@ -86,16 +94,11 @@ __all__ = ["DATASET_DESCRIPTION", "AsyncJSONContentMixin",
            "JSONContentMixin", "LiveColumn", "SidecarChain",
            "TSVContentMixin", "Table", "TreeMixin"]
 
-DATASET_DESCRIPTION = "dataset_description.json"
-
 # Files are read as UTF-8, skipping a byte-order mark; written without one.
 _ENCODING = "utf-8-sig"
 
 # What a write is said to do in a read-only error.
 _WRITE = "write to"
-
-# A path of either family (sync or async).
-_P = TypeVar("_P")
 
 
 def _no_delete(obj: object) -> TypeError:
@@ -450,50 +453,6 @@ def _with_pending(
     return sorted(listed, key=lambda child: child.name)
 
 
-def _search_sidecars(path: _P) -> Generator[_P, set[str], tuple[_P, ...]]:
-    """Find the sidecars of `path`, nearest first (see `TreeMixin.sidecars`).
-
-    The search lists one directory at a time and does no I/O itself: it
-    yields each directory to list and is sent back the set of its child
-    names, so one search serves the sync and the async surfaces.
-    """
-    if path.suffix is None:
-        return ()
-    # Each directory is listed once, in one walk up; `levels` runs from the
-    # file's own directory up to the root.
-    levels: list[tuple[_P, set[str]]] = []
-    for directory in path.parents:
-        names = yield directory
-        levels.append((directory, names))
-        if DATASET_DESCRIPTION in names:
-            break
-    else:
-        # No dataset root: only the file's own directory counts. Its
-        # listing is the first one, so this costs no more I/O.
-        levels = levels[:1]
-
-    # Paths relative to the root, as `applies_to` expects.
-    dirs = [d.name for d, _ in levels[:-1]]
-    rel_dirs = ["/".join(reversed(dirs[i:])) for i in range(len(dirs))]
-    rel_dirs.append("")
-    data_rel = f"{rel_dirs[0]}/{path.name}".lstrip("/")
-
-    found = []
-    for (directory, names), rel_dir in zip(levels, rel_dirs):
-        level = []
-        for name in names:
-            parsed = parse_name(name)
-            if parsed.extension != ".json" or parsed.suffix is None:
-                continue
-            if directory == path.parent and name == path.name:
-                continue
-            meta_rel = f"{rel_dir}/{name}".lstrip("/")
-            if applies_to(meta_rel, data_rel, companions=False):
-                level.append((-len(parsed.entities), name))
-        found.extend(directory / name for _, name in sorted(level))
-    return tuple(found)
-
-
 # -- the merged sidecar ----------------------------------------------------------
 
 class SidecarChain(ChainMap):
@@ -830,13 +789,7 @@ class TreeMixin:
         a sidecar with more entities comes first. Inside a transaction, new
         sidecars count. The directories are listed each time this is read.
         """
-        search = _search_sidecars(self)
-        try:
-            directory = next(search)
-            while True:
-                directory = search.send(self._list_names(directory))
-        except StopIteration as done:
-            return done.value
+        return self._answer(search_sidecars(self))
 
     @property
     def sidecar(self) -> SidecarChain:
@@ -851,6 +804,71 @@ class TreeMixin:
         sidecars = self.sidecars
         contents = [sidecar.as_dict() for sidecar in sidecars]
         return SidecarChain(*contents, sidecars=sidecars, owner=self)
+
+    @property
+    def companions(self) -> tuple[Self, ...]:
+        """The other files that come along with this data file, nearest first.
+
+        These are the files that apply to it under the same inheritance as
+        its `sidecars` (in its directory or an ancestor up to the dataset
+        root, with a subset of its entities, index entities such as `run`
+        compared by number), other than its `sidecars` themselves: the
+        files with a companion suffix (`events`, `physio`, `stim`,
+        `physioevents`, `channels`, `electrodes`, `coordsystem`, `optodes`,
+        `aslcontext`, `asllabeling`, `scans`, `sessions`) and their JSON
+        files, and the metadata files with this file's own suffix that are
+        not JSON (the `.bval` and `.bvec` of a `dwi` image). An
+        `electrodes`, `coordsystem` or `physio` file may also have a
+        `space` or `recording` entity that this file lacks. These are the
+        files a `BidsFilter` keeps with this file, besides its sidecars. A
+        single-band reference (`_sbref`) or an M0 scan (`_m0scan`) is a
+        data file of its own, not a companion.
+
+        Files in a nearer directory come first, and within one directory
+        they are sorted by name. A file that is not a data file (a sidecar,
+        a table, a directory, a `README`) has none. Inside a transaction,
+        new files count. The directories are listed each time this is read.
+        """
+        return self._answer(search_companions(self))
+
+    @property
+    def fieldmaps(self) -> tuple[Self, ...]:
+        """The fieldmaps meant to correct this data file, sorted by path.
+
+        A fieldmap is a data file of a `fmap/` directory of this file's
+        subject (`sub-<label>/fmap/`, or `sub-<label>/ses-<label>/fmap/` of
+        any session), and it is meant for this file when its merged
+        sidecar either
+
+        - names this file in `IntendedFor` (a string or a list): a path
+          relative to the subject directory (`func/sub-01_task-rest_bold.nii.gz`),
+          or a BIDS URI relative to the dataset root
+          (`bids::sub-01/func/sub-01_task-rest_bold.nii.gz`); a URI that
+          names another dataset (`bids:<name>:...`) is not followed;
+        - or has a `B0FieldIdentifier` (a string or a list) that is one of
+          the `B0FieldSource` of this file's merged sidecar.
+
+        Each fieldmap image is listed once, whichever way it is found
+        (`_phasediff.nii.gz` and `_magnitude1.nii.gz`, an `_epi.nii.gz`, a
+        `_fieldmap.nii.gz`, ...); their own sidecars are not. A file that is
+        not a data file has none. Inside a transaction, new files and
+        values count. The directories are listed, and the sidecars read,
+        each time this is read.
+        """
+        return self._answer(search_fieldmaps(self))
+
+    def _answer(self, search: Generator) -> Any:  # noqa: ANN401
+        """Run a search of `_associated`, listing and reading for it."""
+        try:
+            kind, target = next(search)
+            while True:
+                if kind == "list":
+                    answer = self._list_names(target)
+                else:
+                    answer = target.as_dict()
+                kind, target = search.send(answer)
+        except StopIteration as done:
+            return done.value
 
     @staticmethod
     def _list_names(directory: TreeMixin) -> set[str]:
@@ -1402,12 +1420,37 @@ class AsyncTreeMixin:
         """
         return _Deferred(self._merged)
 
+    @property
+    def companions(self) -> Awaitable[tuple[Self, ...]]:
+        """The other files that come along with this data file, nearest first.
+
+        Awaitable: `await data.companions`. The same rules as
+        `BidsPath.companions`.
+        """
+        return _Deferred(lambda: self._answer(search_companions(self)))
+
+    @property
+    def fieldmaps(self) -> Awaitable[tuple[Self, ...]]:
+        """The fieldmaps meant to correct this data file, sorted by path.
+
+        Awaitable: `await data.fieldmaps`. The same rules as
+        `BidsPath.fieldmaps`.
+        """
+        return _Deferred(lambda: self._answer(search_fieldmaps(self)))
+
     async def _find_sidecars(self) -> tuple[Self, ...]:
-        search = _search_sidecars(self)
+        return await self._answer(search_sidecars(self))
+
+    async def _answer(self, search: Generator) -> Any:  # noqa: ANN401
+        """Run a search of `_associated`, listing and reading for it."""
         try:
-            directory = next(search)
+            kind, target = next(search)
             while True:
-                directory = search.send(await self._list_names(directory))
+                if kind == "list":
+                    answer = await self._list_names(target)
+                else:
+                    answer = await target.as_dict()
+                kind, target = search.send(answer)
         except StopIteration as done:
             return done.value
 

@@ -37,7 +37,7 @@ The input is a listing of files; see `BidsFilter.select` for directories.
    file's directory up to its dataset root, the nearest directory of the
    listing above it that holds a `dataset_description.json`; without one,
    only the metadata in the data file's own directory applies. These are
-   the sidecars `path.sidecars` finds.
+   the files `path.sidecars` and `path.companions` find.
 3. A metadata file that applies to no data file of the listing at all
    (`beh/*_events.tsv` alone, `electrodes.tsv` of a session with no
    recording) is judged on what it names, when a `dataset_description.json`
@@ -129,7 +129,6 @@ from bagof.paths import AsyncPath, Path, PurePath
 
 from brainfilter._family import in_family
 from brainfilter._names import (
-    COMPANION_SUFFIXES,
     DATATYPES,
     INDEX_ENTITIES,
     OPTIONAL_FOLDERS,
@@ -139,6 +138,7 @@ from brainfilter._names import (
     applies_to,
     data_directory,
     index_value,
+    is_companion_recording,
     parse_name,
     parse_path,
 )
@@ -1208,7 +1208,8 @@ class _Plan:
         # `.bidsignore` names it.
         for item, d in self.data.items():
             if (
-                item not in passed and d.suffix in COMPANION_SUFFIXES
+                item not in passed
+                and is_companion_recording(d.suffix, d.extension)
                 and scopes.applies(d, kept_data)
             ):
                 kept.update(self.members.get(item, ()))

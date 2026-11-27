@@ -488,6 +488,17 @@ def is_metadata(suffix: str | None, extension: str) -> bool:
     return extension in METADATA_EXTENSIONS
 
 
+def is_companion_recording(suffix: str | None, extension: str) -> bool:
+    """Whether a file with this suffix and extension is a companion recording.
+
+    A data file, not metadata, whose suffix is a companion suffix
+    (`*_physio.tsv.gz`, `*_stim.tsv.gz`, `*_asllabeling.jpg`; see
+    `COMPANION_SUFFIXES`): it comes along with the data files it applies
+    to, as their metadata does.
+    """
+    return suffix in COMPANION_SUFFIXES and not is_metadata(suffix, extension)
+
+
 def parse_path(path: object) -> ParsedPath:
     """Parse a path's name and its datatype directory, lexically.
 

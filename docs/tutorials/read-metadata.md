@@ -130,7 +130,10 @@ available one by one, in the same order, through `bold.sidecars`. If no sidecar
 applies to a file, `sidecars` is an empty tuple and `sidecar` is empty.
 
 Which files count as "applying to" a data file, and in which order, is the
-subject of [Sidecar inheritance](../concepts/inheritance.md).
+subject of [Sidecar inheritance](../concepts/inheritance.md). The other files
+that belong with a data file, such as its events, its gradient tables and its
+fieldmaps, are found with `companions` and `fieldmaps`, which
+[Companions and fieldmaps](associated-files.md) describes.
 
 ## TSV files are mappings of columns
 

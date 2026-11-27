@@ -123,6 +123,15 @@ merged.as_dict()
 The merged mapping holds what was loaded when you awaited it. Await `run.sidecar`
 again to see later changes.
 
+The other files that belong with a data file, its `companions` and its
+`fieldmaps` (see [Companions and fieldmaps](associated-files.md)), are awaited
+in the same way. This dataset has neither, so both are empty.
+
+```python
+await run.companions                  # ()
+await run.fieldmaps                   # ()
+```
+
 ## Writing
 
 Writes are awaited like reads. Outside a transaction, each one is a single atomic
