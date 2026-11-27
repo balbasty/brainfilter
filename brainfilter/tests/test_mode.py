@@ -6,7 +6,7 @@ import pickle
 import pytest
 from bagof.paths import AsyncPath, Path
 
-from brainfilter import AsyncBidsPath, BidsPath, Filter, PureBidsPath, ReadOnlyError
+from brainfilter import AsyncBidsPath, BidsFilter, BidsPath, PureBidsPath, ReadOnlyError
 from brainfilter import bidspath as B
 from brainfilter.tests.test_filter import LISTING, _make
 from brainfilter.tests.test_tree import T1W, _populate
@@ -175,7 +175,7 @@ async def test_native_async_listing_inherits_the_mode(async_memory):
 @pytest.mark.parametrize("mode", ["r", "w"])
 def test_filter_walk_keeps_the_mode(tmp_path, mode):
     _make(BidsPath(str(tmp_path)), LISTING)
-    f = Filter(subjects="01")
+    f = BidsFilter(subjects="01")
     for root in (BidsPath(str(tmp_path), mode=mode),
                  PureBidsPath(str(tmp_path), mode=mode),
                  AsyncBidsPath(str(tmp_path), mode=mode)):
@@ -189,7 +189,7 @@ def test_filter_walk_keeps_the_mode(tmp_path, mode):
 @pytest.mark.parametrize("mode", ["r", "w"])
 async def test_filter_awalk_keeps_the_mode(tmp_path, mode):
     _make(BidsPath(str(tmp_path)), LISTING)
-    f = Filter(subjects="01")
+    f = BidsFilter(subjects="01")
     for root in (AsyncBidsPath(str(tmp_path), mode=mode),
                  PureBidsPath(str(tmp_path), mode=mode),
                  BidsPath(str(tmp_path), mode=mode)):

@@ -3,7 +3,7 @@
 The public API is importable from here:
 
 ```python
-from brainfilter import AsyncBidsPath, BidsPath, Filter, PureBidsPath
+from brainfilter import AsyncBidsPath, BidsPath, BidsFilter, PureBidsPath
 ```
 """
 from brainfilter.bidspath import (
@@ -16,7 +16,7 @@ from brainfilter.bidspath import (
     Table,
 )
 from brainfilter.conditions import Glob, Regex
-from brainfilter.filter import Filter
+from brainfilter.filter import BidsFilter
 from brainfilter.transaction import AsyncTransaction, Transaction, TransactionError
 from brainfilter.versioning import Version
 
@@ -31,7 +31,7 @@ __all__ = [
     "BidsEntities",
     "BidsNameError",
     "BidsPath",
-    "Filter",
+    "BidsFilter",
     "Glob",
     "PureBidsPath",
     "ReadOnlyError",

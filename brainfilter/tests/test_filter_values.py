@@ -9,7 +9,7 @@ import typing_extensions
 import brainfilter.filter as filter_module
 from brainfilter.bidspath import AsyncBidsPath, BidsPath, PureBidsPath
 from brainfilter.conditions import Glob
-from brainfilter.filter import Filter
+from brainfilter.filter import BidsFilter
 
 Any = typing.Any
 Never = typing_extensions.Never
@@ -139,11 +139,11 @@ def _all(paths, root):
     ({"sidecar": {"RepetitionTime": 2}, "EchoTime": Any}, {BOLD["01"]}),
 ])
 def test_sidecar_values(ds, kwargs, expected):
-    assert _data(Filter(**kwargs).walk(ds), ds) == expected
+    assert _data(BidsFilter(**kwargs).walk(ds), ds) == expected
 
 
 def test_sidecar_filters_keep_the_metadata_of_the_kept_data(ds):
-    kept = _all(Filter(RepetitionTime=1.5).walk(ds), ds)
+    kept = _all(BidsFilter(RepetitionTime=1.5).walk(ds), ds)
     assert kept == [
         "dataset_description.json", "participants.json", "participants.tsv",
         "sub-02/func/sub-02_task-rest_bold.json", BOLD["02"],
@@ -157,9 +157,9 @@ def test_a_test_that_raises_on_a_wrong_value_fails(ds):
         ("TaskName", lambda v: v < 3),                    # TypeError
         ("TaskName", lambda v: int(v) == 0),              # ValueError
     ]:
-        assert _data(Filter(**{field: test}).walk(ds), ds) == set()
+        assert _data(BidsFilter(**{field: test}).walk(ds), ds) == set()
     with pytest.raises(KeyError):
-        Filter(TaskName=lambda v: {}[v]).walk(ds)
+        BidsFilter(TaskName=lambda v: {}[v]).walk(ds)
 
 
 @pytest.mark.parametrize("keyword, meant", [
@@ -170,17 +170,17 @@ def test_a_test_that_raises_on_a_wrong_value_fails(ds):
 ])
 def test_a_capitalised_keyword_is_a_misspelling(keyword, meant):
     with pytest.raises(TypeError, match=f"write {meant}=.*sidecar="):
-        Filter(**{keyword: "01"})
+        BidsFilter(**{keyword: "01"})
     # a sidecar field of that name goes in the mapping
-    assert set(Filter(sidecar={keyword: "01"}).sidecar) == {keyword}
+    assert set(BidsFilter(sidecar={keyword: "01"}).sidecar) == {keyword}
 
 
 def test_sidecar_keywords_and_mapping():
     with pytest.raises(TypeError, match="RepetitionTime"):
-        Filter(RepetitionTime=2, sidecar={"RepetitionTime": 2})
+        BidsFilter(RepetitionTime=2, sidecar={"RepetitionTime": 2})
     with pytest.raises(TypeError, match="sidecar"):
-        Filter(repetitiontime=2)
-    f = Filter(sidecar={"weird-name": 1}, EchoTime=Any)
+        BidsFilter(repetitiontime=2)
+    f = BidsFilter(sidecar={"weird-name": 1}, EchoTime=Any)
     assert set(f.sidecar) == {"weird-name", "EchoTime"}
 
 
@@ -193,21 +193,21 @@ def test_sidecars_are_read_once_and_only_for_passing_data(ds, monkeypatch):
         return real(path)
 
     monkeypatch.setattr(filter_module, "_read_json", counting)
-    Filter(EchoTime=Any).walk(ds)
+    BidsFilter(EchoTime=Any).walk(ds)
     assert sorted(read) == sorted({
         "task-rest_bold.json", "sub-01_task-rest_bold.json",
         "sub-02_task-rest_bold.json",
     })
     read.clear()
-    Filter(subjects="02", EchoTime=Any).walk(ds)
+    BidsFilter(subjects="02", EchoTime=Any).walk(ds)
     assert sorted(read) == ["sub-02_task-rest_bold.json", "task-rest_bold.json"]
     read.clear()
-    Filter(subjects="02").walk(ds)
+    BidsFilter(subjects="02").walk(ds)
     assert read == []
 
 
 def test_select_reads_sidecars_from_path_objects(ds):
-    f = Filter(RepetitionTime=2)
+    f = BidsFilter(RepetitionTime=2)
     listing = [p for p in ds.rglob("*") if p.is_file()]
     assert f.select(listing, root=ds) == f.walk(ds)
     with pytest.raises(TypeError, match="path objects"):
@@ -235,13 +235,13 @@ def test_select_reads_sidecars_from_path_objects(ds):
     ({"participants": {}}, {"01", "02", "03", "04"}),   # no filter
 ])
 def test_participants(ds, kwargs, expected):
-    kept = Filter(**kwargs).walk(ds)
+    kept = BidsFilter(**kwargs).walk(ds)
     subjects = {p.subject for p in kept if p.name.endswith(".nii.gz")}
     assert subjects == expected
 
 
 def test_participants_keep_the_metadata_of_the_kept_data(ds):
-    kept = _all(Filter(participants={"group": "control"}).walk(ds), ds)
+    kept = _all(BidsFilter(participants={"group": "control"}).walk(ds), ds)
     assert kept == [
         "dataset_description.json", "participants.json", "participants.tsv",
         T1W["01"], T1W["01mp"],
@@ -259,14 +259,14 @@ def test_participants_are_read_once(ds, monkeypatch):
         return real(path)
 
     monkeypatch.setattr(filter_module, "_read_rows", counting)
-    Filter(participants={"age": Any}).walk(ds)
+    BidsFilter(participants={"age": Any}).walk(ds)
     assert read == ["participants.tsv"]
 
 
 def test_participants_need_a_table(tmp_path):
     root = BidsPath(str(tmp_path))
     _write(root, {k: v for k, v in DATASET.items() if k != "participants.tsv"})
-    f = Filter(participants={"age": Any})
+    f = BidsFilter(participants={"age": Any})
     with pytest.raises(FileNotFoundError, match="participants.tsv"):
         f.walk(root)
     listing = [p for p in root.rglob("*") if p.is_file()]
@@ -274,18 +274,18 @@ def test_participants_need_a_table(tmp_path):
         f.select(listing, root=root)
     with pytest.raises(FileNotFoundError, match="participants.tsv"):
         f.walk(str(tmp_path / "missing"))
-    assert Filter().walk(root)                      # no filter, no need
+    assert BidsFilter().walk(root)                      # no filter, no need
 
 
 def test_participants_need_an_id_column(tmp_path):
     root = BidsPath(str(tmp_path))
     _write(root, {**DATASET, "participants.tsv": "id\tage\nsub-01\t3\n"})
     with pytest.raises(ValueError, match="participant_id"):
-        Filter(participants={"age": 3}).walk(root)
+        BidsFilter(participants={"age": 3}).walk(root)
 
 
 def test_select_with_participants_needs_a_root(ds):
-    f = Filter(participants={"group": "control"})
+    f = BidsFilter(participants={"group": "control"})
     listing = [p.relative_to(ds).as_posix()
                for p in ds.rglob("*") if p.is_file()]
     with pytest.raises(TypeError, match="root"):
@@ -300,7 +300,7 @@ def test_participants_with_orphan_metadata():
     listing = ["dataset_description.json", "participants.tsv",
                "sub-01/beh/sub-01_task-x_events.tsv",
                "sub-02/beh/sub-02_task-x_events.tsv"]
-    plan = filter_module._Plan(Filter(participants={"age": Any}), listing,
+    plan = filter_module._Plan(BidsFilter(participants={"age": Any}), listing,
                                subjects={"01"})
     assert plan.finish({}) == [
         "dataset_description.json", "participants.tsv",
@@ -333,15 +333,15 @@ PRESENT_MARKERS = [typing.Any, typing_extensions.Any, typing_extensions.Required
 
 @pytest.mark.parametrize("never", ABSENT_MARKERS)
 def test_never_keeps_files_without_the_entity(never):
-    assert _images(Filter(acq=never)) == {0, 3, 4, 5}
-    assert _images(Filter(entities={"acq": never})) == {0, 3, 4, 5}
-    assert _images(Filter(run=never)) == {0, 1, 2, 5}
-    assert _images(Filter(task=never)) == {0, 1, 2}
+    assert _images(BidsFilter(acq=never)) == {0, 3, 4, 5}
+    assert _images(BidsFilter(entities={"acq": never})) == {0, 3, 4, 5}
+    assert _images(BidsFilter(run=never)) == {0, 1, 2, 5}
+    assert _images(BidsFilter(task=never)) == {0, 1, 2}
     if never is not None:   # None is no filter on a label keyword
-        assert _images(Filter(tasks=never)) == {0, 1, 2}
-        assert _images(Filter(sessions=never)) == set(range(len(PRESENCE)))
-        assert _images(Filter(subjects=never)) == set()
-        assert _images(Filter(datatypes=never)) == set()
+        assert _images(BidsFilter(tasks=never)) == {0, 1, 2}
+        assert _images(BidsFilter(sessions=never)) == set(range(len(PRESENCE)))
+        assert _images(BidsFilter(subjects=never)) == set()
+        assert _images(BidsFilter(datatypes=never)) == set()
 
 
 LABEL_KEYWORDS = [
@@ -354,41 +354,41 @@ LABEL_KEYWORDS = [
 def test_none_is_no_filter_on_a_label_keyword(keyword):
     import inspect
 
-    assert inspect.signature(Filter).parameters[keyword].default is None
-    assert _images(Filter(**{keyword: None})) == set(range(len(PRESENCE)))
+    assert inspect.signature(BidsFilter).parameters[keyword].default is None
+    assert _images(BidsFilter(**{keyword: None})) == set(range(len(PRESENCE)))
     with pytest.raises(TypeError, match=f"{keyword}=.*Never"):
-        Filter(**{keyword: [None, "x"]})
+        BidsFilter(**{keyword: [None, "x"]})
 
 
 def test_none_is_never_on_an_entity_keyword():
-    assert _images(Filter(sub=None)) == set()
-    assert _images(Filter(entities={"task": None})) == {0, 1, 2}
-    assert _images(Filter(task=[None, "rest"])) == set(range(len(PRESENCE)))
+    assert _images(BidsFilter(sub=None)) == set()
+    assert _images(BidsFilter(entities={"task": None})) == {0, 1, 2}
+    assert _images(BidsFilter(task=[None, "rest"])) == set(range(len(PRESENCE)))
 
 
 @pytest.mark.parametrize("anything", PRESENT_MARKERS)
 def test_any_keeps_files_with_the_entity(anything):
-    assert _images(Filter(acq=anything)) == {1, 2}
-    assert _images(Filter(run=anything)) == {3, 4}
-    assert _images(Filter(sessions=anything)) == set()
+    assert _images(BidsFilter(acq=anything)) == {1, 2}
+    assert _images(BidsFilter(run=anything)) == {3, 4}
+    assert _images(BidsFilter(sessions=anything)) == set()
 
 
 def test_presence_mixes_with_values():
-    assert _images(Filter(acq={Never, "mprage"})) == {0, 1, 3, 4, 5}
-    assert _images(Filter(acq=[Never, "mprage"])) == {0, 1, 3, 4, 5}
-    assert _images(Filter(acq=(None, Glob("f*")))) == {0, 2, 3, 4, 5}
-    assert _images(Filter(acq={Any, "mprage"})) == {1, 2}
-    assert _images(Filter(run={Never, 2})) == {0, 1, 2, 4, 5}
+    assert _images(BidsFilter(acq={Never, "mprage"})) == {0, 1, 3, 4, 5}
+    assert _images(BidsFilter(acq=[Never, "mprage"])) == {0, 1, 3, 4, 5}
+    assert _images(BidsFilter(acq=(None, Glob("f*")))) == {0, 2, 3, 4, 5}
+    assert _images(BidsFilter(acq={Any, "mprage"})) == {1, 2}
+    assert _images(BidsFilter(run={Never, 2})) == {0, 1, 2, 4, 5}
 
 
 def test_label_tests_are_functions_of_the_label():
-    assert _images(Filter(run=lambda r: int(r) > 1)) == {4}
-    assert _images(Filter(acq=lambda a: a.startswith("m"))) == {1}
+    assert _images(BidsFilter(run=lambda r: int(r) > 1)) == {4}
+    assert _images(BidsFilter(acq=lambda a: a.startswith("m"))) == {1}
 
 
 def test_an_empty_filter_still_keeps_everything():
-    assert _images(Filter()) == set(range(len(PRESENCE)))
-    assert _images(Filter(acq=[])) == set(range(len(PRESENCE)))
+    assert _images(BidsFilter()) == set(range(len(PRESENCE)))
+    assert _images(BidsFilter(acq=[])) == set(range(len(PRESENCE)))
 
 
 ORPHAN = ["sub-01/beh/sub-01_task-x_events.tsv"]
@@ -405,10 +405,10 @@ ORPHAN_LISTING = ["dataset_description.json", *ORPHAN]
     ({Any, Never}, True),    # ... but for one that admits it is not
 ])
 def test_presence_on_metadata_judged_on_its_own_name(value, kept):
-    kept_files = Filter(acq=value).select(ORPHAN_LISTING)
+    kept_files = BidsFilter(acq=value).select(ORPHAN_LISTING)
     assert kept_files == ["dataset_description.json"] + (ORPHAN if kept else [])
     # outside every dataset root, never kept on its own
-    assert Filter(acq=value).select(ORPHAN) == []
+    assert BidsFilter(acq=value).select(ORPHAN) == []
 
 
 @pytest.mark.parametrize("value, kept", [
@@ -416,12 +416,12 @@ def test_presence_on_metadata_judged_on_its_own_name(value, kept):
     (Any, False), (Required, False), ({Any, 2}, False), ({Any, Never}, True),
 ])
 def test_sidecar_filters_on_metadata_judged_on_its_own_name(value, kept):
-    plan = filter_module._Plan(Filter(RepetitionTime=value), ORPHAN_LISTING)
+    plan = filter_module._Plan(BidsFilter(RepetitionTime=value), ORPHAN_LISTING)
     assert plan.reads == set()
     assert plan.finish({}) == ["dataset_description.json"] + (
         ORPHAN if kept else []
     )
-    plan = filter_module._Plan(Filter(RepetitionTime=value), ORPHAN)
+    plan = filter_module._Plan(BidsFilter(RepetitionTime=value), ORPHAN)
     assert plan.finish({}) == []
 
 
@@ -434,10 +434,10 @@ def test_a_sidecar_that_cannot_be_read(tmp_path, content, error, message):
     _write(root, DATASET)
     _write(root, {"sub-01/func/sub-01_task-rest_bold.json": content})
     with pytest.raises(error, match=message):
-        Filter(EchoTime=Any).walk(root)
+        BidsFilter(EchoTime=Any).walk(root)
     listing = [p for p in root.rglob("*") if p.is_file()]
     with pytest.raises(error, match=message):
-        Filter(EchoTime=Any).select(listing, root=root)
+        BidsFilter(EchoTime=Any).select(listing, root=root)
 
 
 @pytest.mark.anyio
@@ -449,7 +449,7 @@ async def test_awalk_a_sidecar_that_cannot_be_read(tmp_path, content, error):
     _write(BidsPath(str(tmp_path)),
            {"sub-01/func/sub-01_task-rest_bold.json": content})
     with pytest.raises(error, match="sub-01_task-rest_bold.json"):
-        await Filter(EchoTime=Any).awalk(str(tmp_path))
+        await BidsFilter(EchoTime=Any).awalk(str(tmp_path))
 
 
 # -- the dataset root ------------------------------------------------------------
@@ -484,21 +484,21 @@ def test_without_a_description_nothing_is_inherited(tmp_path):
         "sub-01_task-rest_bold.json"
     ]
     # the sidecar beside the file still applies; the ones above do not
-    assert _data(Filter(Flag=True).walk(root), root) == {bold}
-    assert _data(Filter(RepetitionTime=2).walk(root), root) == set()
-    assert _data(Filter(EchoTime=Any).walk(root), root) == set()
+    assert _data(BidsFilter(Flag=True).walk(root), root) == {bold}
+    assert _data(BidsFilter(RepetitionTime=2).walk(root), root) == set()
+    assert _data(BidsFilter(EchoTime=Any).walk(root), root) == set()
     # outside every dataset root, the sidecars above are never kept on
     # their own (rule 3)
-    assert _selects(Filter(EchoTime=Any), root) == []
-    assert _selects(Filter(RepetitionTime=2), root) == []
+    assert _selects(BidsFilter(EchoTime=Any), root) == []
+    assert _selects(BidsFilter(RepetitionTime=2), root) == []
     # and they do not come along with the data either
-    kept = _selects(Filter(datatypes="func"), root)
+    kept = _selects(BidsFilter(datatypes="func"), root)
     assert kept == [
         "sub-01/func/sub-01_task-rest_bold.json", bold,
         "sub-02/func/sub-02_task-rest_bold.nii.gz",
     ]
     # and on their subject
-    assert _selects(Filter(subjects="02"), root) == [
+    assert _selects(BidsFilter(subjects="02"), root) == [
         "sub-02/func/sub-02_task-rest_bold.nii.gz"
     ]
 
@@ -507,15 +507,15 @@ def test_with_a_description_sidecars_are_inherited(tmp_path):
     root = BidsPath(str(tmp_path / "rooted"))
     _write(root, {**ROOTLESS, **DESCRIPTION})
     bold = "sub-01/func/sub-01_task-rest_bold.nii.gz"
-    assert _data(Filter(RepetitionTime=2).walk(root), root) == {
+    assert _data(BidsFilter(RepetitionTime=2).walk(root), root) == {
         bold, "sub-02/func/sub-02_task-rest_bold.nii.gz",
     }
-    assert _selects(Filter(EchoTime=Any), root) == [
+    assert _selects(BidsFilter(EchoTime=Any), root) == [
         "dataset_description.json",
         "sub-01/func/sub-01_task-rest_bold.json", bold,
         "sub-01/sub-01_task-rest_bold.json", "task-rest_bold.json",
     ]
-    assert "task-rest_bold.json" in _selects(Filter(datatypes="func"), root)
+    assert "task-rest_bold.json" in _selects(BidsFilter(datatypes="func"), root)
 
 
 def test_a_nested_description_is_the_root_of_what_is_below_it(tmp_path):
@@ -527,11 +527,11 @@ def test_a_nested_description_is_the_root_of_what_is_below_it(tmp_path):
     assert [s.name for s in (root / bold).sidecars] == [
         "sub-01_task-rest_bold.json", "sub-01_task-rest_bold.json",
     ]
-    assert _data(Filter(RepetitionTime=2).walk(root), root) == {
+    assert _data(BidsFilter(RepetitionTime=2).walk(root), root) == {
         "sub-02/func/sub-02_task-rest_bold.nii.gz",
     }
-    assert _data(Filter(EchoTime=0.03).walk(root), root) == {bold}
-    kept = _selects(Filter(subjects="01", datatypes="func"), root)
+    assert _data(BidsFilter(EchoTime=0.03).walk(root), root) == {bold}
+    kept = _selects(BidsFilter(subjects="01", datatypes="func"), root)
     assert "task-rest_bold.json" not in kept
     assert "sub-01/sub-01_task-rest_bold.json" in kept
 
@@ -566,7 +566,7 @@ def test_the_sidecars_a_filter_reads_are_path_sidecars(tmp_path, shape):
     ignore = filter_module._BidsIgnore.parse(
         (root / ".bidsignore").read_text() if ".bidsignore" in listing else ""
     )
-    plan = filter_module._Plan(Filter(), listing, ignore)
+    plan = filter_module._Plan(BidsFilter(), listing, ignore)
     chains = filter_module._sidecar_chains(
         plan.data.values(), plan.meta, plan.scopes
     )
@@ -591,11 +591,11 @@ def ads(request, tmp_path):
 
 
 ASYNC_FILTERS = [
-    Filter(RepetitionTime=2), Filter(EchoTime=lambda t: t < 0.028),
-    Filter(B0FieldIdentifier=Never), Filter(IntendedFor=None),
-    Filter(participants={"group": {"control", "sham"}}),
-    Filter(participants={"age": Any}, PhaseEncodingDirection=Any),
-    Filter(acq={Never, "mprage"}, run=Never),
+    BidsFilter(RepetitionTime=2), BidsFilter(EchoTime=lambda t: t < 0.028),
+    BidsFilter(B0FieldIdentifier=Never), BidsFilter(IntendedFor=None),
+    BidsFilter(participants={"group": {"control", "sham"}}),
+    BidsFilter(participants={"age": Any}, PhaseEncodingDirection=Any),
+    BidsFilter(acq={Never, "mprage"}, run=Never),
 ]
 
 
@@ -615,7 +615,7 @@ async def test_awalk_values(ads, tmp_path, monkeypatch):
         return await real(path)
 
     monkeypatch.setattr(filter_module, "_aread_json", counting)
-    await Filter(EchoTime=Any).awalk(ads)
+    await BidsFilter(EchoTime=Any).awalk(ads)
     assert sorted(read) == sorted({
         "task-rest_bold.json", "sub-01_task-rest_bold.json",
         "sub-02_task-rest_bold.json",
@@ -649,7 +649,7 @@ async def test_awalk_reads_and_lists_a_few_at_a_time(tmp_path, monkeypatch):
     for name in ("_aread_json", "_alist"):
         monkeypatch.setattr(filter_module, name,
                             counting(name, getattr(filter_module, name)))
-    kept = await Filter(EchoTime=Any).awalk(str(tmp_path))
+    kept = await BidsFilter(EchoTime=Any).awalk(str(tmp_path))
     assert len(_data(kept, AsyncBidsPath(str(tmp_path)))) == 12
     assert most == {"_aread_json": 3, "_alist": 3}
 
@@ -659,4 +659,4 @@ async def test_awalk_participants_need_a_table(tmp_path):
     _write(BidsPath(str(tmp_path)),
            {k: v for k, v in DATASET.items() if k != "participants.tsv"})
     with pytest.raises(FileNotFoundError, match="participants.tsv"):
-        await Filter(participants={"age": Any}).awalk(str(tmp_path))
+        await BidsFilter(participants={"age": Any}).awalk(str(tmp_path))

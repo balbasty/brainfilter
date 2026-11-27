@@ -212,19 +212,19 @@ on a remote store, where it is the difference between fetching a few
 kilobytes of names and gigabytes of images.
 
 The keywords of `filter()` are those of a
-[`Filter`][brainfilter.Filter], which holds the same selection as an object of
+[`BidsFilter`][brainfilter.BidsFilter], which holds the same selection as an object of
 its own. Build one when a selection is reused, and pass it to `filter()` or
 call its `walk()` method with the dataset; the two give the same files.
 
 ```pycon
->>> from brainfilter import Filter
->>> t1w_of_01 = Filter(subjects=1, datatypes="anat", suffixes="T1w")
+>>> from brainfilter import BidsFilter
+>>> t1w_of_01 = BidsFilter(subjects=1, datatypes="anat", suffixes="T1w")
 >>> ds.filter(t1w_of_01) == t1w_of_01.walk(ds) == kept
 True
 ```
 
 The next pages go further with each half of this example.
 [Filtering a local dataset](../tutorials/filter-local.md) covers the
-conditions a `Filter` accepts, and
+conditions a `BidsFilter` accepts, and
 [Filtering a remote dataset](../tutorials/filter-remote.md) does the same on a
 public dataset in the cloud.

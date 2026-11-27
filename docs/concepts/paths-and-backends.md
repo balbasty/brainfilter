@@ -199,7 +199,7 @@ Wherever the dataset is, `BidsPath` gives you the same methods: indexing to
 reach children, `sidecars`, `as_dict()` and `as_dataframe()`, and everything
 the other pages describe. What the backend changes is cost. Each read of a
 remote file is a request, and `keys()` on a directory is a listing. A
-[`Filter`](../tutorials/filter-local.md) lists a dataset once and decides before
+[`BidsFilter`](../tutorials/filter-local.md) lists a dataset once and decides before
 any file is downloaded, which is the reason it exists.
 
 ### Credentials and options

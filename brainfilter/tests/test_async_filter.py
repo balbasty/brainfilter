@@ -1,14 +1,14 @@
-"""`Filter.awalk`: the sync walk tests, mirrored with coroutines."""
+"""`BidsFilter.awalk`: the sync walk tests, mirrored with coroutines."""
 import pytest
 
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
-from brainfilter.filter import Filter
+from brainfilter.filter import BidsFilter
 from brainfilter.tests.test_filter import LISTING, _make
 
 pytestmark = pytest.mark.anyio
 
-FILTERS = [Filter(), Filter(subjects="02"), Filter(folders="derivatives"),
-           Filter(datatypes="anat"), Filter(tasks="rest", exclude="*.tsv")]
+FILTERS = [BidsFilter(), BidsFilter(subjects="02"), BidsFilter(folders="derivatives"),
+           BidsFilter(datatypes="anat"), BidsFilter(tasks="rest", exclude="*.tsv")]
 
 
 async def test_awalk_local(tmp_path):
@@ -51,7 +51,7 @@ async def test_awalk_results_read_asynchronously(tmp_path):
     (tmp_path / "participants.tsv").write_text("participant_id\nsub-01\n")
     (tmp_path / "sub-01" / "anat").mkdir(parents=True)
     (tmp_path / "sub-01" / "anat" / "sub-01_T1w.nii.gz").write_bytes(b"")
-    kept = {p.name: p for p in await Filter().awalk(str(tmp_path))}
+    kept = {p.name: p for p in await BidsFilter().awalk(str(tmp_path))}
     assert await kept["dataset_description.json"].get("Name") == "x"
     assert await kept["participants.tsv"].as_list() == [
         {"participant_id": "sub-01"}
@@ -117,9 +117,9 @@ async def test_awalk_native_async_prunes_and_lists_levels_at_once(
     listed, running = count_listings
     root = AsyncBidsPath(memory_listing)
     assert type(root.wrapped).__name__ == "AsyncFSPath"
-    kept = await Filter().awalk(root)
+    kept = await BidsFilter().awalk(root)
     assert [p.relative_to(root).as_posix() for p in kept] == (
-        Filter().select(LISTING)
+        BidsFilter().select(LISTING)
     )
     prefix = "/brainfilter-walk"
     assert sorted(listed) == sorted(
@@ -129,7 +129,7 @@ async def test_awalk_native_async_prunes_and_lists_levels_at_once(
     # the sync walk lists the same directories, on the synchronous store
     _sync_memory(monkeypatch)
     listed.clear()
-    assert Filter().walk(memory_listing) == [
+    assert BidsFilter().walk(memory_listing) == [
         BidsPath(memory_listing) / p.relative_to(root).as_posix() for p in kept
     ]
     assert sorted(set(listed)) == sorted(
@@ -140,7 +140,7 @@ async def test_awalk_native_async_prunes_and_lists_levels_at_once(
 async def test_awalk_lists_folders_asked_for(memory_listing, async_memory,
                                              count_listings):
     listed, _ = count_listings
-    kept = await Filter(folders="derivatives").awalk(memory_listing)
+    kept = await BidsFilter(folders="derivatives").awalk(memory_listing)
     assert "/brainfilter-walk/derivatives/surfaces/sub-01" in listed
     assert any(p.name == "x.gii" for p in kept)
 
@@ -148,7 +148,7 @@ async def test_awalk_lists_folders_asked_for(memory_listing, async_memory,
 async def test_walk_and_awalk_rebuild_a_root_of_the_other_family(
     memory_listing, async_memory, monkeypatch
 ):
-    f = Filter(subjects="01")
+    f = BidsFilter(subjects="01")
     expected = f.select(LISTING)
     native = AsyncBidsPath(memory_listing)
     assert type(native.wrapped).__name__ == "AsyncFSPath"

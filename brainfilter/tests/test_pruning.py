@@ -12,7 +12,7 @@ import typing_extensions
 
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
 from brainfilter.conditions import Glob
-from brainfilter.filter import Filter
+from brainfilter.filter import BidsFilter
 
 FILES = {
     "dataset_description.json": "{}",
@@ -42,32 +42,32 @@ FILES = {
 ROOT = "memory://pruned"
 
 PRUNING = [
-    Filter(subjects="01"),
-    Filter(subjects=1),
-    Filter(subjects="02"),
-    Filter(subjects=Glob("0*")),
-    Filter(subjects=re.compile("1.")),
-    Filter(subjects={typing_extensions.Never, "02"}),
-    Filter(subjects=lambda s: s.endswith("1")),
-    Filter(exclude_subjects=["01", "10"]),
-    Filter(exclude_subjects="02"),
-    Filter(subjects=typing_extensions.Never),
-    Filter(subjects={typing_extensions.Never, "01"}),
-    Filter(subjects="01", sessions="1"),
-    Filter(sessions="1"),
-    Filter(sessions=2),
-    Filter(sessions=typing_extensions.Never),
-    Filter(sessions={"2", typing_extensions.Never}),
-    Filter(subjects="10", sessions="1"),
-    Filter(participants={"group": "a"}),
-    Filter(participants={"group": "b"}, sessions="1"),
+    BidsFilter(subjects="01"),
+    BidsFilter(subjects=1),
+    BidsFilter(subjects="02"),
+    BidsFilter(subjects=Glob("0*")),
+    BidsFilter(subjects=re.compile("1.")),
+    BidsFilter(subjects={typing_extensions.Never, "02"}),
+    BidsFilter(subjects=lambda s: s.endswith("1")),
+    BidsFilter(exclude_subjects=["01", "10"]),
+    BidsFilter(exclude_subjects="02"),
+    BidsFilter(subjects=typing_extensions.Never),
+    BidsFilter(subjects={typing_extensions.Never, "01"}),
+    BidsFilter(subjects="01", sessions="1"),
+    BidsFilter(sessions="1"),
+    BidsFilter(sessions=2),
+    BidsFilter(sessions=typing_extensions.Never),
+    BidsFilter(sessions={"2", typing_extensions.Never}),
+    BidsFilter(subjects="10", sessions="1"),
+    BidsFilter(participants={"group": "a"}),
+    BidsFilter(participants={"group": "b"}, sessions="1"),
 ]
 NOT_PRUNING = [
-    Filter(),
-    Filter(subjects=typing.Any),
-    Filter(sessions=typing.Any),
-    Filter(datatypes="anat"),
-    Filter(participants={"group": {"a", "b"}}),
+    BidsFilter(),
+    BidsFilter(subjects=typing.Any),
+    BidsFilter(sessions=typing.Any),
+    BidsFilter(datatypes="anat"),
+    BidsFilter(participants={"group": {"a", "b"}}),
 ]
 
 
@@ -95,7 +95,7 @@ def _rel(paths, root):
 def no_pruning(monkeypatch):
     """Call to make every walk list every subject and session folder."""
     def disable():
-        monkeypatch.setattr(Filter, "_may_hold", lambda self, *args: True)
+        monkeypatch.setattr(BidsFilter, "_may_hold", lambda self, *args: True)
     return disable
 
 
@@ -126,19 +126,19 @@ def test_walk_prunes_without_changing_results(store, listed_dirs, no_pruning):
 def test_a_file_takes_the_labels_of_its_folders():
     # a name without the subject (session) has its folder's, in select as in
     # a walk, which prunes by folder
-    assert Filter(exclude_subjects="02").select(["sub-02/notes.txt"]) == []
-    assert Filter(subjects="02").select(["sub-02/notes.txt"]) == [
+    assert BidsFilter(exclude_subjects="02").select(["sub-02/notes.txt"]) == []
+    assert BidsFilter(subjects="02").select(["sub-02/notes.txt"]) == [
         "sub-02/notes.txt"
     ]
-    assert Filter(subjects=typing_extensions.Never).select(
+    assert BidsFilter(subjects=typing_extensions.Never).select(
         ["sub-02/notes.txt"]
     ) == []
     t1w = ["sub-01/ses-2/anat/sub-01_T1w.nii.gz"]
-    assert Filter(sessions=typing_extensions.Never).select(t1w) == []
-    assert Filter(sessions="2").select(t1w) == t1w
-    assert Filter(sessions="1").select(t1w) == []
-    assert Filter().keep_data(t1w[0])
-    assert not Filter(sessions="1").keep_data(t1w[0])
+    assert BidsFilter(sessions=typing_extensions.Never).select(t1w) == []
+    assert BidsFilter(sessions="2").select(t1w) == t1w
+    assert BidsFilter(sessions="1").select(t1w) == []
+    assert BidsFilter().keep_data(t1w[0])
+    assert not BidsFilter(sessions="1").keep_data(t1w[0])
 
 
 def test_a_name_that_contradicts_its_folder_is_judged_on_the_name(store):
@@ -148,23 +148,23 @@ def test_a_name_that_contradicts_its_folder_is_judged_on_the_name(store):
     root = BidsPath(ROOT, mode="w")
     (root / odd).parent.mkdir(parents=True, exist_ok=True)
     (root / odd).write_text("x")
-    assert Filter(subjects="02").select([odd]) == [odd]
-    assert Filter(subjects="01").select([odd]) == []
-    assert odd not in _rel(Filter(subjects="01").walk(ROOT), root)
-    assert odd not in _rel(Filter(subjects="02").walk(ROOT), root)
+    assert BidsFilter(subjects="02").select([odd]) == [odd]
+    assert BidsFilter(subjects="01").select([odd]) == []
+    assert odd not in _rel(BidsFilter(subjects="01").walk(ROOT), root)
+    assert odd not in _rel(BidsFilter(subjects="02").walk(ROOT), root)
 
 
 def test_pruned_folders_are_not_listed(store, listed_dirs):
-    Filter(subjects="02", datatypes="anat").walk(ROOT)
+    BidsFilter(subjects="02", datatypes="anat").walk(ROOT)
     assert "/pruned/sub-02/ses-1/anat" in listed_dirs
     assert not any(d.startswith(("/pruned/sub-01", "/pruned/sub-10"))
                    for d in listed_dirs)
     listed_dirs.clear()
-    Filter(sessions="1", datatypes="anat").walk(ROOT)
+    BidsFilter(sessions="1", datatypes="anat").walk(ROOT)
     assert "/pruned/sub-10/ses-1" in listed_dirs
     assert not any("ses-2" in d for d in listed_dirs)
     listed_dirs.clear()
-    Filter(participants={"group": "b"}, datatypes="anat").walk(ROOT)
+    BidsFilter(participants={"group": "b"}, datatypes="anat").walk(ROOT)
     assert not any(d.startswith(("/pruned/sub-01", "/pruned/sub-001"))
                    for d in listed_dirs)
 
@@ -175,14 +175,14 @@ def test_a_pruned_folder_is_listed_when_metadata_above_depends_on_it(
     # T2w.json applies to an image of sub-01 only; with sub-01 left out,
     # the walk looks into sub-01 to find it, and drops T2w.json as select
     # does. Nothing below sub-02 needs this.
-    kept = _rel(Filter(subjects="02").walk(ROOT), BidsPath(ROOT))
+    kept = _rel(BidsFilter(subjects="02").walk(ROOT), BidsPath(ROOT))
     assert "T2w.json" not in kept
     assert "/pruned/sub-01/ses-1/anat" in listed_dirs
     # task-rest_bold.json too, and sub-01 settles both: sub-10 is not listed
     assert "/pruned/sub-10" not in listed_dirs
     listed_dirs.clear()
     # a metadata file the other filters drop needs nothing listed
-    Filter(subjects="02", suffixes="T1w").walk(ROOT)
+    BidsFilter(subjects="02", suffixes="T1w").walk(ROOT)
     assert not any(d.startswith("/pruned/sub-01") for d in listed_dirs)
 
 

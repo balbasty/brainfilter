@@ -43,7 +43,7 @@ one function needs to write.
 The mode belongs to the path object, and every path derived from it inherits it.
 That covers joining a name with `/`, `parent`, the `with_*` methods, a
 directory's children, the paths that `iterdir()`, `glob()` and `walk()` yield,
-and the paths in `sidecars`. The files that `Filter.walk` returns have the mode
+and the paths in `sidecars`. The files that `BidsFilter.walk` returns have the mode
 of the root that was walked.
 
 ```pycon

@@ -78,7 +78,7 @@ if TYPE_CHECKING:
     from pandas import DataFrame
     from typing_extensions import Self
 
-    from brainfilter.filter import Filter
+    from brainfilter.filter import BidsFilter
     from brainfilter.transaction import _Entry
 
 __all__ = ["DATASET_DESCRIPTION", "AsyncJSONContentMixin",
@@ -681,12 +681,12 @@ class TreeMixin:
         def __truediv__(self, other: object) -> Self: ...  # noqa: D105
 
     # -- listings ------------------------------------------------------------
-    def filter(self, *args: Filter, **kwargs: object) -> list[Self]:
+    def filter(self, *args: BidsFilter, **kwargs: object) -> list[Self]:
         """Return the files of this dataset that a filter keeps, sorted.
 
         `ds.filter(subjects=1, suffixes="bold")` builds the
-        `brainfilter.Filter` from its keywords; `ds.filter(f)` uses a
-        filter already made. It lists the dataset as `Filter.walk` does.
+        `brainfilter.BidsFilter` from its keywords; `ds.filter(f)` uses a
+        filter already made. It lists the dataset as `BidsFilter.walk` does.
         """
         return _make_filter(args, kwargs).walk(self)
 
@@ -1267,11 +1267,11 @@ class AsyncTreeMixin:
         def __truediv__(self, other: object) -> Self: ...  # noqa: D105
 
     # -- listings ------------------------------------------------------------
-    async def filter(self, *args: Filter, **kwargs: object) -> list[Self]:
+    async def filter(self, *args: BidsFilter, **kwargs: object) -> list[Self]:
         """Return the files of this dataset that a filter keeps, sorted.
 
         The coroutine counterpart of `BidsPath.filter`, listing the dataset
-        as `Filter.awalk` does.
+        as `BidsFilter.awalk` does.
         """
         return await _make_filter(args, kwargs).awalk(self)
 
@@ -1754,18 +1754,18 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
 
 # -- listings --------------------------------------------------------------------
 
-def _make_filter(args: tuple, kwargs: dict) -> Filter:
-    """Return the `Filter` given by position, or built from keywords."""
-    from brainfilter.filter import Filter
+def _make_filter(args: tuple, kwargs: dict) -> BidsFilter:
+    """Return the `BidsFilter` given by position, or built from keywords."""
+    from brainfilter.filter import BidsFilter
 
     if not args:
-        return Filter(**kwargs)
-    if len(args) == 1 and not kwargs and isinstance(args[0], Filter):
+        return BidsFilter(**kwargs)
+    if len(args) == 1 and not kwargs and isinstance(args[0], BidsFilter):
         return args[0]
     raise TypeError(
-        "filter() takes either one Filter or Filter keywords, not both"
+        "filter() takes either one BidsFilter or BidsFilter keywords, not both"
         if kwargs and args
-        else "filter() takes one Filter, or Filter keywords"
+        else "filter() takes one BidsFilter, or BidsFilter keywords"
     )
 
 

@@ -1,8 +1,8 @@
 # Filtering
 
-Select the files of a dataset with a `Filter` and its conditions.
+Select the files of a dataset with a `BidsFilter` and its conditions.
 
-::: brainfilter.Filter
+::: brainfilter.BidsFilter
 
 ::: brainfilter.Glob
 
