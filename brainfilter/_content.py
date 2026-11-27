@@ -24,7 +24,6 @@ as UTF-8, with or without a byte-order mark, and written without one.
 """
 from __future__ import annotations
 
-import copy
 import csv
 import io
 import json
@@ -525,9 +524,11 @@ class Table(list):
     def _snapshot(self) -> Callable[[], None]:
         """Return a function that puts this table back as it is now, in place.
 
-        Its rows are the same objects again, with their values as now.
+        Its rows are the same objects again, holding the same values as now
+        (the values themselves are not copied: a list a caller holds from a
+        cell stays the cell's own).
         """
-        rows = [(row, copy.deepcopy(dict(row))) for row in self]
+        rows = [(row, dict(row)) for row in self]
         columns = list(self._columns)
         text = {key: (row, dict(kept)) for key, (row, kept) in self._text.items()}
         delimiters = dict(self._delimiters)

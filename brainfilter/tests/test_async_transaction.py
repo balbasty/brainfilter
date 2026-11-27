@@ -104,7 +104,6 @@ async def test_as_dict_in_a_transaction_is_a_copy(ds):
     async with ds:
         content = await sidecar.as_dict()
         content["age"]["Units"] = "years"                 # not an edit
-        (await sidecar.get("age"))["Units"] = "years"     # nor this
         await sidecar.set("New", 1)
         held = await sidecar.as_dict()
         held["New"] = 2
@@ -728,3 +727,81 @@ async def test_a_header_only_table_takes_its_first_column(ds):
     async with ds:
         await scans.set("extra", [1, 2])
     assert await scans.read_text() == "filename\textra\nn/a\t1\nn/a\t2\n"
+
+
+# -- nested edits inside a block ----------------------------------------------------
+
+async def test_nested_edits_in_an_async_block_are_saved(ds):
+    sidecar = ds / "T1w.json"
+    table = ds / "participants.tsv"
+    await sidecar.update(Extra={"Coils": [{"Name": "head"}]}, Notes=[])
+    async with ds.transaction() as tx:
+        (await sidecar.get("Extra"))["Coils"][0]["Name"] = "neck"
+        (await sidecar.get("Notes")).append("checked")
+        (await table.get("age"))[1] = 41
+        assert (await sidecar.as_dict())["Notes"] == ["checked"]
+        assert await table.get("age") == [30.0, 41]
+        assert await table.get("nope", "default") == "default"
+    assert tx.written == [sidecar, table]
+    assert (await on_disk(sidecar))["Extra"] == {"Coils": [{"Name": "neck"}]}
+    assert (await on_disk(sidecar))["Notes"] == ["checked"]
+    assert await table.read_text() == PARTICIPANTS.replace("n/a", "41")
+
+
+async def test_an_exception_discards_the_async_nested_edits(ds):
+    sidecar = ds / "participants.json"
+    with pytest.raises(ValueError, match="boom"):
+        async with ds:
+            (await sidecar.get("age"))["Units"] = "years"
+            (await (ds / "participants.tsv").get("age"))[0] = 31
+            raise ValueError("boom")
+    assert await on_disk(sidecar) == FILES["participants.json"]
+    assert await (ds / "participants.tsv").read_text() == PARTICIPANTS
+
+
+async def test_async_reads_outside_a_block_and_copies_inside(ds):
+    sidecar = ds / "participants.json"
+    (await sidecar.get("age"))["Units"] = "years"          # outside: a copy
+    async with ds.transaction() as tx:
+        (await sidecar.as_dict())["age"]["Units"] = "years"
+        (await (ds / "participants.tsv").as_list())[0]["sex"] = "M"
+        read_only = AsyncBidsPath(str(sidecar))
+        (await read_only.get("age"))["Units"] = "years"
+        assert tx.changed == []
+    assert await on_disk(sidecar) == FILES["participants.json"]
+
+
+# -- raw writes inside a block ------------------------------------------------------
+
+async def test_an_async_raw_write_to_a_covered_file_is_refused(ds):
+    target = ds / "T1w.json"
+    other = ds / "dwi.json"
+    writes = {
+        "write_text": lambda: target.write_text("{}"),
+        "write_bytes": lambda: target.write_bytes(b"{}"),
+        "touch": lambda: target.touch(),
+        "unlink": lambda: target.unlink(),
+        "rename": lambda: other.rename(target),
+        "move": lambda: target.move(ds / "elsewhere.json"),
+        "copy_into": lambda: (ds.parent / "T1w.json").copy_into(ds),
+        "rmtree": lambda: (ds / "sub-01").rmtree(),
+    }
+    async with ds.transaction() as tx:
+        await (ds / "sub-01" / "sub-01_T1w.json").set("Inside", 1)
+        for name, write in writes.items():
+            with pytest.raises(RuntimeError, match="after the block ends"):
+                await write()
+        with pytest.raises(RuntimeError, match="covers this file"):
+            target.staged()
+        with pytest.raises(RuntimeError, match="covers this file"):
+            await AsyncBidsPath(str(target), mode="w").open("w")
+        # other files, and reads, are not refused
+        nifti = ds / T1W
+        await nifti.write_bytes(b"new")
+        assert await target.read_text()
+        assert json.loads(await target.read_text()) == FILES["T1w.json"]
+    assert tx.written == [ds / "sub-01" / "sub-01_T1w.json"]
+    assert await on_disk(target) == FILES["T1w.json"]
+    assert await (ds / T1W).read_bytes() == b"new"
+    await target.write_text("{}")                           # after the block
+    assert await on_disk(target) == {}

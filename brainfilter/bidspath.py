@@ -38,6 +38,10 @@ The mode is a brainfilter rule, not a filesystem permission: the wrapped
 driver object (`path.wrapped`) and the backend's own handles (`path.fs`,
 `path.client`) reach the storage directly and do not check it.
 
+Inside `with path:`, the same members also refuse, with `RuntimeError`, a
+write to a JSON or TSV file the block covers, which its commit would
+overwrite; see [`Transaction`][brainfilter.Transaction].
+
 !!! warning "`suffix` is the BIDS suffix"
     On these paths `suffix` is the BIDS suffix (`T1w`) and `with_suffix`
     replaces it. The file extension is `extension` (`.nii.gz`) and is

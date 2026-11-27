@@ -136,6 +136,12 @@ in the block behaves as though the files had changed. The changed files are
 written when the block ends cleanly, and are discarded if it ends with an
 exception.
 
+The two ways also differ in what a read gives you. Outside a transaction, every
+read returns a copy, so changing a nested value in place changes nothing on
+storage. Inside one, the transaction holds the file anyway, and a key of a JSON
+file, or a column of a table, gives the transaction's own value; see
+[Editing values in place](#editing-values-in-place).
+
 ### Concurrent writes to one file
 
 Two writes to the same file at the same time are made one after the other, under
@@ -169,6 +175,41 @@ buffer, and a read of any of them sees the edits.
 0.03
 False
 ```
+
+### Editing values in place
+
+Inside a block, on a writable path, `sidecar[key]` returns the transaction's own
+value rather than a copy, and so does `sidecar.get(key)`. A change made to a
+list or a dictionary it holds is therefore an edit like any other: it is seen by
+every read in the block, written when the block ends cleanly, and discarded with
+the rest if it ends with an exception. A column of a table, `table[column]`,
+is likewise a live view of the transaction's table, so `table["age"][0] = 31`
+sets one cell, and the cells around it keep their exact text. A column holds one
+value per row, so it refuses to grow or shrink; rows are added by writing the
+table.
+
+```pycon
+>>> bold = writer["task-rest_bold.json"]
+>>> bold["Extra"] = {"Coils": ["head"]}
+>>> with writer:
+...     bold["Extra"]["Coils"].append("neck")
+...     snapshot = bold.as_dict()
+...     snapshot["Extra"]["Coils"].append("spine")
+>>> bold["Extra"]
+{'Coils': ['head', 'neck']}
+```
+
+Every read that loads a whole file returns a copy, inside a block too: `as_dict()`,
+`as_list()`, `rows()`, `values()`, `items()`, `as_dataframe()`, and the merged
+`sidecar` of a data file. That makes `as_dict()` a snapshot, as the example
+shows. A value you assign is copied in, so your own object never becomes part of
+the file, and two files never share one. A read-only path is given copies inside
+a block as well, so it still cannot change anything. A value you keep after the
+block has ended no longer belongs to any file: change it then, and nothing is
+saved.
+
+In the async family the same holds for `await sidecar.get(key)` and
+`await table.get(column)`, inside `async with`.
 
 ### Files are known by location
 
@@ -227,13 +268,45 @@ two threads or tasks, sync or async. A second `with ds:` inside the first raises
 one on `ds["sub-01"]` and another on `ds["sub-02"]` together. A write to a file
 outside every open transaction is simply written through, as usual.
 
-!!! warning "Only brainfilter's writes are buffered"
+### Raw writes inside a block
 
-    The buffer holds the edits made through the JSON and TSV interface. A raw
-    operation on the path, such as `write_text`, goes to storage immediately and
-    is not part of the transaction. If it touches a file the transaction also
-    covers, the commit later replaces the file with the buffered version, and the
-    raw write is lost. Do not mix the two on one file.
+The buffer holds the edits made through the JSON and TSV interface. A raw
+operation on a path, such as `write_text`, would go to storage at once, outside
+the transaction, and the commit would later replace the file with the buffered
+version, losing the raw write. brainfilter therefore refuses, with a
+`RuntimeError`, a raw write to a JSON or TSV file below the root of an open
+transaction, whether the transaction has read the file yet or not. Every member
+that a read-only path refuses is refused here too, with the same rules for the
+two sides of a `rename`, `move` or `copy`; `mkdir` is the one exception, since
+creating a directory cannot lose an edit. A directory that holds a file the
+transaction holds, one it has read or edited, cannot be removed, renamed or
+replaced either, since the commit could write that file back.
+
+```pycon
+>>> with writer:
+...     bold["Checked"] = True
+...     try:
+...         bold.write_text("{}")
+...     except RuntimeError as error:
+...         print(error)
+cannot write to 'memory://ds/task-rest_bold.json' with write_text(): a transaction on 'memory://ds' is open, and it covers this file, so its commit could overwrite this write; inside the block, change a JSON or TSV file through brainfilter (`path[key] = value`, `path.write(...)`), or make this write after the block ends
+>>> bold["Checked"]
+True
+```
+
+Reads are not refused, and neither are raw writes to the other files below the
+root, such as an image, which a transaction never holds. The refusal applies
+whichever path the write goes through, one derived from the block's path or one
+built from a string, and from every thread and task while the transaction is
+open or committing.
+
+!!! warning "Writes past brainfilter are not seen"
+
+    The refusal is made by brainfilter's paths. A write through the wrapped
+    driver object (`path.wrapped`), through the backend's own handles, through a
+    plain `pathlib` or `bagof.paths` path, or by another program, is not seen. If
+    it touches a file the transaction holds, the commit replaces it and the
+    write is lost. Do not mix the two on one file.
 
 ## What is, and is not, atomic
 

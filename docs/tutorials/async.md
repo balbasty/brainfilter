@@ -141,8 +141,11 @@ loop, are carried out one after the other, so neither is lost. This protection
 holds within one event loop. Two processes writing to the same file are not
 coordinated, and the last replace wins.
 
-As in the synchronous API, a value that was read is a copy. Changing a nested
-dictionary in place does not save anything; set it again.
+As in the synchronous API, a value that was read outside a transaction is a
+copy. Changing a nested dictionary in place does not save anything; set it
+again, or make the change inside an `async with` block, where
+`await sidecar.get(key)` and `await table.get(column)` give the transaction's
+own values.
 
 ## Transactions
 

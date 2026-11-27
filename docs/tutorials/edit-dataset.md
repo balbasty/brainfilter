@@ -139,14 +139,16 @@ several keys in one replace, and `write` replaces the whole content of the file.
 ```
 
 Every one of these is a complete read, change and replace. That is what keeps
-each write safe, and it is also why a change made to a value you have already
-read does not reach the file.
+each write safe, and it is also why, outside a transaction, a change made to a
+value you have already read does not reach the file.
 
-!!! warning "Editing a nested value in place saves nothing"
+!!! warning "Outside a `with` block, editing a nested value in place saves nothing"
 
-    A value that a read returns is a copy. When it is a list or a dictionary,
-    changing it in place changes the copy, not the file. Write the changed value
-    back instead.
+    Outside a block, a value that a read returns is a copy. When it is a list or
+    a dictionary, changing it in place changes the copy, not the file. Write the
+    changed value back instead, or make the edit inside a `with` block, where a
+    nested value is the file's own and changing it in place is saved (see
+    [Grouping edits in a transaction](#grouping-edits-in-a-transaction)).
 
     ```pycon
     >>> bold["Extra"] = {"Coil": "head"}
@@ -160,7 +162,8 @@ read does not reach the file.
     {'Coil': 'neck'}
     ```
 
-    The same holds for the rows returned by `as_list()` on a table.
+    The same holds for the rows returned by `as_list()` on a table, which are
+    copies inside a block too.
 
 ## Fixing a value across a dataset
 
@@ -195,6 +198,25 @@ cleanly, each file that changed is written once.
 2.0
 ```
 
+Inside the block, a nested value can also be changed in place. There, a key of a
+JSON file gives the transaction's own value rather than a copy, so a change to a
+list or a dictionary it holds is saved when the block ends, like an assignment.
+
+```pycon
+>>> sub2 = ds["sub-02"]["func"]["sub-02_task-rest_bold.json"]
+>>> sub2["Extra"] = {"Coils": ["head"]}
+>>> with ds:
+...     sub2["Extra"]["Coils"].append("neck")
+...     sub2.as_dict()["Extra"]["Coils"].append("spine")   # a copy: not saved
+>>> sub2["Extra"]
+{'Coils': ['head', 'neck']}
+```
+
+Only a key of a JSON file, and a column of a table, give the transaction's own
+values. Reads that load a whole file, such as `as_dict()` and `as_list()`,
+return copies inside a block too, so you can keep one as a snapshot. A value you
+assign is copied in, so changing your own object afterwards changes nothing.
+
 The block gives you the path itself, so `with ds as d:` is the same as `d = ds`
 followed by `with ds:`. If you want a report of what was written, ask for the
 transaction object instead with `ds.transaction()`.
@@ -228,6 +250,22 @@ True
 ```
 
 The last line puts the value back for the rest of the tutorial.
+
+Reading the raw text is fine, but writing it is not. A raw write to a JSON or TSV
+file the block covers, such as `write_text`, `unlink` or `rename`, would be
+overwritten when the block commits, so brainfilter refuses it. Make such a write
+through brainfilter inside the block, or after the block ends. Raw writes to
+other files, such as an image, are allowed.
+
+```pycon
+>>> with ds:
+...     path["RepetitionTime"] = 2.0
+...     try:
+...         path.write_text("{}")
+...     except RuntimeError as error:
+...         print(str(error).partition(": a")[0])
+cannot write to 'memory://ds/sub-01/func/sub-01_task-rest_bold.json' with write_text()
+```
 
 ### When the block raises
 
@@ -347,6 +385,16 @@ A cell you do change is written from its Python value. `None` becomes `n/a`, a
 Here `1.5` equals the value that was already in the cell, so the cell kept its
 text `1.50`, while `31` replaced `30`. The comparison is made on the value, not
 on the text, and an unchanged value never causes a rewrite.
+
+Inside a `with` block, a column is the transaction's own, so a single cell can
+be set in place. The other cells keep their text in the same way.
+
+```pycon
+>>> with ds:
+...     table["sex"][2] = "M"
+>>> ds["participants.tsv"].read_text().splitlines()[3]
+'sub-03\t1.50\tM\tR'
+```
 
 brainfilter refuses a column that cannot be what you meant, and says why.
 

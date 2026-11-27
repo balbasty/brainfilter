@@ -32,12 +32,41 @@ Inside a block, every write to a covered file is kept, whichever path object
 it goes through (one derived from the block's path, one built from a string,
 sync or async), and every read of the tree sees them: a file's keys and
 values, `as_dict()`, the directory listing (new files included), `sidecars`
-and `sidecar`. A read returns a copy: changing it in place is not an edit.
-A write that raises leaves the file's content as it was. Leaving the block
-with an exception discards everything: nothing is written. Leaving it
-cleanly writes each changed file once. A file that was read but not changed
-is not written, and in a table that changed, the cells left unchanged keep
-their exact text.
+and `sidecar`. A write that raises leaves the file's content as it was.
+Leaving the block with an exception discards everything: nothing is
+written. Leaving it cleanly writes each changed file once. A file that was
+read but not changed is not written, and in a table that changed, the cells
+left unchanged keep their exact text.
+
+Inside a block, on a writable path, `sidecar[key]` (`await sidecar.get(key)`
+in the async family) returns the transaction's own value, and
+`table[column]` (`await table.get(column)`) a live column of its own table,
+so a nested value changed in place is an edit too:
+
+```python
+with ds:
+    ds["T1w.json"]["Extra"]["Coil"] = "neck"     # saved on exit
+    ds["T1w.json"]["Notes"].append("checked")
+    ds["participants.tsv"]["age"][0] = 31        # the other cells keep their text
+```
+
+Every other read returns a copy, inside a block too: `as_dict()`,
+`as_list()`, `rows()`, `values()`, `items()`, `as_dataframe()`, and the
+merged `sidecar`. A value written is copied, so the caller's object is never
+the file's, and two files never share one. Outside a block, every read is a
+copy. A read-only path is given copies inside a block as well.
+
+Inside a block, a raw write through a path to a file the block covers would
+be overwritten by the commit, or would mix with its edits, so it is refused
+with `RuntimeError`: `write_text`, `write_bytes`, `open` for writing,
+`touch`, `unlink`, `rename` and `replace` (either side), and every other
+member that a read-only path refuses, to a JSON or TSV file below the root,
+whether the transaction has read it yet or not, and to a directory that
+holds a file the transaction holds (one it has read or edited). Raw writes
+to other files (a `.nii.gz`, say) are allowed, and so are reads; `mkdir`
+always is. The refusal holds whichever path the write goes through, and
+from every thread and task while the transaction is open. The wrapped
+driver object and the backend's own handles are not checked.
 
 A transaction covers the files below its root, in the thread or task that
 opened it (and the tasks started inside it), while it is open. A write
@@ -103,6 +132,7 @@ from typing import TYPE_CHECKING, Any
 
 from brainfilter import _content
 from brainfilter._family import in_family
+from brainfilter._names import parse_name
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Mapping
@@ -165,6 +195,42 @@ def _open_elsewhere(
         if _within(location, tx._location):
             return tx
     return None
+
+
+# The transaction whose commit is writing in this context: the commit's own
+# writes go through the guarded members of the paths, and are not refused as
+# raw writes to the files it covers.
+_COMMITTING_HERE: ContextVar[_TransactionBase | None] = ContextVar(
+    "brainfilter_committing", default=None
+)
+
+# The extensions of the files a transaction holds (JSON and TSV).
+_CONTENT_EXTENSIONS = (".json", ".tsv")
+
+
+def refuse_raw_write(path: object, member: str, verb: str) -> None:
+    """Refuse a raw write to `path` that a transaction would lose.
+
+    `member` is the path member called (`write_text`, `rename`, ...) and
+    `verb` what it does to `path`, both for the error. A raw write is
+    refused, with `RuntimeError`, while a transaction is open (in any
+    context) or committing when `path` is a JSON or TSV file below its root,
+    held yet or not, or a directory that holds a file it holds: the commit
+    would overwrite the write, or write the file back. The commit's own
+    writes are not refused.
+    """
+    with _REGISTRY_LOCK:
+        if not _REGISTRY:
+            return
+        others = list(_REGISTRY)
+    writing = _COMMITTING_HERE.get()
+    location = _location(path)
+    for tx in others:
+        if tx is writing:
+            continue
+        held = tx._holds_at(location, path)
+        if held is not None:
+            raise tx._raw_write_error(path, member, verb, held)
 
 
 def pending_names(directory: object) -> set[str]:
@@ -378,14 +444,18 @@ class _Entry:
     def snapshot(self) -> Callable[[], None]:
         """Return a function that puts this entry back as it is now.
 
-        The content is put back in place, as the same object.
+        The content is put back in place, as the same object, and so is
+        each value in it: a change only sets, removes or replaces the
+        top-level values (the keys of a JSON object, the cells of a table's
+        rows), so their own objects are kept as they are, and a value a
+        caller holds from the content stays the content's own.
         """
         content, original, missing = self.content, self.original, self.missing
         restore_content = None
         if isinstance(content, _content.Table):
             restore_content = content._snapshot()
         elif isinstance(content, (dict, list)):
-            saved = copy.deepcopy(content)
+            saved = copy.copy(content)
 
             def restore_content() -> None:
                 if isinstance(content, dict):
@@ -641,6 +711,55 @@ class _TransactionBase:
             "shares it, a thread does not), or after it ends"
         )
 
+    def _holds_at(
+        self, location: tuple[str, Any], path: Any  # noqa: ANN401
+    ) -> str | None:
+        """Say what this transaction covers at `location`, or `None`.
+
+        `"file"`: a JSON or TSV file below the root (held yet or not);
+        `"directory"`: a directory that holds a file the transaction holds.
+        """
+        if _within(location, self._location) and (
+            parse_name(path.name).extension in _CONTENT_EXTENSIONS
+        ):
+            return "file"
+        # A snapshot of the keys: another thread may be adding to them.
+        for held in list(self._buffer._entries):
+            if _within(held, location):
+                entry = self._buffer._entries.get(held)
+                if entry is not None and not entry.absent():
+                    return "directory"
+        return None
+
+    def _raw_write_error(
+        self, path: object, member: str, verb: str, held: str
+    ) -> RuntimeError:
+        where = (
+            "open" if self._state == _OPEN and any(
+                tx is self for tx in _ACTIVE.get()
+            ) else f"{_doing(self)} in another thread or task"
+        )
+        if held == "file":
+            why = (
+                f"a transaction on {str(self._root)!r} is {where}, and it "
+                "covers this file, so its commit could overwrite this write"
+            )
+            how = (
+                "inside the block, change a JSON or TSV file through "
+                "brainfilter (`path[key] = value`, `path.write(...)`), or "
+                "make this write after the block ends"
+            )
+        else:
+            why = (
+                f"a transaction on {str(self._root)!r} is {where}, and it "
+                "holds files in this directory (read or edited), so its "
+                "commit could write them back"
+            )
+            how = "make this change after the block ends"
+        return RuntimeError(
+            f"cannot {verb} {str(path)!r} with {member}(): {why}; {how}"
+        )
+
     def _target(self, path: object) -> Any:  # noqa: ANN401
         """Return the path to write `path` through: of this family, writable.
 
@@ -711,8 +830,13 @@ class Transaction(_TransactionBase):
     ```python
     with ds.transaction() as tx:
         ds["T1w.json"]["RepetitionTime"] = 2.3
+        ds["T1w.json"]["Extra"]["Coil"] = "neck"   # a nested edit, kept too
     tx.written       # the files the commit wrote, in order
     ```
+
+    Inside the block, a raw write (`write_text`, `unlink`, ...) to a JSON or
+    TSV file it covers raises `RuntimeError`, since the commit would
+    overwrite it; see the module documentation.
     """
 
     def __enter__(self) -> Transaction:
@@ -734,15 +858,19 @@ class Transaction(_TransactionBase):
 
     def _commit(self) -> None:
         plan = self._buffer.plan()
-        for index, (path, data) in enumerate(plan):
-            try:
-                write_file(self._target(path), data)
-            except Exception as error:
-                raise self._failed(plan, index, error) from error
-            except BaseException as error:
-                self._interrupted(plan, index, error)
-                raise
-            self._written.append(path)
+        token = _COMMITTING_HERE.set(self)
+        try:
+            for index, (path, data) in enumerate(plan):
+                try:
+                    write_file(self._target(path), data)
+                except Exception as error:
+                    raise self._failed(plan, index, error) from error
+                except BaseException as error:
+                    self._interrupted(plan, index, error)
+                    raise
+                self._written.append(path)
+        finally:
+            _COMMITTING_HERE.reset(token)
 
 
 class AsyncTransaction(_TransactionBase):
@@ -780,13 +908,17 @@ class AsyncTransaction(_TransactionBase):
 
     async def _commit(self) -> None:
         plan = self._buffer.plan()
-        for index, (path, data) in enumerate(plan):
-            try:
-                await awrite_file(self._target(path), data)
-            except Exception as error:
-                raise self._failed(plan, index, error) from error
-            except BaseException as error:
-                # Cancelled, or interrupted: propagate as itself.
-                self._interrupted(plan, index, error)
-                raise
-            self._written.append(path)
+        token = _COMMITTING_HERE.set(self)
+        try:
+            for index, (path, data) in enumerate(plan):
+                try:
+                    await awrite_file(self._target(path), data)
+                except Exception as error:
+                    raise self._failed(plan, index, error) from error
+                except BaseException as error:
+                    # Cancelled, or interrupted: propagate as itself.
+                    self._interrupted(plan, index, error)
+                    raise
+                self._written.append(path)
+        finally:
+            _COMMITTING_HERE.reset(token)
