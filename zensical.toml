@@ -41,6 +41,7 @@ extra_css = ["stylesheets/extra.css"]
 [project.theme]
 
 language = "en"
+favicon = "images/brainfilter-icon.svg"
 
 features = [
   "content.code.copy",
