@@ -72,6 +72,7 @@ from brainfilter._names import (
     is_metadata,
     parse_name,
     role_of,
+    same_label,
     sort_entities,
 )
 from brainfilter._tree import (
@@ -165,7 +166,11 @@ class BidsEntities(dict):
     The comparisons follow the BIDS inheritance principle: `a < b` when a
     file with entities `a` inherits (strictly) from a file with entities
     `b`, i.e. every entity of `b` is in `a` with the same label and `a` has
-    more.
+    more. Index entities (`run`, `echo`, ...) compare by number here, as
+    in sidecar matching, so `run-1` inherits from `run-01`.
+    `==` is the plain `dict` comparison and compares labels as written,
+    so `BidsEntities(run="1") != BidsEntities(run="01")`, while both
+    `<=` and `>=` hold between them.
     """
 
     SORTED_ENTITIES: ClassVar[tuple[str, ...]] = SORTED_ENTITIES
@@ -175,33 +180,36 @@ class BidsEntities(dict):
         """Return these entities in canonical order (unknown keys last)."""
         return BidsEntities(sort_entities(self))
 
+    @staticmethod
+    def _inherits(child: dict, parent: dict) -> bool:
+        """Whether `child` has every entity of `parent`, with the same label."""
+        return all(
+            k in child and same_label(k, child[k], v) for k, v in parent.items()
+        )
+
     def __lt__(self, other: object) -> bool:
         """Whether this file inherits (strictly) from the other file."""
         if not isinstance(other, dict):
             return NotImplemented
-        if set(self) == set(other):
-            return False
-        return {k: v for k, v in self.items() if k in other} == other
+        return set(self) != set(other) and self._inherits(self, other)
 
     def __le__(self, other: object) -> bool:
         """Whether this file inherits from the other file."""
         if not isinstance(other, dict):
             return NotImplemented
-        return self < other or self == other
+        return self._inherits(self, other)
 
     def __gt__(self, other: object) -> bool:
         """Whether the other file inherits (strictly) from this file."""
         if not isinstance(other, dict):
             return NotImplemented
-        if set(self) == set(other):
-            return False
-        return {k: v for k, v in other.items() if k in self} == self
+        return set(self) != set(other) and self._inherits(other, self)
 
     def __ge__(self, other: object) -> bool:
         """Whether the other file inherits from this file."""
         if not isinstance(other, dict):
             return NotImplemented
-        return self > other or self == other
+        return self._inherits(other, self)
 
 
 def _view(path: object) -> PurePath | None:

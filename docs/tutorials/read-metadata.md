@@ -203,8 +203,8 @@ from the first that applies.
 1. **The column's description in the table's JSON sidecar.** If it has a
    `Format`, that is the type. `number` is a `float` (even when every value
    is integral), `integer` and `index` are an `int`, `boolean` is a `bool`
-   written `true` or `false`, and `date`, `datetime` and `time` are objects
-   from Python's `datetime` module, accepted in strict ISO 8601 only. Any
+   written `true` or `false`, and `date`, `datetime` and `time` are a
+   `datetime.date`, a `datetime.datetime` and a `datetime.time`, accepted in strict ISO 8601 only. Any
    other format is text. In the dataset above, `participants.json` says that
    `height` is a number, so the whole-number `170` reads as `170.0`, and that
    `visit` is a date.
@@ -213,7 +213,7 @@ from the first that applies.
    defines it so. The same holds for `onset` and `duration` in the events
    file, which read as floats although the file writes `4` and `1`.
    `participant_id` and `trial_type` are strings, and `acq_time` is a
-   datetime.
+   `datetime.datetime`.
 3. **The values themselves.** A column with neither is an `int` if every value
    is an integer as Python writes it, otherwise a `float` if every value is a
    float as Python writes it, otherwise text.
