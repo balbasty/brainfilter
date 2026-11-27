@@ -215,7 +215,9 @@ list or a dictionary it holds is saved when the block ends, like an assignment.
 Only a key of a JSON file, and a column of a table, give the transaction's own
 values. Reads that load a whole file, such as `as_dict()` and `as_list()`,
 return copies inside a block too, so you can keep one as a snapshot. A value you
-assign is copied in, so changing your own object afterwards changes nothing.
+assign to a key of a file is copied in, so changing your own object afterwards
+changes nothing. A value you store inside one of the transaction's own values is
+not copied, so take a copy first if it comes from another file.
 
 The block gives you the path itself, so `with ds as d:` is the same as `d = ds`
 followed by `with ds:`. If you want a report of what was written, ask for the
@@ -287,8 +289,8 @@ wrong subject list
 
 The same is true when the content cannot be written. Before the first file is
 replaced, every changed file is turned into its final text. A value that cannot
-be written, such as a tab inside a TSV cell, fails at that point, and then
-nothing has been written.
+be written, such as a tab inside a TSV cell, fails at that point with an error
+that names the file, and then nothing has been written.
 
 ```pycon
 >>> with ds:
@@ -296,7 +298,7 @@ nothing has been written.
 ...     ds["participants.tsv"]["note"] = ["a\tb", "c", "d"]
 Traceback (most recent call last):
   ...
-ValueError: row 0 of column 'note' holds a tab or a line break ('a\tb'), which a BIDS table cannot hold: it has no quoting; replace them, e.g. with spaces
+ValueError: memory://ds/participants.tsv: row 0 of column 'note' holds a tab or a line break ('a\tb'), which a BIDS table cannot hold: it has no quoting; replace them, e.g. with spaces
 >>> path["RepetitionTime"]
 2.0
 ```

@@ -183,10 +183,13 @@ value rather than a copy, and so does `sidecar.get(key)`. A change made to a
 list or a dictionary it holds is therefore an edit like any other: it is seen by
 every read in the block, written when the block ends cleanly, and discarded with
 the rest if it ends with an exception. A column of a table, `table[column]`,
-is likewise a live view of the transaction's table, so `table["age"][0] = 31`
-sets one cell, and the cells around it keep their exact text. A column holds one
-value per row, so it refuses to grow or shrink; rows are added by writing the
-table.
+is likewise a live column: a `list` kept in step with the transaction's table,
+so `table["age"][0] = 31` sets one cell, and the cells around it keep their
+exact text. It is a real list, so it can be indexed, sliced, sorted, added to
+another list, or passed to `json.dumps` and pandas, at the speed of a list. A column holds one value per
+row, so it refuses to grow or shrink (`append`, `del`, `+=`, a slice of another
+length raise `TypeError`); rows are added by writing the table. `sort()` and
+`reverse()` reorder the values of the column, not the rows.
 
 ```pycon
 >>> bold = writer["task-rest_bold.json"]
@@ -199,14 +202,37 @@ table.
 {'Coils': ['head', 'neck']}
 ```
 
+```pycon
+>>> (writer / "participants.tsv").write([
+...     {"participant_id": "sub-01", "group": "patient"},
+...     {"participant_id": "sub-02", "group": "patient"},
+... ])
+>>> with writer:
+...     groups = writer["participants.tsv"]["group"]
+...     groups[1] = "control"
+...     print(isinstance(groups, list), sorted(groups))
+True ['control', 'patient']
+>>> writer["participants.tsv"]["group"]
+['patient', 'control']
+```
+
 Every read that loads a whole file returns a copy, inside a block too: `as_dict()`,
 `as_list()`, `rows()`, `values()`, `items()`, `as_dataframe()`, and the merged
-`sidecar` of a data file. That makes `as_dict()` a snapshot, as the example
-shows. A value you assign is copied in, so your own object never becomes part of
-the file, and two files never share one. A read-only path is given copies inside
-a block as well, so it still cannot change anything. A value you keep after the
-block has ended no longer belongs to any file: change it then, and nothing is
-saved.
+`sidecar` of a data file. That makes `as_dict()` a snapshot, as the first example
+shows. A value you assign to a file, as in `sidecar[key] = value`, `update()`,
+`write()` or `table[column] = values`, is copied in, so your own object never
+becomes part of the file. A value you store inside one of the transaction's own
+values is not: after `ds["b.json"]["Y"]["s"] = ds["a.json"]["X"]`, the two files
+share one object, and a later change to it in the block is written to both. Take a copy (`copy.deepcopy`) to keep them apart. A read-only path is given
+copies inside a block as well, so it still cannot change anything.
+
+A value you keep after the block has ended no longer belongs to any file. A JSON
+value is then a plain object: change it, and nothing is saved. A live column
+raises `RuntimeError` when it is used at all, since its values are no longer the
+file's, whether the block committed or was discarded; read the column again.
+Inside the block, a column that is dropped raises `KeyError` until it is set
+again. A value that JSON cannot hold, stored inside a live value, fails when the
+block ends, with an error that names the file and the key, and nothing written.
 
 In the async family the same holds for `await sidecar.get(key)` and
 `await table.get(column)`, inside `async with`.
@@ -243,7 +269,9 @@ the running code, which is why the boundary falls where it does.
 
 A write to a covered file from any of the last three is refused with a
 `RuntimeError`, because it could otherwise be lost or written ahead of the
-transaction and then overwritten by its commit.
+transaction and then overwritten by its commit. So does a write that started
+before the block opened, if the block covers the file by the time the write
+reaches it; one that got there first is simply read by the block.
 
 ```pycon
 >>> import threading
@@ -277,10 +305,14 @@ version, losing the raw write. brainfilter therefore refuses, with a
 `RuntimeError`, a raw write to a JSON or TSV file below the root of an open
 transaction, whether the transaction has read the file yet or not. Every member
 that a read-only path refuses is refused here too, with the same rules for the
-two sides of a `rename`, `move` or `copy`; `mkdir` is the one exception, since
-creating a directory cannot lose an edit. A directory that holds a file the
-transaction holds, one it has read or edited, cannot be removed, renamed or
-replaced either, since the commit could write that file back.
+two sides of a `rename`, `move` or `copy`. `mkdir` is allowed, since creating a
+directory cannot lose an edit, except where the transaction holds a file (one
+with content, at that path or above it), where the commit would find a
+directory in its place. A directory that holds a file the transaction holds, one
+it has read or edited, cannot be removed, renamed or replaced either, since the
+commit could write that file back; `touch` and `chmod` of a directory that
+exists change it alone, so they are allowed, and so is a `copy_into` or `download_to` into it of
+a file the transaction does not cover.
 
 ```pycon
 >>> with writer:

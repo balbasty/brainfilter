@@ -8,13 +8,15 @@ backend's own handles (`path.fs`, `path.client`) reach the storage directly
 and are not guarded.
 
 The same members, on a writable path, refuse a raw write that an open
-transaction would lose: to a JSON or TSV file below its root, or to a
-directory holding a file it holds (see `transaction.refuse_raw_write`).
+transaction would lose: to a JSON or TSV file below its root, to a
+directory holding a file it holds, or a directory made where it holds a
+file (see `transaction.refuse_raw_write`).
 """
 from __future__ import annotations
 
 import functools
 import inspect
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -73,10 +75,6 @@ _ONTO = {
 # The members whose destination is a directory, the path's name in it: a
 # `download_to` destination may be either.
 _INTO = frozenset({"copy_into", "move_into"})
-
-# The members that a transaction never loses: creating a directory does not
-# change a file the transaction holds (a commit creates missing ones too).
-_NOT_LOST = frozenset({"mkdir"})
 
 
 class ReadOnlyError(PermissionError):
@@ -148,8 +146,6 @@ def _guard(owner: type, name: str, real: Callable) -> Callable:
         if target is not None:
             destination = argument(args, kwargs, target)
             require_writable(destination, verb)
-        if name in _NOT_LOST:
-            return
         if own:
             refuse_raw_write(path, name, verb)
         if destination is not None:
@@ -180,8 +176,11 @@ def _destinations(name: str, path: Any, destination: object) -> list:  # noqa: A
         written = in_family(destination, family)
         if name in _INTO:
             return [written / path.name]
-        if name == "download_to":
-            return [written, written / path.name]
+        if name == "download_to" and written.is_local() and os.path.isdir(
+            os.fspath(written)
+        ):
+            # Into a directory (which is not changed), under the path's name.
+            return [written / path.name]
         return [written]
     except Exception:  # noqa: BLE001
         return []

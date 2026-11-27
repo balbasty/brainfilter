@@ -1256,6 +1256,8 @@ def test_a_write_that_raises_keeps_the_live_values(ds):
 
 
 def test_a_live_column(ds):
+    import copy
+    import pickle
     from concurrent.futures import ThreadPoolExecutor
 
     from brainfilter._tree import LiveColumn
@@ -1263,18 +1265,47 @@ def test_a_live_column(ds):
     table = ds / "participants.tsv"
     with ds:
         sex = table["sex"]
-        assert isinstance(sex, LiveColumn)
+        assert isinstance(sex, LiveColumn) and isinstance(sex, list)
+        assert table["sex"] is sex                  # one per column
         assert sex == ["F", "M"] and sex != ["F"] and sex != "FM"
         assert repr(sex) == "['F', 'M']" and len(sex) == 2
         assert list(sex) == ["F", "M"] and sex[-1] == "M" and sex[:1] == ["F"]
+        assert json.dumps(sex) == '["F", "M"]'
+        for plain in (sex + ["x"], sex * 2, sex.copy(), sex[:], sorted(sex),
+                      copy.copy(sex), copy.deepcopy(sex),
+                      pickle.loads(pickle.dumps(sex))):
+            assert type(plain) is list
+        assert sex + ["x"] == ["F", "M", "x"] and sex * 2 == ["F", "M"] * 2
         sex[:] = ["M", "F"]
+        assert table.as_dict()["sex"] == ["M", "F"]
         sex.reverse()
-        with pytest.raises(ValueError, match="one value per row"):
+        assert table.as_dict()["sex"] == ["F", "M"]
+        sex.sort(reverse=True)
+        assert sex == ["M", "F"] and table.as_dict()["sex"] == ["M", "F"]
+        with pytest.raises(TypeError):
+            sex.sort(key=lambda value: {})          # put back as it was
+        assert sex == ["M", "F"] and table.as_dict()["sex"] == ["M", "F"]
+        sex[::-1] = ["M", "F"]
+        assert sex == ["F", "M"]
+
+        def iadd():
+            column = sex
+            column += ["F"]
+
+        def imul():
+            column = sex
+            column *= 2
+
+        def setslice():
             sex[:] = ["M"]
-        for change in (lambda: sex.append("F"), lambda: sex.pop(),
-                       lambda: sex.__delitem__(0), lambda: sex.insert(0, "F")):
+
+        for change in (lambda: sex.append("F"), lambda: sex.extend(["F"]),
+                       lambda: sex.insert(0, "F"), lambda: sex.pop(),
+                       lambda: sex.remove("F"), lambda: sex.clear(),
+                       lambda: sex.__delitem__(0), iadd, imul, setslice):
             with pytest.raises(TypeError, match="one value per row"):
                 change()
+        assert sex == ["F", "M"] and table.as_dict()["sex"] == ["F", "M"]
         with pytest.raises(IndexError):
             sex[2] = "F"
         with pytest.raises(KeyError):
@@ -1284,16 +1315,91 @@ def test_a_live_column(ds):
             future = pool.submit(sex.__setitem__, 0, "x")
             with pytest.raises(RuntimeError, match="another thread"):
                 future.result()
-        del table["sex"]
-        with pytest.raises(KeyError):
-            sex[0]
-        table["sex"] = ["F", "F"]
-        assert sex == ["F", "F"]                    # the column of the file
-        sex[1] = "M"
-    assert sex == ["F", "M"]                        # still read
+            assert pool.submit(lambda: sex[0]).result() == "F"   # a read
+        assert sex == ["F", "M"]
+    for use in (lambda: sex[0], lambda: list(sex), lambda: len(sex),
+                lambda: repr(sex), lambda: sex == ["F", "M"],
+                lambda: sex + [1], lambda: sex.copy(), lambda: sorted(sex)):
+        with pytest.raises(RuntimeError, match="has already closed"):
+            use()
     with pytest.raises(RuntimeError, match="has already closed"):
         sex[0] = "x"
     assert table.read_text() == PARTICIPANTS
+
+
+def test_a_live_column_follows_the_table(ds):
+    table = ds / "participants.tsv"
+    with ds:
+        sex = table["sex"]
+        table["sex"] = ["M", "M"]                   # set through the file
+        assert sex == ["M", "M"]
+        with pytest.raises(ValueError, match="one value per row"):
+            table["sex"] = ["F"]                    # raises: put back
+        assert sex == ["M", "M"]
+        del table["sex"]                            # dropped: KeyError
+        for use in (lambda: sex[0], lambda: len(sex), lambda: list(sex)):
+            with pytest.raises(KeyError):
+                use()
+        with pytest.raises(KeyError):
+            sex[0] = "F"
+        table["sex"] = ["F", "F"]                   # back: the file's column
+        assert sex == ["F", "F"]
+        sex[1] = "M"
+        table.write([{"participant_id": "sub-09", "sex": "F"}])
+        assert sex == ["F"]                         # the table was replaced
+        sex[0] = "M"
+        assert table.as_list() == [{"participant_id": "sub-09", "sex": "M"}]
+        table.write([{"participant_id": "sub-09"}])
+        with pytest.raises(KeyError):
+            sex[0]
+    assert table.read_text() == "participant_id\nsub-09\n"
+
+
+def test_a_live_column_assigned_into_json_is_a_copy(ds):
+    with ds:
+        ages = ds["participants.tsv"]["age"]
+        ds["T1w.json"]["Ages"] = ages
+        ds["participants.tsv"]["sex"][0] = ages     # a cell takes a copy
+        ages[0] = 99
+        assert ds["T1w.json"]["Ages"] == [30.0, None]
+        assert type(ds["T1w.json"]["Ages"]) is list
+        ds["participants.tsv"]["sex"][0] = "F"
+    assert on_disk(ds / "T1w.json")["Ages"] == [30.0, None]
+    assert ds["participants.tsv"].read_text() == PARTICIPANTS.replace(
+        "30", "99"
+    )
+
+
+def test_a_live_column_after_a_block_that_raised(ds):
+    with pytest.raises(ValueError, match="boom"):
+        with ds:
+            ages = ds["participants.tsv"]["age"]
+            ages[0] = 99
+            raise ValueError("boom")
+    with pytest.raises(RuntimeError, match="has already closed"):
+        list(ages)
+    with pytest.raises(RuntimeError, match="has already closed"):
+        ages[0]
+    assert ds["participants.tsv"].read_text() == PARTICIPANTS
+
+
+def test_a_live_column_is_as_fast_as_a_list(ds):
+    import time
+
+    rows = 20000
+    table = ds / "participants.tsv"
+    table.write([{"participant_id": f"sub-{i:05d}", "age": i}
+                 for i in range(rows)])
+    with ds:
+        ages = table["age"]
+        start = time.perf_counter()
+        for i in range(rows):
+            ages[i] = ages[i] + 1
+        elapsed = time.perf_counter() - start
+    # one value read and set per row: about 20ms; a scan of the table for
+    # each (as before) took minutes
+    assert elapsed < 2.0
+    assert table["age"][-1] == rows
 
 
 def test_reads_outside_a_block_stay_copies(ds):
@@ -1433,3 +1539,196 @@ def test_a_raw_write_from_another_thread_is_refused(ds):
 def test_a_read_only_path_says_it_is_read_only_first(ds):
     with ds, pytest.raises(ReadOnlyError):
         BidsPath(str(ds / "T1w.json")).write_text("{}")
+
+
+def test_a_raw_write_check_does_not_scan_the_held_files(local_ds):
+    import time
+
+    ds = local_ds
+    count = 1500
+    for i in range(count):
+        (ds / f"sub-{i:04d}_T1w.json").write_text('{"A": 1}')
+
+    def raw_writes(data):
+        start = time.perf_counter()
+        for i in range(count):
+            (ds / f"sub-{i:04d}_T1w.nii.gz").write_bytes(data)
+        return time.perf_counter() - start
+
+    alone = raw_writes(b"x")
+    with ds:
+        for i in range(count):
+            ds[f"sub-{i:04d}_T1w.json"]["A"] = 2
+        held = raw_writes(b"y")
+    # a scan of every held file for each write took about a minute here
+    assert held < 5 * alone + 1.0
+
+
+def test_touch_and_chmod_of_a_directory_holding_edits_are_allowed(local_ds):
+    ds = local_ds
+    with ds:
+        ds["sub-01"]["sub-01_T1w.json"]["Inside"] = 1
+        (ds / "sub-01").touch()
+        (ds / "sub-01").chmod(0o755)
+        ds.touch()
+        with pytest.raises(RuntimeError, match="covers this file"):
+            (ds / "sub-01" / "sub-01_T1w.json").touch()
+        # a directory not made yet, for a new file: touch would make a file
+        (ds / "sub-09" / "sub-09_T1w.json").write({"New": 1})
+        with pytest.raises(RuntimeError, match="holds files in this"):
+            (ds / "sub-09").touch()
+    assert on_disk(ds / "sub-01" / "sub-01_T1w.json")["Inside"] == 1
+    assert on_disk(ds / "sub-09" / "sub-09_T1w.json") == {"New": 1}
+
+
+def test_download_to_a_directory_checks_the_file_it_writes(local_ds):
+    from bagof.paths import UnsupportedPathOperation
+
+    ds = local_ds
+    source = BidsPath(str(ds.parent / "img.nii.gz"), mode="w")
+    source.write_bytes(b"img")
+    sidecar = BidsPath(str(ds.parent / "sub-01_T1w.json"), mode="w")
+    sidecar.write_text("{}")
+    with ds:
+        ds["sub-01"]["sub-01_T1w.json"]["Inside"] = 1
+        # the directory holds an edit, but the image it would write does not
+        # replace it: not refused (the local driver cannot download)
+        with pytest.raises(UnsupportedPathOperation):
+            source.download_to(ds / "sub-01")
+        for destination in (ds / "sub-01", ds / "sub-01" / "sub-01_T1w.json"):
+            with pytest.raises(RuntimeError, match="covers this file"):
+                sidecar.download_to(destination)
+
+
+def test_mkdir_where_the_block_holds_a_file_is_refused(ds):
+    with ds.transaction() as tx:
+        ds["new.json"] = {"n": 1}
+        for path in (ds / "new.json", ds / "new.json" / "below"):
+            with pytest.raises(RuntimeError, match="holds a file at this "
+                               "path") as info:
+                path.mkdir(parents=True)
+            assert "after the block ends" in str(info.value)
+        (ds / "sub-09").mkdir()                     # elsewhere: allowed
+        (ds / "other.json" / "x").mkdir(parents=True)  # held by nothing
+    assert tx.written == [ds / "new.json"]
+    assert on_disk(ds / "new.json") == {"n": 1}
+
+
+def test_a_directory_where_the_commit_writes_writes_nothing(local_ds):
+    import os
+
+    ds = local_ds
+    with pytest.raises(IsADirectoryError, match="nothing was written"):
+        with ds.transaction() as tx:
+            ds["T1w.json"]["Inside"] = 1
+            ds["new.json"] = {"n": 1}
+            os.mkdir(os.fspath(ds / "new.json"))    # past brainfilter
+    assert tx.written == []
+    assert on_disk(ds / "T1w.json") == FILES["T1w.json"]
+    os.rmdir(os.fspath(ds / "new.json"))
+    with pytest.raises(NotADirectoryError, match="nothing was written"):
+        with ds:
+            ds["T1w.json"]["Inside"] = 1
+            (ds / "sub-09" / "sub-09_T1w.json").write({"n": 1})
+            with open(os.fspath(ds / "sub-09"), "wb"):   # past brainfilter
+                pass
+    assert on_disk(ds / "T1w.json") == FILES["T1w.json"]
+
+
+# -- a value that cannot be written ---------------------------------------------------
+
+def test_a_nested_value_json_cannot_hold_names_its_file_and_key(ds):
+    with pytest.raises(TypeError) as info:
+        with ds:
+            ds["participants.tsv"]["age"] = [31, 32]
+            ds["T1w.json"]["Extra"] = {"Coils": [{"Name": "head"}]}
+            ds["T1w.json"]["Extra"]["Coils"][0]["Name"] = {1, 2}
+    message = str(info.value)
+    assert message.startswith(f"{ds / 'T1w.json'}: Extra.Coils[0].Name: ")
+    assert "Object of type set is not JSON serializable" in message
+    assert isinstance(info.value.__cause__, TypeError)
+    assert on_disk(ds / "T1w.json") == FILES["T1w.json"]   # nothing written
+    assert ds["participants.tsv"].read_text() == PARTICIPANTS
+    with pytest.raises(ValueError, match=r"participants\.tsv: row 0 of "
+                       "column 'sex' holds a tab"):
+        with ds:
+            ds["participants.tsv"]["sex"][0] = "a\tb"
+    assert ds["participants.tsv"].read_text() == PARTICIPANTS
+
+
+# -- a write through that a block opened meanwhile covers -----------------------------
+
+def test_a_write_through_that_got_there_first_is_read_by_the_block(
+    ds, monkeypatch
+):
+    import threading
+    import time
+
+    from brainfilter import transaction as T
+
+    real = T.write_file
+    writing, go = threading.Event(), threading.Event()
+
+    def write_file(path, data):
+        if threading.current_thread().name == "writer":
+            writing.set()
+            go.wait(5)
+            time.sleep(0.05)        # the block would read the old file now
+        real(path, data)
+
+    monkeypatch.setattr(T, "write_file", write_file)
+    errors = []
+
+    def writer():
+        try:
+            ds["T1w.json"]["Outside"] = 1
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+
+    thread = threading.Thread(target=writer, name="writer")
+    thread.start()
+    assert writing.wait(5)
+    with ds:
+        go.set()
+        ds["T1w.json"]["Inside"] = 1                # read once it is written
+    thread.join()
+    assert errors == []
+    assert on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "Outside": 1,
+                                        "Inside": 1}
+
+
+def test_a_write_through_that_a_block_got_ahead_of_raises(ds, monkeypatch):
+    import threading
+
+    from brainfilter import transaction as T
+
+    real = T.file_lock
+    waiting, go = threading.Event(), threading.Event()
+
+    def file_lock(path):
+        if threading.current_thread().name == "writer":
+            waiting.set()
+            go.wait(5)              # checked: no block yet; not yet locked
+        return real(path)
+
+    monkeypatch.setattr(T, "file_lock", file_lock)
+    errors = []
+
+    def writer():
+        try:
+            ds["T1w.json"]["Outside"] = 1
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+
+    thread = threading.Thread(target=writer, name="writer")
+    thread.start()
+    assert waiting.wait(5)
+    with ds:
+        ds["T1w.json"]["Inside"] = 1                # read first
+        go.set()
+        thread.join()
+    assert len(errors) == 1 and isinstance(errors[0], RuntimeError)
+    message = str(errors[0])
+    assert "open in another thread or task" in message
+    assert "staged()" not in message
+    assert on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "Inside": 1}
