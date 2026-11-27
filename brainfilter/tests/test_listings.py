@@ -69,17 +69,17 @@ def _rel(paths, root):
 
 def test_filter_keywords_and_instance(ds):
     assert ds.mode == "r"      # listing works on a read-only path
-    got = ds.filter(subjects="2", suffixes="bold")
+    got = ds.filter(sub="2", suffix="bold")
     assert _rel(got, ds) == [
         "sub-2/ses-1/func/sub-2_ses-1_task-rest_bold.nii.gz"
     ]
     assert all(isinstance(p, BidsPath) for p in got)
-    f = BidsFilter(subjects="2", suffixes="bold")
+    f = BidsFilter(sub="2", suffix="bold")
     assert ds.filter(f) == f.walk(ds) == got
 
 
 def test_filter_derivatives(ds):
-    got = ds["derivatives"]["fmriprep"].filter(subjects=10, desc="preproc")
+    got = ds["derivatives"]["fmriprep"].filter(sub=10, desc="preproc")
     assert len(_rel(got, ds)) == 1
     assert not any(r.startswith("derivatives/")
                    for r in _rel(ds.filter(), ds))
@@ -88,7 +88,7 @@ def test_filter_derivatives(ds):
 
 
 @pytest.mark.parametrize("args,kwargs", [
-    ((BidsFilter(),), {"subjects": 1}),
+    ((BidsFilter(),), {"sub": 1}),
     ((BidsFilter(), BidsFilter()), {}),
     (("sub-01",), {}),
 ])
@@ -122,14 +122,14 @@ def test_text_labels_sort_as_text(tmp_path):
 @pytest.mark.anyio
 async def test_async(ads):
     assert ads.mode == "r"
-    got = await ads.filter(subjects="2", suffixes="bold")
+    got = await ads.filter(sub="2", suffix="bold")
     assert all(isinstance(p, AsyncBidsPath) for p in got)
     assert _rel(got, ads) == [
         "sub-2/ses-1/func/sub-2_ses-1_task-rest_bold.nii.gz"
     ]
-    assert await ads.filter(BidsFilter(subjects="2", suffixes="bold")) == got
+    assert await ads.filter(BidsFilter(sub="2", suffix="bold")) == got
     with pytest.raises(TypeError):
-        await ads.filter(BidsFilter(), subjects=1)
+        await ads.filter(BidsFilter(), sub=1)
     assert await ads.subjects() == ["2", "10"]
     assert await ads.sessions() == ["1", "2", "10"]
     assert await (ads / "sub-2").sessions() == ["1", "2"]

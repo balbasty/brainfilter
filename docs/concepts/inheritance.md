@@ -203,7 +203,7 @@ their subject or session, whatever acquisition the recording names. The
 events table and not the image, and the `companions` property of a data file
 lists them instead; see
 [Companions and fieldmaps](../tutorials/associated-files.md). A companion is
-a file of its own as well, so a filter that names it (`suffixes="events"`)
+a file of its own as well, so a filter that names it (`suffix="events"`)
 selects it with its own sidecars, and not the recordings it describes.
 
 ```pycon
@@ -221,7 +221,7 @@ selects it with its own sidecars, and not the recordings it describes.
 ...     "sub-02/func/sub-02_task-rest_run-1_bold.nii.gz",
 ...     "sub-02/sub-02_task-rest_bold.json",
 ... ]
->>> for name in BidsFilter(subjects="01", tasks="rest", run="01").select(listing):
+>>> for name in BidsFilter(sub="01", task="rest", run="01").select(listing):
 ...     print(name)
 bold.json
 dataset_description.json

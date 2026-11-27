@@ -190,7 +190,7 @@ def test_walk_honours_bidsignore(ds):
         "participants.tsv", *[k for k in FILES if k.startswith("sub-")],
     ])
     # T2w.json applies to the ignored images, which are not selected
-    assert _rel(BidsFilter(suffixes="T2w").walk(ds), ds) == [
+    assert _rel(BidsFilter(suffix="T2w").walk(ds), ds) == [
         ".bidsignore", "README", "dataset_description.json",
         "participants.tsv",
     ]
@@ -223,7 +223,7 @@ def test_ignored_dataset_level_files_are_kept(tmp_path):
         **FILES, "phenotype/scores.tsv": "participant_id\nsub-01\n",
         ".bidsignore": "participants.tsv\nREADME\nphenotype/\n",
     })
-    for f in (BidsFilter(), BidsFilter(subjects="02")):
+    for f in (BidsFilter(), BidsFilter(sub="02")):
         kept = _rel(f.walk(root), root)
         assert {"README", "participants.tsv",
                 "phenotype/scores.tsv"} <= set(kept)
@@ -325,9 +325,9 @@ def test_an_ignored_nearest_sidecar_still_applies(inherit):
     assert "task-rest_bold.json" in kept
     assert "sub-02/func/sub-02_task-rest_bold.nii.gz" not in kept
     assert bold not in _walks(BidsFilter(RepetitionTime=2), inherit)
-    assert sidecar in _walks(BidsFilter(subjects="01"), inherit)
+    assert sidecar in _walks(BidsFilter(sub="01"), inherit)
     # alone, an ignored sidecar is not kept
-    assert sidecar not in _walks(BidsFilter(subjects="01", suffixes="T1w"), inherit)
+    assert sidecar not in _walks(BidsFilter(sub="01", suffix="T1w"), inherit)
 
 
 def test_ignored_tables_bvals_and_companions_still_come_along(inherit):
@@ -342,7 +342,7 @@ def test_ignored_tables_bvals_and_companions_still_come_along(inherit):
     ):
         assert rel in kept
     assert "participants.tsv" in kept
-    kept = _walks(BidsFilter(subjects="02"), inherit)
+    kept = _walks(BidsFilter(sub="02"), inherit)
     assert "sub-02/dwi/sub-02_dwi.bval" in kept
     assert not any(p.startswith("sub-01/") for p in kept)
 
@@ -369,7 +369,7 @@ def test_an_ignored_sidecar_directory(inherit):
     assert "sub-02/sub-02_task-rest_bold.json" in kept
     # ... and nothing of the ignored folder is kept, but it still holds the
     # data the top-level sidecar applies to
-    kept = _walks(BidsFilter(subjects="01"), inherit)
+    kept = _walks(BidsFilter(sub="01"), inherit)
     assert not any(p.startswith("sub-01/func/") for p in kept)
     _write(inherit, {".bidsignore": "sub-01/func/\nsub-02/\n"})
     assert "task-rest_bold.json" not in _walks(BidsFilter(), inherit)
@@ -380,7 +380,7 @@ def test_a_walk_lists_an_ignored_folder_only_when_metadata_above_needs_it(
 ):
     root = BidsPath("memory://lists")
     _write(root, {**INHERIT, ".bidsignore": "sub-01/\n"})
-    BidsFilter(subjects="02").walk(root)
+    BidsFilter(sub="02").walk(root)
     assert not any(d.startswith("/lists/sub-01") for d in listed_dirs)
     listed_dirs.clear()
     # task-rest_bold.json applies to the bold of sub-02, which settles it;

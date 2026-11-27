@@ -302,6 +302,31 @@ SORTED_ENTITIES = (
     "desc",         # description (kept last by convention)
 )
 
+# The long name of each entity whose long name is not its key, from
+# `objects.entities` of the official BIDS 1.11.2 schema (schema 2.0.1): the
+# object's key is the long name, its `name` the key.
+ENTITY_LONG_NAMES = {
+    "acquisition": "acq",
+    "ceagent": "ce",
+    "density": "den",
+    "description": "desc",
+    "direction": "dir",
+    "hemisphere": "hemi",
+    "inversion": "inv",
+    "modality": "mod",
+    "mtransfer": "mt",
+    "nucleus": "nuc",
+    "processing": "proc",
+    "reconstruction": "rec",
+    "resolution": "res",
+    "segmentation": "seg",
+    "session": "ses",
+    "subject": "sub",
+    "template": "tpl",
+    "tracer": "trc",
+    "volume": "voi",
+}
+
 # Index entities: their value is a non-negative integer, so `run-1` and
 # `run-01` are the same run. The entities whose `format` is `index` in
 # `objects.entities` of the official BIDS 1.11.2 schema.

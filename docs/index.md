@@ -33,7 +33,7 @@ ds = BidsPath("s3://openneuro.org/ds000001", storage_options={"anon": True})
 ds["dataset_description.json"]["Name"]        # 'Balloon Analog Risk-taking Task'
 ds["participants.tsv"]["age"][:3]             # [26.0, 24.0, 27.0]
 
-kept = BidsFilter(subjects=[1, 2], datatypes="anat").walk(ds)
+kept = BidsFilter(sub=[1, 2], datatype="anat").walk(ds)
 [p.name for p in kept if p.name.endswith(".nii.gz")]
 # ['sub-01_T1w.nii.gz', 'sub-01_inplaneT2.nii.gz',
 #  'sub-02_T1w.nii.gz', 'sub-02_inplaneT2.nii.gz']

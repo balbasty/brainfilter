@@ -163,9 +163,10 @@ def test_a_test_that_raises_on_a_wrong_value_fails(ds):
 
 
 @pytest.mark.parametrize("keyword, meant", [
-    ("Subjects", "subjects"), ("Subject", "subjects"), ("Sessions", "sessions"),
-    ("Datatypes", "datatypes"), ("Suffix", "suffixes"), ("Tasks", "tasks"),
-    ("Exclude_Subjects", "exclude_subjects"), ("Participants", "participants"),
+    ("Subjects", "sub"), ("Subject", "sub"), ("Sessions", "ses"),
+    ("Datatypes", "datatype"), ("Suffix", "suffix"), ("Suffixes", "suffix"),
+    ("Tasks", "task"), ("Extension", "extension"), ("Acquisition", "acq"),
+    ("Participants", "participants"),
     ("Acq", "acq"), ("Run", "run"), ("Runs", "run"), ("Sub", "sub"),
 ])
 def test_a_capitalised_keyword_is_a_misspelling(keyword, meant):
@@ -199,10 +200,10 @@ def test_sidecars_are_read_once_and_only_for_passing_data(ds, monkeypatch):
         "sub-02_task-rest_bold.json",
     })
     read.clear()
-    BidsFilter(subjects="02", EchoTime=Any).walk(ds)
+    BidsFilter(sub="02", EchoTime=Any).walk(ds)
     assert sorted(read) == ["sub-02_task-rest_bold.json", "task-rest_bold.json"]
     read.clear()
-    BidsFilter(subjects="02").walk(ds)
+    BidsFilter(sub="02").walk(ds)
     assert read == []
 
 
@@ -229,9 +230,9 @@ def test_select_reads_sidecars_from_path_objects(ds):
     ({"participants": {"weight": Any}}, set()),
     ({"participants": {"weight": 3}}, set()),
     ({"participants": {"group": Glob("c*")}}, {"01"}),
-    # with subjects=: both
+    # with sub=: both
     ({"participants": {"group": {"control", "patient"}},
-      "subjects": ["02", "03"]}, {"02"}),
+      "sub": ["02", "03"]}, {"02"}),
     ({"participants": {}}, {"01", "02", "03", "04"}),   # no filter
 ])
 def test_participants(ds, kwargs, expected):
@@ -339,27 +340,33 @@ def test_never_keeps_files_without_the_entity(never):
     assert _images(BidsFilter(entities={"acq": never})) == {0, 3, 4, 5}
     assert _images(BidsFilter(run=never)) == {0, 1, 2, 5}
     assert _images(BidsFilter(task=never)) == {0, 1, 2}
-    if never is not None:   # None is no filter on a label keyword
-        assert _images(BidsFilter(tasks=never)) == {0, 1, 2}
-        assert _images(BidsFilter(sessions=never)) == set(range(len(PRESENCE)))
-        assert _images(BidsFilter(subjects=never)) == set()
-        assert _images(BidsFilter(datatypes=never)) == set()
+    assert _images(BidsFilter(ses=never)) == set(range(len(PRESENCE)))
+    assert _images(BidsFilter(sub=never)) == set()
+    assert _images(BidsFilter(datatype=never)) == set()
 
 
-LABEL_KEYWORDS = [
-    "subjects", "exclude_subjects", "sessions", "datatypes", "suffixes",
-    "tasks",
+REMOVED_KEYWORDS = [
+    ("subjects", "sub="), ("exclude_subjects", r"sub=Not\(\.\.\.\)"),
+    ("sessions", "ses="), ("datatypes", "datatype="), ("suffixes", "suffix="),
+    ("tasks", "task="),
 ]
 
 
-@pytest.mark.parametrize("keyword", LABEL_KEYWORDS)
-def test_none_is_no_filter_on_a_label_keyword(keyword):
+@pytest.mark.parametrize("keyword, hint", REMOVED_KEYWORDS)
+def test_a_plural_keyword_names_the_singular(keyword, hint):
+    with pytest.raises(TypeError, match=f"unknown keywords {keyword}; use {hint} "
+                       f"instead of {keyword}="):
+        BidsFilter(**{keyword: "01"})
+
+
+@pytest.mark.parametrize("keyword", ["datatype", "suffix", "extension"])
+def test_a_part_keyword_left_out_is_no_filter(keyword):
     import inspect
 
-    assert inspect.signature(BidsFilter).parameters[keyword].default is None
-    assert _images(BidsFilter(**{keyword: None})) == set(range(len(PRESENCE)))
-    with pytest.raises(TypeError, match=f"{keyword}=.*Never"):
-        BidsFilter(**{keyword: [None, "x"]})
+    assert inspect.signature(BidsFilter).parameters[keyword].default is not None
+    assert _images(BidsFilter()) == set(range(len(PRESENCE)))
+    # every image has a suffix and an extension, and is in a datatype folder
+    assert _images(BidsFilter(**{keyword: None})) == set()
 
 
 def test_none_is_never_on_an_entity_keyword():
@@ -372,7 +379,7 @@ def test_none_is_never_on_an_entity_keyword():
 def test_any_keeps_files_with_the_entity(anything):
     assert _images(BidsFilter(acq=anything)) == {1, 2}
     assert _images(BidsFilter(run=anything)) == {3, 4}
-    assert _images(BidsFilter(sessions=anything)) == set()
+    assert _images(BidsFilter(ses=anything)) == set()
 
 
 def test_presence_mixes_with_values():
@@ -515,13 +522,13 @@ def test_without_a_description_nothing_is_inherited(tmp_path):
     assert _selects(BidsFilter(EchoTime=Any), root) == []
     assert _selects(BidsFilter(RepetitionTime=2), root) == []
     # and they do not come along with the data either
-    kept = _selects(BidsFilter(datatypes="func"), root)
+    kept = _selects(BidsFilter(datatype="func"), root)
     assert kept == [
         "sub-01/func/sub-01_task-rest_bold.json", bold,
         "sub-02/func/sub-02_task-rest_bold.nii.gz",
     ]
     # and on their subject
-    assert _selects(BidsFilter(subjects="02"), root) == [
+    assert _selects(BidsFilter(sub="02"), root) == [
         "sub-02/func/sub-02_task-rest_bold.nii.gz"
     ]
 
@@ -538,7 +545,7 @@ def test_with_a_description_sidecars_are_inherited(tmp_path):
         "sub-01/func/sub-01_task-rest_bold.json", bold,
         "sub-01/sub-01_task-rest_bold.json", "task-rest_bold.json",
     ]
-    assert "task-rest_bold.json" in _selects(BidsFilter(datatypes="func"), root)
+    assert "task-rest_bold.json" in _selects(BidsFilter(datatype="func"), root)
 
 
 def test_a_nested_description_is_the_root_of_what_is_below_it(tmp_path):
@@ -554,7 +561,7 @@ def test_a_nested_description_is_the_root_of_what_is_below_it(tmp_path):
         "sub-02/func/sub-02_task-rest_bold.nii.gz",
     }
     assert _data(BidsFilter(EchoTime=0.03).walk(root), root) == {bold}
-    kept = _selects(BidsFilter(subjects="01", datatypes="func"), root)
+    kept = _selects(BidsFilter(sub="01", datatype="func"), root)
     assert "task-rest_bold.json" not in kept
     assert "sub-01/sub-01_task-rest_bold.json" in kept
 

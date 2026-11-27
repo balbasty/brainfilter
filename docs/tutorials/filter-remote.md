@@ -60,7 +60,7 @@ Suppose a study needs the T1-weighted image of the first three participants.
 The filter is the same one that would be used on a local disk:
 
 ```pycon
->>> f = BidsFilter(subjects=[1, 2, 3], datatypes="anat", suffixes="T1w")
+>>> f = BidsFilter(sub=[1, 2, 3], datatype="anat", suffix="T1w")
 >>> kept = f.walk(ds)
 >>> print(*[p.relative_to(ds).as_posix() for p in kept], sep="\n")
 CHANGES
@@ -95,7 +95,7 @@ is larger than expected, the filter can be refined and run again at no cost.
 
 !!! note "Filters apply to every file they touch"
 
-    Combining `tasks="balloonanalogrisktask"` with `datatypes="anat"` selects
+    Combining `task="balloonanalogrisktask"` with `datatype="anat"` selects
     nothing from `anat`, because an anatomical image has no `task` entity and
     a filter on an entity rejects the files that lack it. To select
     anatomical and functional data together, filter each kind separately and
@@ -147,9 +147,9 @@ paths do not have to be converted to strings first.
 >>> files = BidsFilter().walk(ds)
 >>> len(files)
 133
->>> len(BidsFilter(datatypes="anat").select(files, root=ds))
+>>> len(BidsFilter(datatype="anat").select(files, root=ds))
 36
->>> len(BidsFilter(tasks="balloonanalogrisktask", run=1).select(files, root=ds))
+>>> len(BidsFilter(task="balloonanalogrisktask", run=1).select(files, root=ds))
 37
 ```
 
@@ -190,7 +190,7 @@ from brainfilter import AsyncBidsPath, BidsFilter
 
 async def main():
     ds = AsyncBidsPath("s3://openneuro.org/ds000001", storage_options={"anon": True})
-    return await BidsFilter(subjects=[1, 2, 3], datatypes="anat").awalk(ds)
+    return await BidsFilter(sub=[1, 2, 3], datatype="anat").awalk(ds)
 
 
 kept = asyncio.run(main())

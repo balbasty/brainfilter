@@ -4,7 +4,7 @@ A [`BidsFilter`][brainfilter.BidsFilter] works on paths relative to the
 dataset root, so it applies to any listing (OpenNeuro, S3, a local
 directory, ...) before anything is downloaded::
 
-    >>> f = BidsFilter(subjects=["01"], datatypes="anat", acq="mprage")
+    >>> f = BidsFilter(sub="01", datatype="anat", acq="mprage")
     >>> f.select(listing)                       # relative path strings
     >>> f.walk("s3://openneuro.org/ds000224")   # list a dataset, then select
     >>> await f.awalk("s3://openneuro.org/ds000224")  # ... asynchronously
@@ -18,8 +18,9 @@ Selection rules
 The input is a listing of files; see `BidsFilter.select` for directories.
 
 1. *Data files* are the files inside `sub-*/` that are not metadata (rule
-   2). They are kept if they pass every filter: subjects, sessions,
-   datatypes, suffixes, tasks, other entities, the `include` patterns, the
+   2). They are kept if they pass every filter: the entities (`sub`,
+   `ses`, `task`, ...), the datatype, suffix and extension, the `include`
+   patterns, the
    participants filter (on the subject's row of `participants.tsv`) and
    the sidecar filters (on the merged sidecar of the file). A file's
    subject and session are those its name gives, else those of the
@@ -36,7 +37,7 @@ The input is a listing of files; see `BidsFilter.select` for directories.
    `*_photo` of a recording's set-up, the `*_headshape` and `*_markers` of
    a MEG session, and the MEG fine-calibration and crosstalk files
    (`*_acq-calibration_meg.dat`, `*_acq-crosstalk_meg.fif`). A filter that
-   names one (`suffixes="events"`, `acq="crosstalk"`) selects it, with its
+   names one (`suffix="events"`, `acq="crosstalk"`) selects it, with its
    own JSON sidecars and without the recordings it describes.
 2. *Metadata files* (`.json`, `.tsv`, `.bval` and `.bvec` files that are no
    companions: `bold.json`, `events.json`, `dwi.bval`), wherever they are,
@@ -107,9 +108,15 @@ the label that says whether it matches, or a marker of presence:
 `typing.Never` matches a file that does not have the entity, and
 `typing.Any` (or `typing.Required`) one that has it, whatever its label. A
 list or a set may mix all of these: `acq={Never, "mprage"}`. On an entity
-keyword (`acq=None`, `sub=None`, `entities={"acq": None}`), `None` is
-`Never`; on `subjects`, `exclude_subjects`, `sessions`, `datatypes`,
-`suffixes` and `tasks`, it is no filter, their default.
+keyword (`acq=None`, `sub=None`, `entities={"acq": None}`), and on
+`datatype`, `suffix` and `extension`, `None` is `Never`: `datatype=None`
+keeps the files outside a datatype folder. A keyword left out is no
+filter, so pass nothing rather than `None` to filter on nothing.
+[`Not`][brainfilter.Not] keeps what a value does not: `sub=Not("02")`
+keeps every subject but `02`. A file without the entity passes `Not(x)`
+unless `x` keeps such a file, so `Not(Never)` is `Any`. `Not` goes around
+the whole value (`Not({"01", "02"})`), and works on sidecar and
+participants filters too.
 Plain labels may keep their `<key>-` prefix (`"sub-01"` is `"01"`); a
 pattern is matched against the bare label.
 
@@ -118,8 +125,8 @@ plain values by number: `run=1`, `run="1"` and `run="01"` all match
 `run-1` and `run-01`. A glob or regex on an index entity matches its label
 as written in the file name.
 Other entities compare strings as exact text, but an `int` by number on any
-entity: `subjects=1` matches `sub-1`, `sub-01` and `sub-001` (never `sub-1a`)
-where `subjects="1"` matches `sub-1` only.
+entity: `sub=1` matches `sub-1`, `sub-01` and `sub-001` (never `sub-1a`)
+where `sub="1"` matches `sub-1` only.
 
 A filter on a sidecar field or a `participants.tsv` column takes the same
 forms, on the value the JSON or the table holds, with three differences. A
@@ -154,6 +161,7 @@ from bagof.paths import AsyncPath, Path, PurePath
 from brainfilter._family import in_family
 from brainfilter._names import (
     DATATYPES,
+    ENTITY_LONG_NAMES,
     INDEX_ENTITIES,
     OPTIONAL_FOLDERS,
     SORTED_ENTITIES,
@@ -169,7 +177,7 @@ from brainfilter._names import (
     same_label,
 )
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
-from brainfilter.conditions import Condition, Or, Regex, default_full
+from brainfilter.conditions import Condition, Not, Or, Regex, default_full
 
 __all__ = ["BidsFilter"]
 
@@ -183,7 +191,15 @@ _PROTECTED = frozenset({"dataset_description.json"})
 _NEVER_IGNORED = frozenset({"dataset_description.json", ".bidsignore"})
 
 # BidsFilter keywords that are entity filters under another name.
-_ALIASES = {"subjects": "sub", "sessions": "ses", "tasks": "task"}
+# The keywords that were renamed before release, and what to write instead.
+_RENAMED = {
+    "subjects": "sub=", "sessions": "ses=", "tasks": "task=",
+    "datatypes": "datatype=", "suffixes": "suffix=", "extensions": "extension=",
+    "exclude_subjects": "sub=Not(...)",
+}
+
+# The default of a keyword that was not given (`None` is a value).
+_UNSET: object = type("_Unset", (), {"__repr__": lambda self: "<unset>"})()
 
 _PARTICIPANTS = "participants.tsv"
 _BIDSIGNORE = ".bidsignore"
@@ -261,14 +277,10 @@ class _LabelMatch:
     too; otherwise a string compares as exact text. Conditions and tests
     see the label as written; a regex must match all of it.
 
-    `keyword` names the label keyword (`subjects`, ...) the values were
-    given to, on which `None` is not a value; without it, `None` is `Never`.
+    `None` is `Never`.
     """
 
-    def __init__(
-        self, values: list, key: str | None, index: bool,
-        keyword: str | None = None,
-    ) -> None:
+    def __init__(self, values: list, key: str | None, index: bool) -> None:
         self.absent = False      # `Never` (or `None`): no such entity
         self.present = False     # `Any` / `Required`: any label
         self.exact: set[object] = set()
@@ -276,12 +288,7 @@ class _LabelMatch:
         self.tests: list[Callable[[object], bool]] = []
         self.index = index
         for item in values:
-            if item is None and keyword is not None:
-                raise TypeError(
-                    f"BidsFilter got None among the values of {keyword}=: None "
-                    f"is no filter there; use typing.Never for the files "
-                    f"that have no such label"
-                )
+            _refuse_nested_not(item)
             if item is None or _is_marker(item, _ABSENT_MARKERS):
                 self.absent = True
                 continue
@@ -329,21 +336,56 @@ class _LabelMatch:
         return any(_guarded(test, label) for test in self.tests)
 
 
+class _NotMatch:
+    """The opposite of a label or value test (`Not(...)`).
+
+    `missing` is what the test is handed for an entity or a field that is
+    not there; such a file passes unless the inner test keeps it. An inner
+    filter that keeps everything (an empty set) makes one that keeps
+    nothing.
+    """
+
+    def __init__(
+        self, inner: Callable[[object], bool] | None, missing: object,
+    ) -> None:
+        self.inner = inner
+        # Selection rule 3: a file without the entity passes, judged on its
+        # own name, exactly when `Not(...)` keeps a file without it.
+        self.lenient = inner is not None and not inner(missing)
+
+    def __call__(self, value: object) -> bool:
+        return self.inner is not None and not self.inner(value)
+
+
+def _refuse_nested_not(item: object) -> None:
+    if isinstance(item, Not):
+        raise TypeError(
+            f"BidsFilter got {item!r} among several values: Not goes around "
+            "the whole value, as in Not({'a', 'b'})"
+        )
+
+
 def _matcher(
     value: object, key: str | None, index: bool = False,
-    keyword: str | None = None,
-) -> _LabelMatch | None:
-    """Build the test of a label filter; `None` keeps everything.
-
-    On a label keyword (`keyword`, such as `"subjects"`), a value of `None`
-    is no filter; on an entity keyword, it is `Never`.
-    """
-    if value is None and keyword is not None:
-        return None
+) -> _LabelMatch | _NotMatch | None:
+    """Build the test of a label filter; an empty set keeps everything."""
+    if isinstance(value, Not):
+        return _NotMatch(_matcher(value.value, key, index), None)
     values = list(value) if _is_many(value) else [value]
     if not values:
         return None
-    return _LabelMatch(values, key, index, keyword)
+    return _LabelMatch(values, key, index)
+
+
+def _dotted(value: object) -> object:
+    """Give each plain extension of a filter value its leading dot."""
+    if isinstance(value, Not):
+        return Not(_dotted(value.value))
+    if _is_many(value):
+        return type(value)(_dotted(v) for v in value)
+    if isinstance(value, str) and not value.startswith("."):
+        return "." + value
+    return value
 
 
 def _equal(value: object, expected: object) -> bool:
@@ -375,6 +417,7 @@ def _equal(value: object, expected: object) -> bool:
 
 def _value_test(item: object) -> Callable[[object], bool]:
     """Build `value -> bool` for one value of a sidecar or table filter."""
+    _refuse_nested_not(item)
     if _is_marker(item, _ABSENT_MARKERS):
         return lambda value: value is _ABSENT
     if _is_marker(item, _PRESENT_MARKERS):
@@ -409,15 +452,26 @@ class _ValueMatch:
         return any(test(value) for test in self.tests)
 
 
-def _value_matchers(given: Mapping, what: str) -> dict[str, _ValueMatch]:
+def _value_matcher(value: object) -> _ValueMatch | _NotMatch | None:
+    """Build the test of a sidecar or table filter; `None` keeps everything."""
+    if isinstance(value, Not):
+        return _NotMatch(_value_matcher(value.value), _ABSENT)
+    if isinstance(value, (set, frozenset)) and not value:
+        return None
+    return _ValueMatch(value)
+
+
+def _value_matchers(
+    given: Mapping, what: str,
+) -> dict[str, _ValueMatch | _NotMatch]:
     tests = {}
     for key, value in given.items():
         if not isinstance(key, str):
             raise TypeError(f"BidsFilter got a {what} filter on {key!r}: a name "
                             "must be a string")
-        if isinstance(value, (set, frozenset)) and not value:
-            continue
-        tests[key] = _ValueMatch(value)
+        match = _value_matcher(value)
+        if match is not None:
+            tests[key] = match
     return tests
 
 
@@ -436,27 +490,35 @@ def _patterns(value: object) -> Condition | None:
 
 # The keywords of `BidsFilter` itself, beside the entities.
 _KEYWORDS = (
-    "subjects", "exclude_subjects", "sessions", "datatypes", "suffixes",
-    "tasks", "include", "exclude", "folders", "entities", "sidecar",
-    "participants", "bidsignore",
+    "datatype", "suffix", "extension", "include", "exclude", "folders",
+    "entities", "sidecar", "participants", "bidsignore",
 )
 
 
 def _meant_keyword(name: str) -> str | None:
     """Return the keyword a capitalised keyword misspells, or `None`.
 
-    `Subjects` is `subjects`, `Acq` is `acq`, and a plural or singular form
-    of a keyword or an entity (`Runs`, `Subject`) names it too.
+    `Suffix` is `suffix`, `Acq` is `acq`, and a plural or singular form of
+    a keyword or an entity, or an entity's long name (`Runs`, `Folder`,
+    `Subjects`), names it too.
     """
     low = name.lower()
-    if low in _KEYWORDS or low in SORTED_ENTITIES:
-        return low
+    for word in (low, low[:-1] if low.endswith("s") else None):
+        if word in _KEYWORDS or word in SORTED_ENTITIES:
+            return word
+        if word in ENTITY_LONG_NAMES:
+            return ENTITY_LONG_NAMES[word]
     for keyword in _KEYWORDS:
         if low in (keyword[:-1], keyword[:-2]) and keyword.endswith("s"):
             return keyword
-    if low.endswith("s") and low[:-1] in SORTED_ENTITIES:
-        return low[:-1]
+    if low.endswith("es") and low[:-2] in _KEYWORDS:   # Suffixes
+        return low[:-2]
     return None
+
+
+def _entity_key(name: str) -> str:
+    """Return the key of an entity given by its key or long name (`session`)."""
+    return ENTITY_LONG_NAMES.get(name, name)
 
 
 def _refuse_capitalised_keywords(fields: Mapping[str, object]) -> None:
@@ -474,25 +536,26 @@ def _refuse_capitalised_keywords(fields: Mapping[str, object]) -> None:
 class BidsFilter:
     """Filters applied to a BIDS listing. Empty filters select everything.
 
-    Label filters (subjects, sessions, tasks, datatypes, suffixes, other
-    entities) match the bare label of each file. An `int` matches by
-    number on any entity: `subjects=1` keeps `sub-1`, `sub-01` and
+    Label filters (the entities `sub`, `ses`, `task`, ..., the datatype,
+    suffix and extension) match the bare label of each file. An `int` matches by
+    number on any entity: `sub=1` keeps `sub-1`, `sub-01` and
     `sub-001`, `acq=3` keeps `acq-003`, and a label such as `1a` never
-    matches it. A string matches exactly (`subjects="01"` does not keep
+    matches it. A string matches exactly (`sub="01"` does not keep
     `sub-1`), but on an index entity (`run`, `echo`, ...) by number, so
     `run="1"` matches `run-01`. A regex must match the whole label
-    (`re.fullmatch`): `subjects=re.compile("1")` keeps `sub-1`, not
+    (`re.fullmatch`): `sub=re.compile("1")` keeps `sub-1`, not
     `sub-10`; a `Regex(..., full=False)` is found anywhere in the label. A
     glob or regex on an index entity sees the label as written. A list or
     a set is any of its values, and a function of the label is a test.
     `typing.Never` keeps the files that do not have the entity, and
     `typing.Any` (or `typing.Required`) those that have it:
     `acq={Never, "mprage"}` keeps the files with no `acq` entity and those
-    with `acq-mprage`. On an entity keyword (`acq=None`,
-    `entities={"acq": None}`), `None` means `Never`; on the label keywords
-    below, it is no filter. A file's subject and session are those its
-    name gives, else those of its `sub-<label>/` and `ses-<label>/`
-    folders.
+    with `acq-mprage`. `None` means `Never` (`acq=None`,
+    `datatype=None`); a keyword left out is no filter. `Not(value)` keeps
+    what `value` does not (`sub=Not("02")`); a file without the entity
+    passes it unless `value` keeps such a file. A file's subject and
+    session are those its name gives, else those of its `sub-<label>/` and
+    `ses-<label>/` folders.
 
     Sidecar filters, given as keywords that start with a capital letter
     (`RepetitionTime=2.0`), and the `participants` filters match a value of
@@ -512,10 +575,11 @@ class BidsFilter:
 
     Parameters
     ----------
-    subjects, exclude_subjects, sessions, datatypes, suffixes, tasks
-        Keep data files whose subject, session, datatype directory, BIDS
-        suffix or task match (`exclude_subjects`: whose subject does not).
-        `None`, the default, is no filter.
+    datatype, suffix, extension
+        Keep data files whose datatype directory, BIDS suffix or extension
+        (`.nii.gz`; the leading dot may be left out) match. Left out, they
+        are no filter; `None` keeps the files that have none (`datatype=None`:
+        the files outside a datatype folder).
     include, exclude
         Patterns matched against the path relative to the dataset root
         (a string is a glob, a `re.Pattern` a regex; a list is any-of).
@@ -544,11 +608,12 @@ class BidsFilter:
         never changes which metadata applies to a data file, nor the values
         it reads.
     **kwargs
-        Filters on a known BIDS entity (`acq="mprage"`, `run=[1, 2]`,
-        `sub=...`, ...), and on a sidecar field for a keyword that starts
-        with a capital letter (`RepetitionTime=2.0`). A capitalised keyword
-        that is a keyword of `BidsFilter` or an entity (`Subjects=`, `Acq=`) is
-        refused as a misspelling; give such a field in `sidecar`.
+        Filters on a known BIDS entity by its key (`sub=1`, `ses="pre"`,
+        `task="rest"`, `acq="mprage"`, `run={1, 2}`, ...), and on a sidecar
+        field for a keyword that starts with a capital letter
+        (`RepetitionTime=2.0`). A capitalised keyword that is a keyword of
+        `BidsFilter` or an entity (`Suffix=`, `Acq=`) is refused as a
+        misspelling; give such a field in `sidecar`.
 
     Notes
     -----
@@ -567,12 +632,9 @@ class BidsFilter:
     def __init__(
         self,
         *,
-        subjects: object = None,
-        exclude_subjects: object = None,
-        sessions: object = None,
-        datatypes: object = None,
-        suffixes: object = None,
-        tasks: object = None,
+        datatype: object = _UNSET,
+        suffix: object = _UNSET,
+        extension: object = _UNSET,
         include: object = None,
         exclude: object = None,
         folders: Iterable[str] = (),
@@ -585,31 +647,31 @@ class BidsFilter:
         fields = {k: v for k, v in kwargs.items() if k[:1].isupper()}
         kwargs = {k: v for k, v in kwargs.items() if k not in fields}
         _refuse_capitalised_keywords(fields)
-        unknown = set(kwargs) - set(SORTED_ENTITIES)
+        unknown = set(kwargs) - set(SORTED_ENTITIES) - set(ENTITY_LONG_NAMES)
         if unknown:
-            raise TypeError(
-                f"BidsFilter got unknown keywords {', '.join(sorted(unknown))}; "
-                "filter on another entity with entities={key: value}, and on "
-                "a sidecar field with a keyword that starts with a capital "
-                "letter or with sidecar={field: value}"
+            hints = "".join(
+                f"; use {_RENAMED[k]} instead of {k}="
+                for k in sorted(unknown) if k in _RENAMED
             )
-        given = dict(entities or {})
-        for name, value in kwargs.items():
-            if name in given:
-                raise TypeError(f"BidsFilter got two filters for entity {name!r}")
-            given[name] = value
-        keywords: dict[str, str] = {}   # entity -> the label keyword given
-        for name, key in _ALIASES.items():
-            value = {"subjects": subjects, "sessions": sessions,
-                     "tasks": tasks}[name]
-            if value is None:
-                continue
+            raise TypeError(
+                f"BidsFilter got unknown keywords {', '.join(sorted(unknown))}"
+                f"{hints}; filter on another entity with entities={{key: "
+                "value}, and on a sidecar field with a keyword that starts "
+                "with a capital letter or with sidecar={field: value}"
+            )
+        given: dict[str, object] = {}
+        spelt: dict[str, str] = {}      # entity key -> the name it was given by
+        for name, value in [*(entities or {}).items(), *kwargs.items()]:
+            key = _entity_key(str(name))
             if key in given:
-                raise TypeError(
-                    f"BidsFilter got both {name}= and a filter on entity {key!r}"
-                )
+                if spelt[key] != name:
+                    raise TypeError(
+                        f"BidsFilter got two filters for entity {key!r}, as "
+                        f"{spelt[key]} and as {name}"
+                    )
+                raise TypeError(f"BidsFilter got two filters for entity {key!r}")
             given[key] = value
-            keywords[key] = name
+            spelt[key] = str(name)
         on_sidecar = dict(sidecar or {})
         for name, value in fields.items():
             if name in on_sidecar:
@@ -618,18 +680,20 @@ class BidsFilter:
                 )
             on_sidecar[name] = value
 
-        self.entities: dict[str, _LabelMatch] = {}
+        self.entities: dict[str, _LabelMatch | _NotMatch] = {}
         for key, value in given.items():
-            match = _matcher(
-                value, str(key), str(key) in INDEX_ENTITIES, keywords.get(key)
-            )
+            match = _matcher(value, key, key in INDEX_ENTITIES)
             if match is not None:
-                self.entities[str(key)] = match
-        self.exclude_subjects = _matcher(
-            exclude_subjects, "sub", keyword="exclude_subjects"
-        )
-        self.datatypes = _matcher(datatypes, None, keyword="datatypes")
-        self.suffixes = _matcher(suffixes, None, keyword="suffixes")
+                self.entities[key] = match
+        # The parts of a name that are not entities; `None` is "not there".
+        self.parts: dict[str, _LabelMatch | _NotMatch] = {}
+        for part, value in (
+            ("datatype", datatype), ("suffix", suffix),
+            ("extension", _dotted(extension)),
+        ):
+            match = None if value is _UNSET else _matcher(value, None)
+            if match is not None:
+                self.parts[part] = match
         self.include = _patterns(include)
         self.exclude = _patterns(exclude)
         self.sidecar = _value_matchers(on_sidecar, "sidecar")
@@ -675,13 +739,9 @@ class BidsFilter:
                 return False
             if not match(label):
                 return False
-        if self.exclude_subjects and not (partial and ent.get("sub") is None):
-            if self.exclude_subjects(ent.get("sub")):
+        for part, match in self.parts.items():
+            if not match(getattr(name, part) or None):
                 return False
-        if self.datatypes and not self.datatypes(name.datatype):
-            return False
-        if self.suffixes and not self.suffixes(name.suffix):
-            return False
         if self.include and not self.include(name.item):
             return False
         return True
@@ -689,16 +749,14 @@ class BidsFilter:
     def keep_subject(self, label: str) -> bool:
         """Whether a subject (`"01"` or `"sub-01"`) passes the subject filters.
 
-        Only `subjects` and `exclude_subjects` are applied; the participants
-        filters read `participants.tsv`, and are not.
+        Only the `sub` filter is applied; the participants filters read
+        `participants.tsv`, and are not.
         """
         label = str(label)
         if label.startswith("sub-"):
             label = label[4:]
         match = self.entities.get("sub")
-        if match and not match(label):
-            return False
-        return not (self.exclude_subjects and self.exclude_subjects(label))
+        return not match or match(label)
 
     def _keep_session(self, label: str) -> bool:
         match = self.entities.get("ses")

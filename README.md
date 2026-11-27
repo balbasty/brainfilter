@@ -37,7 +37,7 @@ t1w = ds["sub-01"]["anat"]["sub-01_T1w.nii.gz"]
 t1w.sidecar["RepetitionTime"]                   # merged sidecars, nearest first
 ds["participants.tsv"]["age"]                   # one typed column of a table
 
-kept = ds.filter(subjects=1, datatypes="anat")
+kept = ds.filter(sub=1, datatype="anat")
 [str(p.relative_to(ds)) for p in kept]          # the files and their sidecars
 
 ds = ds.with_mode("w")                          # opt in to writing

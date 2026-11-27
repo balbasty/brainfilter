@@ -7,3 +7,5 @@ Select the files of a dataset with a `BidsFilter` and its conditions.
 ::: brainfilter.Glob
 
 ::: brainfilter.Regex
+
+::: brainfilter.Not

@@ -20,6 +20,7 @@ PUBLIC = [
     "BidsPath",
     "BidsFilter",
     "Glob",
+    "Not",
     "PureBidsPath",
     "ReadOnlyError",
     "Regex",

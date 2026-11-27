@@ -15,7 +15,7 @@ from brainfilter.bidspath import (
     ReadOnlyError,
     Table,
 )
-from brainfilter.conditions import Glob, Regex
+from brainfilter.conditions import Glob, Not, Regex
 from brainfilter.filter import BidsFilter
 from brainfilter.transaction import AsyncTransaction, Transaction, TransactionError
 from brainfilter.versioning import Version
@@ -33,6 +33,7 @@ __all__ = [
     "BidsPath",
     "BidsFilter",
     "Glob",
+    "Not",
     "PureBidsPath",
     "ReadOnlyError",
     "Regex",

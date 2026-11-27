@@ -175,7 +175,7 @@ async def test_native_async_listing_inherits_the_mode(async_memory):
 @pytest.mark.parametrize("mode", ["r", "w"])
 def test_filter_walk_keeps_the_mode(tmp_path, mode):
     _make(BidsPath(str(tmp_path)), LISTING)
-    f = BidsFilter(subjects="01")
+    f = BidsFilter(sub="01")
     for root in (BidsPath(str(tmp_path), mode=mode),
                  PureBidsPath(str(tmp_path), mode=mode),
                  AsyncBidsPath(str(tmp_path), mode=mode)):
@@ -189,7 +189,7 @@ def test_filter_walk_keeps_the_mode(tmp_path, mode):
 @pytest.mark.parametrize("mode", ["r", "w"])
 async def test_filter_awalk_keeps_the_mode(tmp_path, mode):
     _make(BidsPath(str(tmp_path)), LISTING)
-    f = BidsFilter(subjects="01")
+    f = BidsFilter(sub="01")
     for root in (AsyncBidsPath(str(tmp_path), mode=mode),
                  PureBidsPath(str(tmp_path), mode=mode),
                  BidsPath(str(tmp_path), mode=mode)):

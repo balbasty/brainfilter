@@ -5,7 +5,7 @@ import pytest
 
 from brainfilter._names import applies_to, parse_path
 from brainfilter.bidspath import BidsPath, PureBidsPath
-from brainfilter.conditions import And, Glob, Or, Regex
+from brainfilter.conditions import And, Glob, Not, Or, Regex
 from brainfilter.filter import BidsFilter
 
 # -- ported from brainspresso tests/test_bids_select.py ------------------------
@@ -81,7 +81,7 @@ def test_select_optional_folders():
 
 
 def test_select_suffix_with_inheritance():
-    kept = set(BidsFilter(suffixes=["T1w"]).select(LISTING))
+    kept = set(BidsFilter(suffix=["T1w"]).select(LISTING))
     assert kept == ALWAYS | {
         "T1w.json",
         "sub-01/sub-01_sessions.tsv",
@@ -93,7 +93,7 @@ def test_select_suffix_with_inheritance():
 
 
 def test_select_task_includes_matching_sidecars_and_events():
-    kept = set(BidsFilter(tasks=["motor"]).select(LISTING))
+    kept = set(BidsFilter(task=["motor"]).select(LISTING))
     assert "sub-01/ses-2/func/sub-01_ses-2_task-motor_bold.nii.gz" in kept
     assert "sub-01/ses-2/func/sub-01_ses-2_task-motor_events.tsv" in kept
     assert "task-motor_bold.json" in kept
@@ -104,7 +104,7 @@ def test_select_task_includes_matching_sidecars_and_events():
 
 
 def test_select_subjects_sessions_datatypes():
-    kept = set(BidsFilter(subjects=["sub-02"], datatypes=["dwi"]).select(LISTING))
+    kept = set(BidsFilter(sub=["sub-02"], datatype=["dwi"]).select(LISTING))
     assert {
         "sub-02/ses-1/dwi/sub-02_ses-1_dwi.nii.gz",
         "sub-02/ses-1/dwi/sub-02_ses-1_dwi.bval",
@@ -114,7 +114,7 @@ def test_select_subjects_sessions_datatypes():
     assert not any(p.startswith("sub-01") for p in kept)
 
     kept = set(
-        BidsFilter(exclude_subjects=["02"], sessions=["2"]).select(LISTING)
+        BidsFilter(sub=Not(["02"]), ses=["2"]).select(LISTING)
     )
     data = {p for p in kept if p.endswith(".nii.gz")}
     assert data == {
@@ -159,9 +159,10 @@ def test_select_is_sorted_and_deduplicated():
 
 
 def test_keep_subject():
-    f = BidsFilter(subjects=["01", "02"], exclude_subjects="sub-02")
+    f = BidsFilter(sub=Not({"sub-02", "03"}))
     assert f.keep_subject("01") and f.keep_subject("sub-01")
     assert not f.keep_subject("02") and not f.keep_subject("03")
+    assert f.keep_subject("04")
     assert BidsFilter().keep_subject("03")
 
 
@@ -182,8 +183,8 @@ def test_entity_keywords():
     # numbers, prefixes, any-of
     kept = set(BidsFilter(acq="acq-mprage", run=[2]).select(LIST))
     assert _data(kept) == {"sub-03/anat/sub-03_acq-mprage_run-2_T1w.nii.gz"}
-    # `sub=` is `subjects=`; `entities=` takes any key
-    assert BidsFilter(sub="02").select(LIST) == BidsFilter(subjects="02").select(LIST)
+    # `sub=` is `sub=`; `entities=` takes any key
+    assert BidsFilter(sub="02").select(LIST) == BidsFilter(sub="02").select(LIST)
     assert BidsFilter(entities={"acq": "space"}).select(LIST) == (
         BidsFilter(acq="space").select(LIST)
     )
@@ -192,19 +193,19 @@ def test_entity_keywords():
 
 
 def test_patterns_as_values():
-    kept = BidsFilter(subjects=Glob("0*"), tasks=re.compile("mot.*")).select(LISTING)
+    kept = BidsFilter(sub=Glob("0*"), task=re.compile("mot.*")).select(LISTING)
     assert _data(kept) == {
         "sub-01/ses-2/func/sub-01_ses-2_task-motor_bold.nii.gz",
     }
-    kept = BidsFilter(suffixes=["dwi", Regex("T2.*")]).select(LISTING)
+    kept = BidsFilter(suffix=["dwi", Regex("T2.*")]).select(LISTING)
     assert _data(kept) == {
         "sub-01/ses-1/anat/sub-01_ses-1_T2w.nii.gz",
         "sub-02/ses-1/dwi/sub-02_ses-1_dwi.nii.gz",
     }
     # a regex must match the whole label, not a part of it
-    assert not _data(BidsFilter(tasks=re.compile("^mot")).select(LISTING))
-    assert not _data(BidsFilter(suffixes=Regex("T2")).select(LISTING))
-    kept = BidsFilter(exclude_subjects=Glob("*1")).select(LISTING)
+    assert not _data(BidsFilter(task=re.compile("^mot")).select(LISTING))
+    assert not _data(BidsFilter(suffix=Regex("T2")).select(LISTING))
+    kept = BidsFilter(sub=Not(Glob("*1"))).select(LISTING)
     assert not any(p.startswith("sub-01") for p in kept)
 
 
@@ -218,22 +219,22 @@ REGEX_LISTING = [
 
 
 @pytest.mark.parametrize("kwargs, expected", [
-    ({"subjects": re.compile("1")}, {0, 2, 3, 4}),
-    ({"subjects": Regex("1")}, {0, 2, 3, 4}),
-    ({"subjects": re.compile("1.*")}, {0, 1, 2, 3, 4}),
-    ({"exclude_subjects": re.compile("1")}, {1}),
-    ({"sessions": re.compile("p")}, set()),
-    ({"sessions": re.compile("p.*")}, {2, 3}),
-    ({"tasks": re.compile("rest")}, {2}),
-    ({"suffixes": re.compile("T1")}, set()),
-    ({"suffixes": re.compile("T1w|dwi")}, {0, 1, 4}),
-    ({"datatypes": re.compile("an")}, set()),
-    ({"datatypes": re.compile("an.*")}, {0, 1}),
+    ({"sub": re.compile("1")}, {0, 2, 3, 4}),
+    ({"sub": Regex("1")}, {0, 2, 3, 4}),
+    ({"sub": re.compile("1.*")}, {0, 1, 2, 3, 4}),
+    ({"sub": Not(re.compile("1"))}, {1}),
+    ({"ses": re.compile("p")}, set()),
+    ({"ses": re.compile("p.*")}, {2, 3}),
+    ({"task": re.compile("rest")}, {2}),
+    ({"suffix": re.compile("T1")}, set()),
+    ({"suffix": re.compile("T1w|dwi")}, {0, 1, 4}),
+    ({"datatype": re.compile("an")}, set()),
+    ({"datatype": re.compile("an.*")}, {0, 1}),
     ({"acq": re.compile("b1")}, set()),
     ({"acq": re.compile(r"b\d+")}, {4}),
     # in any-of conditions too
-    ({"tasks": Or(Regex("rest"), Regex("x"))}, {2}),
-    ({"tasks": And(Regex("rest.*"), Regex(".*less"))}, {3}),
+    ({"task": Or(Regex("rest"), Regex("x"))}, {2}),
+    ({"task": And(Regex("rest.*"), Regex(".*less"))}, {3}),
 ])
 def test_label_regex_is_fullmatch(kwargs, expected):
     kept = BidsFilter(**kwargs).select(REGEX_LISTING)
@@ -276,11 +277,11 @@ INDEX_LISTING = [
     ({"run": re.compile("0?1")}, {0, 1}),
     ({"run": Glob("1*")}, {0, 3}),
     # label entities compare exact strings
-    ({"tasks": "01"}, {6}),
-    ({"tasks": "1"}, set()),
+    ({"task": "01"}, {6}),
+    ({"task": "1"}, set()),
     # ... but an int matches by number on any entity (`task-01` is 1)
-    ({"tasks": 1}, {6}),
-    ({"subjects": "1"}, set()),
+    ({"task": 1}, {6}),
+    ({"sub": "1"}, set()),
 ])
 def test_index_entities_compare_by_value(kwargs, expected):
     kept = BidsFilter(**kwargs).select(INDEX_LISTING)
@@ -309,8 +310,38 @@ def test_include_exclude_regex():
 def test_unknown_keyword():
     with pytest.raises(TypeError, match="subs"):
         BidsFilter(subs=["01"])
-    with pytest.raises(TypeError):
-        BidsFilter(subjects="01", sub="01")
+    with pytest.raises(TypeError, match="as sub and as subject"):
+        BidsFilter(sub="01", subject="01")
+    with pytest.raises(TypeError, match="as session and as ses"):
+        BidsFilter(ses="1", entities={"session": "1"})
+
+
+def test_long_entity_names_are_aliases():
+    assert BidsFilter(subject="01").select(LISTING) == BidsFilter(
+        sub="01").select(LISTING)
+    assert BidsFilter(entities={"acquisition": "x"}).select(LISTING) == (
+        BidsFilter(acq="x").select(LISTING))
+
+
+def test_extension_filter():
+    listing = ["sub-01/anat/sub-01_T1w.nii.gz", "sub-01/anat/sub-01_T2w.nii"]
+    for value in ("nii.gz", ".nii.gz", {"nii.gz"}, Not("nii")):
+        assert BidsFilter(extension=value).select(listing) == listing[:1]
+    assert BidsFilter(extension=Glob(".nii*")).select(listing) == listing
+
+
+def test_not():
+    assert Not(Not("a")) == "a"
+    assert BidsFilter(sub=Not("01")).keep_subject("02")
+    assert not BidsFilter(sub=Not(Glob("0*"))).keep_subject("02")
+    listing = ["sub-01/anat/sub-01_T1w.nii.gz",
+               "sub-01/anat/sub-01_acq-x_T1w.nii.gz"]
+    # a file without the entity passes Not(x) unless x keeps it
+    assert BidsFilter(acq=Not("y")).select(listing) == listing
+    assert BidsFilter(acq=Not("x")).select(listing) == listing[:1]
+    assert BidsFilter(acq=Not(None)).select(listing) == listing[1:]
+    with pytest.raises(TypeError, match="Not goes around"):
+        BidsFilter(acq={Not("x"), "y"})
 
 
 def test_other_top_level_folders_are_skipped():
@@ -321,17 +352,17 @@ def test_other_top_level_folders_are_skipped():
 def test_select_path_objects():
     root = PureBidsPath("ds")
     paths = [root / p for p in LISTING]
-    kept = BidsFilter(suffixes="T1w").select(paths, root=root)
-    assert kept == [root / p for p in BidsFilter(suffixes="T1w").select(LISTING)]
+    kept = BidsFilter(suffix="T1w").select(paths, root=root)
+    assert kept == [root / p for p in BidsFilter(suffix="T1w").select(LISTING)]
     assert all(isinstance(p, PureBidsPath) for p in kept)
     # already relative
     rel = [PureBidsPath(p) for p in LISTING]
-    assert [str(p) for p in BidsFilter(tasks="rest").select(rel)] == (
-        BidsFilter(tasks="rest").select(LISTING)
+    assert [str(p) for p in BidsFilter(task="rest").select(rel)] == (
+        BidsFilter(task="rest").select(LISTING)
     )
     # strings under a root
-    kept = BidsFilter(tasks="rest").select([f"ds/{p}" for p in LISTING], root="ds")
-    assert kept == [f"ds/{p}" for p in BidsFilter(tasks="rest").select(LISTING)]
+    kept = BidsFilter(task="rest").select([f"ds/{p}" for p in LISTING], root="ds")
+    assert kept == [f"ds/{p}" for p in BidsFilter(task="rest").select(LISTING)]
 
 
 def _make(root, listing):
@@ -346,7 +377,7 @@ def _make(root, listing):
 def test_walk_local(tmp_path):
     _make(tmp_path, LISTING)
     for f in (
-        BidsFilter(), BidsFilter(subjects="02"), BidsFilter(folders="derivatives")
+        BidsFilter(), BidsFilter(sub="02"), BidsFilter(folders="derivatives")
     ):
         kept = f.walk(str(tmp_path))
         assert all(isinstance(p, BidsPath) for p in kept)
@@ -359,7 +390,7 @@ def test_walk_memory():
     root = BidsPath("memory:///brainfilter-walk")
     _make(root, LISTING)
     try:
-        f = BidsFilter(datatypes="anat")
+        f = BidsFilter(datatype="anat")
         kept = f.walk(root)
         assert [str(p.relative_to(root)) for p in kept] == f.select(LISTING)
         assert f.walk("memory:///brainfilter-walk") == kept
@@ -471,7 +502,7 @@ def test_closure_compares_index_entities_by_number():
         "sub-01/anat/sub-01_run-1_T1w.json",
     ]
     # `run-1_T1w.json` applies to sub-02 (dropped) and, by number, to sub-01
-    assert BidsFilter(subjects="01").select(listing) == [
+    assert BidsFilter(sub="01").select(listing) == [
         "dataset_description.json",
         "run-1_T1w.json",
         "sub-01/anat/sub-01_run-01_T1w.nii.gz",
@@ -519,26 +550,26 @@ def test_select_all_keeps_non_imaging_data():
 
 
 @pytest.mark.parametrize("kwargs, prefixes", [
-    ({"datatypes": "beh"}, ("sub-01/beh/", "sub-02/beh/")),
-    ({"datatypes": "motion"}, ("sub-01/motion/",)),
-    ({"datatypes": "pet"}, ("sub-01/pet/",)),
-    ({"datatypes": "nirs"}, ("sub-01/nirs/",)),
-    ({"subjects": "01", "datatypes": "eeg"}, ("sub-01/eeg/",)),
+    ({"datatype": "beh"}, ("sub-01/beh/", "sub-02/beh/")),
+    ({"datatype": "motion"}, ("sub-01/motion/",)),
+    ({"datatype": "pet"}, ("sub-01/pet/",)),
+    ({"datatype": "nirs"}, ("sub-01/nirs/",)),
+    ({"sub": "01", "datatype": "eeg"}, ("sub-01/eeg/",)),
     # electrodes and coordsystem have `space`, the recording has not
-    ({"tasks": "x", "datatypes": "eeg"}, ("sub-01/eeg/",)),
+    ({"task": "x", "datatype": "eeg"}, ("sub-01/eeg/",)),
     # a recording table is chosen by its own suffix
-    ({"suffixes": "blood"}, ("sub-01/pet/sub-01_recording-manual_blood",)),
-    ({"suffixes": "beh"}, ("sub-01/beh/",)),
+    ({"suffix": "blood"}, ("sub-01/pet/sub-01_recording-manual_blood",)),
+    ({"suffix": "beh"}, ("sub-01/beh/",)),
     # physio is data, and a companion of the bold run
-    ({"suffixes": "physio"}, ("sub-01/func/sub-01_task-x_recording",)),
-    ({"suffixes": "bold"}, ("sub-01/func/",)),
+    ({"suffix": "physio"}, ("sub-01/func/sub-01_task-x_recording",)),
+    ({"suffix": "bold"}, ("sub-01/func/",)),
     # the events alone in sub-02 are a data file with no `recording`
     ({"recording": "cardiac"}, ("sub-01/func/sub-01_task-x_recording",)),
     # a companion is a data file a filter selects, with its JSON sidecar
-    ({"suffixes": "events"}, ("sub-02/beh/",)),
-    ({"suffixes": "channels"}, ("sub-01/motion/sub-01_task-x_tracksys-imu_ch",
+    ({"suffix": "events"}, ("sub-02/beh/",)),
+    ({"suffix": "channels"}, ("sub-01/motion/sub-01_task-x_tracksys-imu_ch",
                                 "sub-01/eeg/sub-01_task-x_channels")),
-    ({"suffixes": "coordsystem"}, ("sub-01/nirs/sub-01_coordsystem",
+    ({"suffix": "coordsystem"}, ("sub-01/nirs/sub-01_coordsystem",
                                    "sub-01/eeg/sub-01_space-CapTrak_coord")),
 ])
 def test_select_non_imaging_data(kwargs, prefixes):
@@ -550,37 +581,37 @@ def test_select_non_imaging_data(kwargs, prefixes):
 def test_a_companion_with_no_recording_is_judged_as_data():
     # `sub-02/beh/*_events.tsv` describes no recording of the listing
     events = _under(OTHER_DATA, "sub-02/")
-    assert set(BidsFilter(subjects="02").select(OTHER_DATA)) == events
-    assert set(BidsFilter(tasks="y").select(OTHER_DATA)) == events
-    assert set(BidsFilter(suffixes="events").select(OTHER_DATA)) == events
-    assert not set(BidsFilter(tasks="x").select(OTHER_DATA)) & (
+    assert set(BidsFilter(sub="02").select(OTHER_DATA)) == events
+    assert set(BidsFilter(task="y").select(OTHER_DATA)) == events
+    assert set(BidsFilter(suffix="events").select(OTHER_DATA)) == events
+    assert not set(BidsFilter(task="x").select(OTHER_DATA)) & (
         events - {"dataset_description.json"}
     )
-    assert set(BidsFilter(suffixes="T1w").select(OTHER_DATA)) == {
+    assert set(BidsFilter(suffix="T1w").select(OTHER_DATA)) == {
         "dataset_description.json"
     }
     # an entity filter on an entity it lacks rejects it, as any data file;
     # its directories name its subject; it needs no dataset root
     desc = ["dataset_description.json"]
     alone = ["sub-03/ses-1/beh/task-z_events.tsv"]
-    assert BidsFilter(subjects="03", sessions="1").select(desc + alone) == (
+    assert BidsFilter(sub="03", ses="1").select(desc + alone) == (
         desc + alone
     )
-    assert BidsFilter(subjects="03", run=2).select(desc + alone) == desc
-    assert BidsFilter(subjects="01").select(desc + alone) == desc
-    assert BidsFilter(sessions="2").select(desc + alone) == desc
-    assert BidsFilter(subjects="03").select(alone) == alone
+    assert BidsFilter(sub="03", run=2).select(desc + alone) == desc
+    assert BidsFilter(sub="01").select(desc + alone) == desc
+    assert BidsFilter(ses="2").select(desc + alone) == desc
+    assert BidsFilter(sub="03").select(alone) == alone
 
 
 def test_metadata_with_no_data_is_judged_on_what_it_names():
     # a sidecar that describes no data file of the listing
     desc = ["dataset_description.json"]
     alone = ["sub-03/ses-1/beh/task-z_beh.json"]
-    f = BidsFilter(subjects="03", sessions="1", run=2)
+    f = BidsFilter(sub="03", ses="1", run=2)
     assert f.select(desc + alone) == desc + alone
-    assert BidsFilter(subjects="01").select(desc + alone) == desc
-    assert BidsFilter(sessions="2").select(desc + alone) == desc
-    assert BidsFilter(suffixes="beh").select(desc + alone) == desc + alone
+    assert BidsFilter(sub="01").select(desc + alone) == desc
+    assert BidsFilter(ses="2").select(desc + alone) == desc
+    assert BidsFilter(suffix="beh").select(desc + alone) == desc + alone
     # outside every dataset root it is never kept on its own
     assert not f.select(alone)
 
@@ -650,42 +681,42 @@ REST = (f"{MEG1}task-rest_meg.fif", f"{MEG1}task-rest_meg.json",
     # the set-up files come along with each recording of the session; the
     # markers and channels of its task too; a headshape whose `acq` one of
     # the recordings has, with that recording alone
-    ({"tasks": "rest", "sessions": "1"}, _named(*SYSTEM, *REST)),
-    ({"tasks": "noise", "sessions": "1"}, _named(*SYSTEM, NOISE, ACQ_B)),
-    ({"suffixes": "meg", "sessions": "1"}, _named(*SYSTEM, *REST, NOISE, ACQ_B)),
-    ({"acq": "b", "sessions": "1"}, _named(*SYSTEM, NOISE, ACQ_B)),
+    ({"task": "rest", "ses": "1"}, _named(*SYSTEM, *REST)),
+    ({"task": "noise", "ses": "1"}, _named(*SYSTEM, NOISE, ACQ_B)),
+    ({"suffix": "meg", "ses": "1"}, _named(*SYSTEM, *REST, NOISE, ACQ_B)),
+    ({"acq": "b", "ses": "1"}, _named(*SYSTEM, NOISE, ACQ_B)),
     # a companion is a data file too: a filter that names it selects it,
     # and not the recordings it describes
-    ({"acq": "calibration", "sessions": "1"}, _named(SYSTEM[0])),
-    ({"acq": "crosstalk", "sessions": "1"}, _named(SYSTEM[1])),
+    ({"acq": "calibration", "ses": "1"}, _named(SYSTEM[0])),
+    ({"acq": "crosstalk", "ses": "1"}, _named(SYSTEM[1])),
     ({"acq": "NAS"}, _named(f"{MEG1}acq-NAS_photo.jpg")),
-    ({"suffixes": "photo", "sessions": "1"}, _named(
+    ({"suffix": "photo", "ses": "1"}, _named(
         f"{MEG1}photo.jpg", f"{MEG1}acq-NAS_photo.jpg",
     )),
-    ({"suffixes": "headshape"}, _named(
+    ({"suffix": "headshape"}, _named(
         f"{MEG1}headshape.pos", ACQ_B, f"{MEG2}headshape.pos",
     )),
-    ({"suffixes": "markers"}, _named(f"{MEG1}task-rest_markers.mrk")),
+    ({"suffix": "markers"}, _named(f"{MEG1}task-rest_markers.mrk")),
     # a session with set-up files alone: judged as data files
-    ({"sessions": "2"}, _named(
+    ({"ses": "2"}, _named(
         f"{MEG2}acq-crosstalk_meg.fif", f"{MEG2}headshape.pos",
     )),
-    ({"sessions": "2", "suffixes": "meg"}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
-    ({"sessions": "2", "acq": "crosstalk"}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
-    ({"sessions": "2", "acq": typing.Any}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
-    ({"sessions": "2", "tasks": "rest"}, _named()),
+    ({"ses": "2", "suffix": "meg"}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
+    ({"ses": "2", "acq": "crosstalk"}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
+    ({"ses": "2", "acq": typing.Any}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
+    ({"ses": "2", "task": "rest"}, _named()),
     # blood recordings come along with their PET image, and are data too
-    ({"suffixes": "pet"}, _named(
+    ({"suffix": "pet"}, _named(
         f"{PET}FDG_pet.nii.gz", f"{PET}FDG_recording-manual_blood.tsv",
         f"{PET}FDG_recording-manual_blood.json",
         f"{PET}FDG_recording-auto_blood.tsv",
     )),
-    ({"suffixes": "blood", "recording": "auto"}, _named(
+    ({"suffix": "blood", "recording": "auto"}, _named(
         f"{PET}FDG_recording-auto_blood.tsv",
         f"{PET}other_recording-auto_blood.tsv",
     )),
     ({"trc": "other"}, _named(f"{PET}other_recording-auto_blood.tsv")),
-    ({"subjects": "02"}, _named()),
+    ({"sub": "02"}, _named()),
 ])
 def test_select_companion_files(kwargs, expected):
     assert set(BidsFilter(**kwargs).select(SET_UP)) == expected
@@ -694,10 +725,10 @@ def test_select_companion_files(kwargs, expected):
 def test_walk_companion_files(tmp_path):
     _make(tmp_path, SET_UP)
     root = BidsPath(str(tmp_path))
-    for f in (BidsFilter(), BidsFilter(tasks="rest"), BidsFilter(sessions="2"),
-              BidsFilter(suffixes="pet"), BidsFilter(acq="crosstalk"),
-              BidsFilter(subjects="02"), BidsFilter(suffixes="photo"),
-              BidsFilter(tasks="noise", sessions="1")):
+    for f in (BidsFilter(), BidsFilter(task="rest"), BidsFilter(ses="2"),
+              BidsFilter(suffix="pet"), BidsFilter(acq="crosstalk"),
+              BidsFilter(sub="02"), BidsFilter(suffix="photo"),
+              BidsFilter(task="noise", ses="1")):
         kept = [p.relative_to(root).as_posix() for p in f.walk(root)]
         assert kept == f.select(SET_UP)
 
@@ -706,8 +737,8 @@ def test_ignored_companion_files_come_along_alone(tmp_path):
     _make(tmp_path, SET_UP)
     (tmp_path / ".bidsignore").write_text("*_acq-crosstalk_meg.fif\n")
     root = BidsPath(str(tmp_path))
-    for f in (BidsFilter(tasks="rest", sessions={"1", "2"}),
-              BidsFilter(sessions={"1", "2"})):
+    for f in (BidsFilter(task="rest", ses={"1", "2"}),
+              BidsFilter(ses={"1", "2"})):
         kept = [p.relative_to(root).as_posix() for p in f.walk(root)]
         assert f"{MEG1}acq-crosstalk_meg.fif" in kept     # with its recording
         assert f"{MEG2}acq-crosstalk_meg.fif" not in kept  # never selected
@@ -758,16 +789,16 @@ def test_select_directory_shaped_data():
         "sub-01/meg/.cache/x", "sub-01/micr/.sub-01_BF.ome.zarr/.zattrs",
     ]
     assert BidsFilter().select(hidden) == sorted(DIRECTORY_DATA)
-    assert set(BidsFilter(datatypes="meg").select(DIRECTORY_DATA)) == (
+    assert set(BidsFilter(datatype="meg").select(DIRECTORY_DATA)) == (
         _under(DIRECTORY_DATA, "sub-01/meg/", "sub-02/meg/")
     )
-    assert set(BidsFilter(subjects="01").select(DIRECTORY_DATA)) == (
+    assert set(BidsFilter(sub="01").select(DIRECTORY_DATA)) == (
         _under(DIRECTORY_DATA, "sub-01/")
     )
-    assert set(BidsFilter(tasks="y").select(DIRECTORY_DATA)) == (
+    assert set(BidsFilter(task="y").select(DIRECTORY_DATA)) == (
         _under(DIRECTORY_DATA, "sub-02/")
     )
-    assert set(BidsFilter(suffixes="BF").select(DIRECTORY_DATA)) == (
+    assert set(BidsFilter(suffix="BF").select(DIRECTORY_DATA)) == (
         _under(DIRECTORY_DATA, "sub-01/micr/")
     )
     # the directory is one item: include matches it, not a file inside
@@ -803,13 +834,13 @@ def test_directory_shaped_data_parses_as_the_directory():
 
 def test_walk_keeps_hidden_names_inside_data_directories(tmp_path):
     _make(tmp_path, DIRECTORY_DATA + [".git/HEAD", "sub-01/.cache/x"])
-    for f in (BidsFilter(), BidsFilter(datatypes="micr"), BidsFilter(subjects="02")):
+    for f in (BidsFilter(), BidsFilter(datatype="micr"), BidsFilter(sub="02")):
         kept = f.walk(str(tmp_path))
         root = BidsPath(str(tmp_path))
         assert [p.relative_to(root).as_posix() for p in kept] == (
             f.select(DIRECTORY_DATA)
         )
-    names = {p.name for p in BidsFilter(datatypes="micr").walk(str(tmp_path))}
+    names = {p.name for p in BidsFilter(datatype="micr").walk(str(tmp_path))}
     assert {".zattrs", ".zgroup", ".zarray", "0.0", "zarr.json"} <= names
 
 
@@ -820,8 +851,8 @@ def _tree(tmp_path, listing):
 
 
 @pytest.mark.parametrize("f", [
-    BidsFilter(), BidsFilter(subjects="02"), BidsFilter(datatypes="anat"),
-    BidsFilter(sessions="1"), BidsFilter(suffixes="T1w"),
+    BidsFilter(), BidsFilter(sub="02"), BidsFilter(datatype="anat"),
+    BidsFilter(ses="1"), BidsFilter(suffix="T1w"),
 ])
 def test_select_skips_bids_directories(tmp_path, f):
     everything = _tree(tmp_path, LISTING)
@@ -834,7 +865,7 @@ def test_select_skips_top_level_directories():
             "sub-01", "sub-02", "sub-01/ses-1", "sub-01/anat",
             "sub-01/ses-1/anat"]
     assert BidsFilter().select(dirs + ["README"]) == ["README"]
-    assert BidsFilter(subjects="02").select(dirs) == []
+    assert BidsFilter(sub="02").select(dirs) == []
     # a top-level file whose name starts like a subject is still a file
     desc = ["dataset_description.json"]
     assert BidsFilter().select(desc + ["sub-01_T1w.json"]) == desc + [
@@ -844,15 +875,15 @@ def test_select_skips_top_level_directories():
 
 def test_label_regex_honours_explicit_full():
     # a regex that does not choose must match the whole label ...
-    assert _data(BidsFilter(subjects=Regex("1")).select(REGEX_LISTING)) == {
+    assert _data(BidsFilter(sub=Regex("1")).select(REGEX_LISTING)) == {
         REGEX_LISTING[i] for i in (0, 2, 3, 4)
     }
     # ... but `full=False` is a search, as asked
     assert _data(
-        BidsFilter(subjects=Regex("1", full=False)).select(REGEX_LISTING)
+        BidsFilter(sub=Regex("1", full=False)).select(REGEX_LISTING)
     ) == set(REGEX_LISTING)
     assert _data(
-        BidsFilter(tasks=Or(Regex("rest", full=False))).select(REGEX_LISTING)
+        BidsFilter(task=Or(Regex("rest", full=False))).select(REGEX_LISTING)
     ) == {REGEX_LISTING[2], REGEX_LISTING[3]}
 
 
@@ -860,7 +891,7 @@ def test_walk_any_family_root(tmp_path):
     from brainfilter.bidspath import AsyncBidsPath
 
     _make(tmp_path, LISTING)
-    f = BidsFilter(subjects="01")
+    f = BidsFilter(sub="01")
     expected = f.walk(str(tmp_path))
     for root in (AsyncBidsPath(str(tmp_path)), PureBidsPath(str(tmp_path))):
         kept = f.walk(root)
@@ -879,23 +910,23 @@ INT_LISTING = [
 
 @pytest.mark.parametrize("kwargs, expected", [
     # an int matches any all-digit label equal to it, on any entity
-    ({"subjects": 1}, {0, 1, 2}),
     ({"sub": 1}, {0, 1, 2}),
-    ({"sessions": 2}, {2, 3}),
+    ({"sub": 1}, {0, 1, 2}),
+    ({"ses": 2}, {2, 3}),
     ({"ses": 2}, {2, 3}),
     ({"acq": 3}, {2, 3}),
     ({"entities": {"acq": 3}}, {2, 3}),
-    ({"subjects": [1, 2]}, {0, 1, 2, 4}),
-    ({"exclude_subjects": 1}, {3, 4}),
+    ({"sub": [1, 2]}, {0, 1, 2, 4}),
+    ({"sub": Not(1)}, {3, 4}),
     # a string on a label entity is exact text
-    ({"subjects": "1"}, {0}),
-    ({"subjects": "01"}, {1}),
-    ({"subjects": "sub-001"}, {2}),
-    ({"sessions": "2"}, {3}),
+    ({"sub": "1"}, {0}),
+    ({"sub": "01"}, {1}),
+    ({"sub": "sub-001"}, {2}),
+    ({"ses": "2"}, {3}),
     ({"acq": "3"}, {3}),
-    ({"subjects": ["1", 2]}, {0, 4}),
+    ({"sub": ["1", 2]}, {0, 4}),
     # a bool is not a number
-    ({"subjects": True}, set()),
+    ({"sub": True}, set()),
 ])
 def test_int_values_match_by_number_on_any_entity(kwargs, expected):
     kept = BidsFilter(**kwargs).select(INT_LISTING)
@@ -903,6 +934,6 @@ def test_int_values_match_by_number_on_any_entity(kwargs, expected):
 
 
 def test_int_subject_in_keep_subject():
-    assert BidsFilter(subjects=1).keep_subject("sub-001")
-    assert not BidsFilter(subjects="1").keep_subject("001")
-    assert not BidsFilter(subjects=1).keep_subject("1a")
+    assert BidsFilter(sub=1).keep_subject("sub-001")
+    assert not BidsFilter(sub="1").keep_subject("001")
+    assert not BidsFilter(sub=1).keep_subject("1a")
