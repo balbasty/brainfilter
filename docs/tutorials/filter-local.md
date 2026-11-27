@@ -340,13 +340,13 @@ never selected, and a folder that it names is only looked into when the
 filter needs to know what the folder holds. A metadata file that it names
 still describes the recordings it applies to: an ignored sidecar, events table
 or `.bval` file counts for a filter on sidecar values, and comes along with
-the recordings it describes, exactly as `path.sidecars` finds it. An ignored
-file is never kept on its own account, though, so an ignored dataset-level
-file is left out, and so is ignored metadata that describes no kept
-recording. An ignored `participants.tsv` is still read by a filter on
-participants, and still left out of the result.
+the recordings it describes, exactly as `path.sidecars` finds it. Ignored
+metadata is never kept on its own account, though, so it is left out when it
+describes no kept recording. Dataset-level files, such as `participants.tsv`,
+`README` and `phenotype/`, are kept whether `.bidsignore` names them or not,
+and an ignored `participants.tsv` is still read by a filter on participants.
 
-`dataset_description.json` and the `.bidsignore` itself are never ignored. To
+To
 see the files that the dataset ignores, build the filter with
 `bidsignore=False`.
 

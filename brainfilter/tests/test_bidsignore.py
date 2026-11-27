@@ -206,12 +206,29 @@ def test_ignored_folders_are_not_listed(ds, listed_dirs):
     assert "/ignored/sub-01/extra/deep" in listed_dirs
 
 
-def test_everything_ignored_but_the_description(tmp_path):
+def test_everything_ignored_but_the_dataset_level_files(tmp_path):
     root = BidsPath(str(tmp_path))
     _write(root, {**FILES, ".bidsignore": "*\n"})
-    assert _rel(Filter().walk(root), root) == [
-        ".bidsignore", "dataset_description.json"
-    ]
+    kept = _rel(Filter().walk(root), root)
+    assert kept == sorted(p for p in kept if "/" not in p)
+    assert {".bidsignore", "README", "dataset_description.json",
+            "participants.tsv"} <= set(kept)
+    listing = [p for p in root.rglob("*") if p.is_file()]
+    assert _rel(Filter().select(listing, root=root), root) == kept
+
+
+def test_ignored_dataset_level_files_are_kept(tmp_path):
+    root = BidsPath(str(tmp_path))
+    _write(root, {
+        **FILES, "phenotype/scores.tsv": "participant_id\nsub-01\n",
+        ".bidsignore": "participants.tsv\nREADME\nphenotype/\n",
+    })
+    for f in (Filter(), Filter(subjects="02")):
+        kept = _rel(f.walk(root), root)
+        assert {"README", "participants.tsv",
+                "phenotype/scores.tsv"} <= set(kept)
+        listing = [p for p in root.rglob("*") if p.is_file()]
+        assert _rel(f.select(listing, root=root), root) == kept
 
 
 def test_select_honours_a_bidsignore_it_can_read(ds):
@@ -234,18 +251,18 @@ def test_select_honours_a_bidsignore_it_can_read(ds):
 
 
 def test_an_ignored_participants_table(tmp_path):
-    # still read by a participants filter, but not kept
+    # still read by a participants filter, and kept
     root = BidsPath(str(tmp_path))
     _write(root, {
         **FILES, ".bidsignore": "participants.tsv\n",
         "participants.tsv": "participant_id\tgroup\nsub-01\ta\nsub-02\tb\n",
     })
-    assert "participants.tsv" not in _rel(Filter().walk(root), root)
+    assert "participants.tsv" in _rel(Filter().walk(root), root)
     f = Filter(participants={"group": "b"})
     expected = ["sub-02/anat/sub-02_T1w.json", "sub-02/anat/sub-02_T1w.nii.gz"]
     got = _rel(f.walk(root), root)
     assert [p for p in got if p.startswith("sub-")] == expected
-    assert "participants.tsv" not in got
+    assert "participants.tsv" in got
     listing = [p for p in root.rglob("*") if p.is_file()]
     assert _rel(f.select(listing, root=root), root) == got
 
@@ -324,7 +341,7 @@ def test_ignored_tables_bvals_and_companions_still_come_along(inherit):
         "sub-02/dwi/sub-02_dwi.bval", "sub-02/dwi/sub-02_dwi.bvec",
     ):
         assert rel in kept
-    assert "participants.tsv" not in kept
+    assert "participants.tsv" in kept
     kept = _walks(Filter(subjects="02"), inherit)
     assert "sub-02/dwi/sub-02_dwi.bval" in kept
     assert not any(p.startswith("sub-01/") for p in kept)
@@ -387,4 +404,4 @@ def test_an_ignored_participants_table_filters_awalk(tmp_path):
     kept = _rel(asyncio.run(f.awalk(root)), root)
     assert "sub-01/func/sub-01_task-rest_bold.nii.gz" in kept
     assert not any(p.startswith("sub-02/") for p in kept)
-    assert "participants.tsv" not in kept
+    assert "participants.tsv" in kept

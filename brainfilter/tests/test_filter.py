@@ -514,10 +514,14 @@ def test_metadata_with_no_data_is_judged_on_what_it_names():
         "dataset_description.json"
     }
     # an entity it lacks never rejects it; its directories name its subject
+    desc = ["dataset_description.json"]
     alone = ["sub-03/ses-1/beh/task-z_events.tsv"]
-    assert Filter(subjects="03", sessions="1", run=2).select(alone) == alone
-    assert not Filter(subjects="01").select(alone)
-    assert not Filter(sessions="2").select(alone)
+    f = Filter(subjects="03", sessions="1", run=2)
+    assert f.select(desc + alone) == desc + alone
+    assert Filter(subjects="01").select(desc + alone) == desc
+    assert Filter(sessions="2").select(desc + alone) == desc
+    # outside every dataset root it is never kept on its own
+    assert not f.select(alone)
 
 
 def test_recording_tables_are_data():
@@ -639,7 +643,10 @@ def test_select_skips_top_level_directories():
     assert Filter().select(dirs + ["README"]) == ["README"]
     assert Filter(subjects="02").select(dirs) == []
     # a top-level file whose name starts like a subject is still a file
-    assert Filter().select(["sub-01_T1w.json"]) == ["sub-01_T1w.json"]
+    desc = ["dataset_description.json"]
+    assert Filter().select(desc + ["sub-01_T1w.json"]) == desc + [
+        "sub-01_T1w.json"
+    ]
 
 
 def test_label_regex_honours_explicit_full():

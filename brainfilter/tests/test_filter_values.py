@@ -297,12 +297,14 @@ def test_select_with_participants_needs_a_root(ds):
 
 def test_participants_with_orphan_metadata():
     # a metadata file that applies to no data file is judged on its subject
-    listing = ["participants.tsv", "sub-01/beh/sub-01_task-x_events.tsv",
+    listing = ["dataset_description.json", "participants.tsv",
+               "sub-01/beh/sub-01_task-x_events.tsv",
                "sub-02/beh/sub-02_task-x_events.tsv"]
     plan = filter_module._Plan(Filter(participants={"age": Any}), listing,
                                subjects={"01"})
     assert plan.finish({}) == [
-        "participants.tsv", "sub-01/beh/sub-01_task-x_events.tsv",
+        "dataset_description.json", "participants.tsv",
+        "sub-01/beh/sub-01_task-x_events.tsv",
     ]
 
 
@@ -390,6 +392,7 @@ def test_an_empty_filter_still_keeps_everything():
 
 
 ORPHAN = ["sub-01/beh/sub-01_task-x_events.tsv"]
+ORPHAN_LISTING = ["dataset_description.json", *ORPHAN]
 
 
 @pytest.mark.parametrize("value, kept", [
@@ -402,7 +405,10 @@ ORPHAN = ["sub-01/beh/sub-01_task-x_events.tsv"]
     ({Any, Never}, True),    # ... but for one that admits it is not
 ])
 def test_presence_on_metadata_judged_on_its_own_name(value, kept):
-    assert Filter(acq=value).select(ORPHAN) == (ORPHAN if kept else [])
+    kept_files = Filter(acq=value).select(ORPHAN_LISTING)
+    assert kept_files == ["dataset_description.json"] + (ORPHAN if kept else [])
+    # outside every dataset root, never kept on its own
+    assert Filter(acq=value).select(ORPHAN) == []
 
 
 @pytest.mark.parametrize("value, kept", [
@@ -410,9 +416,13 @@ def test_presence_on_metadata_judged_on_its_own_name(value, kept):
     (Any, False), (Required, False), ({Any, 2}, False), ({Any, Never}, True),
 ])
 def test_sidecar_filters_on_metadata_judged_on_its_own_name(value, kept):
-    plan = filter_module._Plan(Filter(RepetitionTime=value), ORPHAN)
+    plan = filter_module._Plan(Filter(RepetitionTime=value), ORPHAN_LISTING)
     assert plan.reads == set()
-    assert plan.finish({}) == (ORPHAN if kept else [])
+    assert plan.finish({}) == ["dataset_description.json"] + (
+        ORPHAN if kept else []
+    )
+    plan = filter_module._Plan(Filter(RepetitionTime=value), ORPHAN)
+    assert plan.finish({}) == []
 
 
 @pytest.mark.parametrize("content, error, message", [
@@ -477,12 +487,10 @@ def test_without_a_description_nothing_is_inherited(tmp_path):
     assert _data(Filter(Flag=True).walk(root), root) == {bold}
     assert _data(Filter(RepetitionTime=2).walk(root), root) == set()
     assert _data(Filter(EchoTime=Any).walk(root), root) == set()
-    # describing nothing, the sidecars above are judged on their own names
-    # (rule 3), as a filter on a field they do not have
+    # outside every dataset root, the sidecars above are never kept on
+    # their own (rule 3)
     assert _selects(Filter(EchoTime=Any), root) == []
-    assert _selects(Filter(RepetitionTime=2), root) == [
-        "sub-01/sub-01_task-rest_bold.json", "task-rest_bold.json",
-    ]
+    assert _selects(Filter(RepetitionTime=2), root) == []
     # and they do not come along with the data either
     kept = _selects(Filter(datatypes="func"), root)
     assert kept == [
@@ -490,10 +498,9 @@ def test_without_a_description_nothing_is_inherited(tmp_path):
         "sub-02/func/sub-02_task-rest_bold.nii.gz",
     ]
     # and on their subject
-    assert "task-rest_bold.json" in _selects(Filter(subjects="02"), root)
-    assert "sub-01/sub-01_task-rest_bold.json" not in _selects(
-        Filter(subjects="02"), root
-    )
+    assert _selects(Filter(subjects="02"), root) == [
+        "sub-02/func/sub-02_task-rest_bold.nii.gz"
+    ]
 
 
 def test_with_a_description_sidecars_are_inherited(tmp_path):

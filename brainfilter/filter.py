@@ -40,8 +40,10 @@ The input is a listing of files; see `Filter.select` for directories.
    the sidecars `path.sidecars` finds.
 3. A metadata file that applies to no data file of the listing at all
    (`beh/*_events.tsv` alone, `electrodes.tsv` of a session with no
-   recording) is judged on what it names: it is kept if its subject,
-   session, datatype, suffix and path pass the filters, and the entity
+   recording) is judged on what it names, when a `dataset_description.json`
+   of the listing is in its folder or above it (without one, it is kept only
+   by rule 2): it is kept if its subject, session, datatype, suffix and path
+   pass the filters, and the entity
    filters for the entities it has. An entity filter on an entity it does
    not have passes if it admits a file without it: one with `Never` among
    its values, or one made of values only (`acq="mprage"`). One that asks
@@ -49,7 +51,7 @@ The input is a listing of files; see `Filter.select` for directories.
    values (`acq={Any, "mprage"}`), unless `Never` is there too. A sidecar
    filter is judged the same way, as a filter on a field it does not have,
    and the participants filter on its subject, when it has one. So an
-   empty `Filter()` keeps every file that rule 5 does not skip.
+   empty `Filter()` keeps every file of a dataset that rule 5 does not skip.
 4. Dataset-level files (`dataset_description.json`, `participants.tsv`,
    `README`, `CHANGES`, `.bidsignore`, ...), other top-level files that are
    not sidecars, and `phenotype/` are always kept. Top-level sidecars
@@ -60,13 +62,13 @@ The input is a listing of files; see `Filter.select` for directories.
    a hidden name inside a data directory (`.zattrs` in `*.ome.zarr/`) is
    part of the data file, and kept with it. The dataset's `.bidsignore`
    decides which files are data to select, never which metadata applies.
-   A data file it names is never selected, and any other file it names is
-   kept only as the metadata of a kept data file (rule 2), never on its own
-   (rules 3 and 4); `dataset_description.json` and `.bidsignore` itself are
-   never ignored. So an ignored sidecar still applies to the data files it
-   describes, its values count for the sidecar filters, and it comes along
-   with them; an ignored `participants.tsv` is still read by the
-   participants filters, but not kept.
+   A data file it names is never selected, and metadata it names is kept
+   only as the metadata of a kept data file (rule 2), never on its own (rule
+   3). Dataset-level files (rule 4) are kept whether it names them or not.
+   So an ignored sidecar still applies to the data files it describes, its
+   values count for the sidecar filters, and it comes along with them; an
+   ignored `participants.tsv` is still read by the participants filters,
+   and kept.
 6. Last, the `exclude` patterns remove any kept file but
    `dataset_description.json`.
 
@@ -528,6 +530,10 @@ class Filter:
     file's sidecars are the ones `path.sidecars` finds, so a listing without
     a `dataset_description.json` inherits nothing from above a data file's
     own directory.
+    The filter sees only what it walks or selects: walked from a folder
+    inside a dataset, it finds no `dataset_description.json` above it, so
+    walk from the dataset root (or a nested dataset with its own
+    description) for full inheritance.
     """
 
     def __init__(
@@ -774,6 +780,12 @@ class Filter:
         (`sub-01/anat/sub-02_T1w.nii.gz`) is judged on its name, and is
         missed when the folder's own label leaves the folder out.
 
+        Inheritance reaches no further than `root`: walked from a folder
+        inside a dataset (`sub-01/`), the walk finds no
+        `dataset_description.json` and inherits nothing from above each
+        data file's own folder. Walk from the dataset root, or from a nested
+        dataset with its own description, for full inheritance.
+
         Raises
         ------
         FileNotFoundError
@@ -987,7 +999,10 @@ class Filter:
             return False
         rel = "/".join((*parts, name))
         ignore = None if state is None else state.ignore
-        if prune and ignore is not None and ignore.ignores(rel, True):
+        if (
+            prune and ignore is not None and rel != "phenotype"
+            and ignore.ignores(rel, True)
+        ):
             state.pruned.append(rel)  # type: ignore[union-attr]
             return False
         return True
@@ -1096,7 +1111,8 @@ class _Plan:
         self.scopes.note(path)
         kind, name = _classify(path, self.filter.folders)
         ignored = self.ignore is not None and self.ignore.ignores(path)
-        if kind == "keep" and not ignored:
+        if kind == "keep" and (not ignored or _dataset_level(path)):
+            # `.bidsignore` never removes a dataset-level file (rule 4).
             self.kept.add(path)
         elif kind == "meta":
             self.meta.append(name)  # type: ignore[arg-type]
@@ -1111,6 +1127,10 @@ class _Plan:
         """Whether a metadata file that applies to no data file is kept."""
         f = self.filter
         if m.path in self.ignored_meta:
+            return False
+        if self.scopes.scope(m.directory)[1] is None:
+            # Outside every dataset root, a metadata file reaches only its
+            # own folder's data files, so it is never kept on its own.
             return False
         if not all(test.lenient for test in f.sidecar.values()):
             return False
@@ -1202,6 +1222,12 @@ class _Plan:
         if f.exclude:
             kept = {p for p in kept if p in _PROTECTED or not f.exclude(p)}
         return sorted(kept)
+
+
+def _dataset_level(path: str) -> bool:
+    """Whether a file `_classify` keeps is a dataset-level file (rule 4)."""
+    parts = PurePosixPath(path).parts
+    return len(parts) == 1 or parts[0] == "phenotype"
 
 
 def _classify(
