@@ -17,8 +17,16 @@ On a writable path, `sidecar[key] = value`, `del sidecar[key]`,
 file's `write()` and a write to its merged `sidecar` each write the file at
 once, in one atomic replace. Inside `with path:` (or
 `with path.transaction():`) they are kept until the block ends, and every
-read sees them; see `brainfilter.Transaction`. A value a read returns is a
-copy: changing it in place is not saved.
+read sees them; see `brainfilter.Transaction`.
+
+Outside a block, a value a read returns is a copy: changing it in place is
+not saved. Inside a block, on a writable path, `sidecar[key]` (and
+`sidecar.get(key)`) returns the transaction's own value, and `table[column]`
+(and `table.get(column)`) a `LiveColumn`, a `list` kept in step with the
+transaction's own table, so a value changed in place is saved when the
+block ends. Every other read
+(`as_dict()`, `as_list()`, `rows()`, `values()`, `items()`,
+`as_dataframe()`, the merged `sidecar`) returns a copy, inside a block too.
 
 The `Async*` mixins give `AsyncBidsPath` the same surface as coroutines.
 Python has no awaitable indexing or `in`, so a directory's `ds[name]` is
@@ -47,6 +55,7 @@ from collections.abc import (
     Mapping,
     ValuesView,
 )
+from datetime import date, datetime, time
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, TypeVar
 
 from brainfilter import _content
@@ -74,8 +83,8 @@ if TYPE_CHECKING:
 
 __all__ = ["DATASET_DESCRIPTION", "AsyncJSONContentMixin",
            "AsyncSidecarChain", "AsyncTSVContentMixin", "AsyncTreeMixin",
-           "JSONContentMixin", "SidecarChain", "TSVContentMixin", "Table",
-           "TreeMixin"]
+           "JSONContentMixin", "LiveColumn", "SidecarChain",
+           "TSVContentMixin", "Table", "TreeMixin"]
 
 DATASET_DESCRIPTION = "dataset_description.json"
 
@@ -180,6 +189,54 @@ def _column(table: Table, name: object) -> list:
     return [row.get(name) for row in table]
 
 
+def _live_column(path: object, tx: object, entry: _Entry,
+                 name: object) -> LiveColumn:
+    """Return the column `name` of the transaction's table; `KeyError` if none.
+
+    One file gives one live column per name for the whole block.
+    """
+    live = entry.live
+    if live is not None and isinstance(name, str):
+        column = live.get(name)
+        if type(column) is LiveColumn:
+            return column
+    table = entry.content
+    if not isinstance(table, Table) or name not in table.columns:
+        raise KeyError(name)
+    if live is None:
+        live = entry.live = {}
+    column = live[name] = LiveColumn._over(path, tx, table, name)  # type: ignore[index]
+    return column
+
+
+def _sync_live(entry: _Entry) -> None:
+    """Put the live columns of `entry` back in step with its table.
+
+    After a change through the mapping API (a column set or dropped, the
+    table replaced, or a change that raised and was put back): a column the
+    table still has holds its values again, and one it has lost raises
+    `KeyError` until the column is back. A column that has ended stays
+    ended: a change that finishes once its block has closed (in a worker
+    that outlived it) does not make it live again.
+    """
+    live = entry.live
+    if not live:
+        return
+    table = entry.content
+    columns = set(table.columns) if isinstance(table, Table) else set()
+    with _transaction.LIVE_LOCK:
+        for name, column in live.items():
+            if name not in columns:
+                column.__class__ = _EndedColumn
+                continue
+            is_open = column._tx._state == _transaction._OPEN
+            if not is_open and type(column) is not LiveColumn:
+                continue
+            list.__setitem__(
+                column, slice(None), [row.get(name) for row in table]
+            )
+            column._rows = table
+            column.__class__ = LiveColumn
 def _column_values(column: str, values: object) -> list:
     """Return a copy of `values` as a list: one value per row of `column`."""
     if isinstance(values, (str, bytes, bytearray, Mapping)):
@@ -190,6 +247,181 @@ def _column_values(column: str, values: object) -> list:
             "the same value, repeat it: [value] * number_of_rows"
         )
     return copy.deepcopy(list(values))  # type: ignore[call-overload]
+
+
+# The cell values that cannot be changed in place, so need no copy.
+_IMMUTABLE = frozenset({str, int, float, bool, type(None), date, datetime, time})
+
+
+def _cell(value: object) -> object:
+    """Return a copy of `value`, to set in a cell."""
+    return value if type(value) in _IMMUTABLE else copy.deepcopy(value)
+
+
+class LiveColumn(list):
+    """A column of a TSV file inside a `with` block: the block's own values.
+
+    `table[column]` returns one inside a block, on a writable path. It is a
+    `list` of the column's values, and a value set in it (`column[0] = 31`,
+    a slice of as many values, `sort()`, `reverse()`), or a change to a list
+    a cell holds, is set in the transaction's table and saved when the block
+    ends; the cells left unchanged keep their exact text. Anything else a
+    list does works as on a list, and gives plain lists (`column + [1]`,
+    `column.copy()`, `sorted(column)`, slices).
+
+    A column has one value per row, so adding or removing a value
+    (`append`, `del`, `+=`, a slice of another length, ...) raises
+    `TypeError`; rows are added and removed by writing the table. A value
+    set is copied. A write from another thread, or from a task started
+    outside the block, raises `RuntimeError`, as for the table itself.
+    Once the column is dropped (`del table[column]`) it raises `KeyError`
+    until the column is set again; once the block has ended, using it at
+    all raises `RuntimeError`: read the column again. Either way its
+    `repr()` says so, rather than raising. A column compares as a list
+    does: `column == [30.0, None]`, not a tuple.
+    """
+
+    __slots__ = ("_name", "_path", "_rows", "_tx")
+
+    if TYPE_CHECKING:
+        _name: str
+        _path: Any
+        _rows: Table
+        _tx: Any
+
+    @classmethod
+    def _over(cls, path: object, tx: object, table: Table,
+              name: str) -> LiveColumn:
+        column = cls(row.get(name) for row in table)
+        column._path, column._tx, column._rows, column._name = (
+            path, tx, table, name
+        )
+        return column
+
+    def _writable(self) -> Table:
+        """Return the table to write to, from inside the block alone."""
+        tx = self._tx
+        if not _transaction.in_block(tx):
+            if tx._state == _transaction._OPEN:
+                raise tx._elsewhere_error(self._path)
+            raise tx._closed_error(self._path)
+        return self._rows
+
+    def __setitem__(self, index: Any, value: Any) -> None:  # noqa: ANN401
+        rows = self._writable()
+        name = self._name
+        if isinstance(index, slice):
+            positions = range(len(self))[index]
+            values = [_cell(item) for item in value]
+            if len(values) != len(positions):
+                raise self._one_per_row(
+                    f" ({len(values)} values for {len(positions)} rows)"
+                )
+            list.__setitem__(self, index, values)
+            for position, item in zip(positions, values):
+                rows[position][name] = item
+        else:
+            value = _cell(value)
+            list.__setitem__(self, index, value)
+            rows[index][name] = value
+
+    def sort(self, *, key: Any = None, reverse: bool = False) -> None:  # noqa: ANN401
+        """Sort the values in place (`list.sort`); the rows stay in place."""
+        rows = self._writable()
+        before = list(self)
+        try:
+            list.sort(self, key=key, reverse=reverse)
+        except BaseException:
+            list.__setitem__(self, slice(None), before)
+            raise
+        self._set_all(rows)
+
+    def reverse(self) -> None:
+        """Reverse the values in place; the rows stay in place."""
+        rows = self._writable()
+        list.reverse(self)
+        self._set_all(rows)
+
+    def _set_all(self, rows: Table) -> None:
+        name = self._name
+        for row, value in zip(rows, self):
+            row[name] = value
+
+    def _one_per_row(self, detail: str = "") -> TypeError:
+        return TypeError(
+            f"column {self._name!r} of {str(self._path)!r} holds one value "
+            f"per row, so values cannot be added to it or removed from it"
+            f"{detail}: add or remove rows by writing the table's rows "
+            "(table.write(rows))"
+        )
+
+    def _not_rows(self, *args: object, **kwargs: object) -> NoReturn:
+        raise self._one_per_row()
+
+    __delitem__ = append = extend = insert = pop = remove = clear = _not_rows  # type: ignore[assignment]
+    __iadd__ = __imul__ = _not_rows  # type: ignore[assignment]
+
+    def __copy__(self) -> list:
+        return list(self)
+
+    def __deepcopy__(self, memo: dict) -> list:
+        return copy.deepcopy(list(self), memo)
+
+    def __reduce_ex__(self, protocol: object) -> tuple:
+        return list, (list(self),)
+
+    def _end(self) -> None:
+        """End the column: the block it was read in has ended."""
+        self.__class__ = _EndedColumn
+
+
+class _EndedColumn(LiveColumn):
+    """A live column that no longer holds a column of the file.
+
+    Every use raises: `KeyError` while the block is open and the table has
+    no such column, `RuntimeError` once the block has ended. Its `repr()`
+    says which instead, so that printing a value that holds it works.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        tx = self._tx
+        if tx._state == _transaction._OPEN:
+            why = "the table no longer has this column"
+        else:
+            why = "read in a transaction that has ended"
+        return (
+            f"<column {self._name!r} of {str(self._path)!r}: {why}>"
+        )
+
+    def _gone(self, *args: object, **kwargs: object) -> NoReturn:
+        tx = self._tx
+        if tx._state != _transaction._OPEN:
+            when = (
+                "is being committed" if tx._state == _transaction._COMMITTING
+                else "has already closed"
+            )
+            raise RuntimeError(
+                f"cannot use the column {self._name!r} of "
+                f"{str(self._path)!r}: it was read in the transaction on "
+                f"{str(tx._root)!r}, which {when}, so it no longer holds "
+                f"the file's values; read the column again "
+                f"(table[{self._name!r}])"
+            )
+        raise KeyError(self._name)
+
+    for _member in (
+        "__getitem__", "__setitem__", "__delitem__", "__iter__",
+        "__reversed__", "__len__", "__contains__", "__eq__",
+        "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__add__",
+        "__radd__", "__mul__", "__rmul__", "__iadd__", "__imul__",
+        "__bool__", "__copy__", "__deepcopy__", "__reduce_ex__",
+        "__reduce__", "copy", "count", "index", "append", "extend",
+        "insert", "pop", "remove", "clear", "sort", "reverse",
+    ):
+        locals()[_member] = _gone
+    del _member
 
 
 def _new_table(rows: Iterable[Mapping[str, object]], columns: object,
@@ -669,10 +901,29 @@ class _ContentMixin:
             return None
         entry = tx._buffer.get(self)
         if entry is None:
-            entry = self._load(tx._buffer, create)
+            # Read under the file's lock, so that a write through that has
+            # checked no transaction covers the file is read, not lost.
+            with _transaction.file_lock(self):
+                entry = tx._buffer.get(self)
+                if entry is None:
+                    tx._claim(self)
+                    entry = self._load(tx._buffer, create)
         if not create and entry.absent():
             raise FileNotFoundError(2, "No such file or directory", str(self))
         return entry
+
+    def _live(self) -> tuple[Any, _Entry] | None:
+        """Return the transaction and entry whose own values a read returns.
+
+        Inside a block, on a writable path; `None` elsewhere (a read-only
+        path is given copies, so it cannot change the file).
+        """
+        if getattr(self, "mode", "r") != "w":
+            return None
+        tx = active_for(self)
+        if tx is None:
+            return None
+        return tx, self._tx_entry(create=False, tx=tx)  # type: ignore[return-value]
 
     def _loaded(self) -> object:
         """Return a copy of the content: what a read of the file sees."""
@@ -701,14 +952,24 @@ class _ContentMixin:
             except BaseException:
                 restore()
                 raise
+            finally:
+                _sync_live(entry)
             return
         # One read-change-write at a time per file, so that two writes to
         # the same file (from two threads) do not lose one of them.
         with _transaction.file_lock(self):
-            buffer = _Buffer()
-            change(self._load(buffer, create=True))
-            for path, data in buffer.plan():
-                _transaction.write_file(path, data)
+            # A block opened meanwhile in another thread may cover the file
+            # now: the write is refused, as one made after it opened is. A
+            # block of this family reads the file under this lock, so one
+            # that opens later reads this write; one that reads it under
+            # another lock is kept apart by `marking_through`.
+            active_for(self, write=True)
+            with _transaction.marking_through(self):
+                buffer = _Buffer()
+                change(self._load(buffer, create=True))
+                with _transaction.writing_through():
+                    for path, data in buffer.plan():
+                        _transaction.write_file(path, data)
 
 
 class JSONContentMixin(_ContentMixin):
@@ -717,7 +978,10 @@ class JSONContentMixin(_ContentMixin):
     Every lookup reads the file again; `as_dict()` loads it once, as a
     plain `dict`. On a writable path, `sidecar[key] = value`,
     `del sidecar[key]`, `update()` and `write()` write the file at once, in
-    one atomic replace (inside `with dataset:`, when the block ends).
+    one atomic replace (inside `with dataset:`, when the block ends). A
+    value read is a copy, except `sidecar[key]` and `get()` inside a block,
+    which return the transaction's own value: changing it in place is then
+    saved.
     """
 
     __slots__ = ()
@@ -741,10 +1005,20 @@ class JSONContentMixin(_ContentMixin):
         self._change(lambda entry: entry.replace(new))
 
     def __getitem__(self, key: str) -> object:
+        """Return the value of `key`; `KeyError` if it is missing.
+
+        Outside a `with` block it is a copy. Inside one, on a writable path,
+        it is the transaction's own value, so a nested value changed in
+        place (`sidecar["Extra"]["Coil"] = "neck"`) is saved when the block
+        ends.
+        """
+        live = self._live()
+        if live is not None:
+            return json_object(self, live[1].content)[key]
         return self.as_dict()[key]
 
     def __setitem__(self, key: str, value: object) -> None:
-        """Set a key (the file is created if missing)."""
+        """Set a key (the file is created if missing); `value` is copied."""
         value = _content.copy_json(value)
 
         def change(entry: _Entry) -> None:
@@ -780,7 +1054,10 @@ class JSONContentMixin(_ContentMixin):
         return self.as_dict().items()
 
     def get(self, key: str, default: object = None) -> object:
-        """Return the value of `key`, or `default`."""
+        """Return the value of `key`, or `default` (live as `sidecar[key]`)."""
+        live = self._live()
+        if live is not None:
+            return json_object(self, live[1].content).get(key, default)
         return self.as_dict().get(key, default)
 
 
@@ -818,7 +1095,9 @@ class TSVContentMixin(_ContentMixin):
     On a writable path, `table[column] = values` (one value per row) and
     `del table[column]` and `write()` write the file at once, in one atomic
     replace (inside `with dataset:`, when the block ends). The cells left
-    unchanged keep their exact text.
+    unchanged keep their exact text. Inside a block, `table[column]` is a
+    `LiveColumn` over the transaction's own table, so a value set in it
+    (`table["age"][0] = 31`) is saved too; every other read is a copy.
     """
 
     __slots__ = ()
@@ -890,8 +1169,16 @@ class TSVContentMixin(_ContentMixin):
         return _content.tsv_dataframe(text, kwargs, self._descriptions())
 
     # -- mapping of columns --------------------------------------------------
-    def __getitem__(self, column: str) -> list:
-        """Return the column called `column`, typed; `KeyError` if none."""
+    def __getitem__(self, column: str) -> list | LiveColumn:
+        """Return the column called `column`, typed; `KeyError` if none.
+
+        Outside a `with` block it is a `list`, a copy. Inside one, on a
+        writable path, it is a `LiveColumn` over the transaction's own
+        table, so `table["age"][0] = 31` is saved when the block ends.
+        """
+        live = self._live()
+        if live is not None:
+            return _live_column(self, *live, column)
         return _column(self._table(), column)
 
     def get(self, column: str, default: object = None) -> object:
@@ -1178,10 +1465,24 @@ class _AsyncContentMixin:
             return None
         entry = tx._buffer.get(self)
         if entry is None:
-            entry = await self._load(tx._buffer, create)
+            # Read under the file's lock (see `_ContentMixin._tx_entry`).
+            async with _transaction.afile_lock(self):
+                entry = tx._buffer.get(self)
+                if entry is None:
+                    tx._claim(self)
+                    entry = await self._load(tx._buffer, create)
         if not create and entry.absent():
             raise FileNotFoundError(2, "No such file or directory", str(self))
         return entry
+
+    async def _live(self) -> tuple[Any, _Entry] | None:
+        """Return what `_ContentMixin._live` does, as a coroutine."""
+        if getattr(self, "mode", "r") != "w":
+            return None
+        tx = active_for(self)
+        if tx is None:
+            return None
+        return tx, await self._tx_entry(create=False, tx=tx)  # type: ignore[return-value]
 
     async def _loaded(self) -> object:
         entry = await self._tx_entry(create=False)
@@ -1201,14 +1502,20 @@ class _AsyncContentMixin:
             except BaseException:
                 restore()
                 raise
+            finally:
+                _sync_live(entry)
             return
         # One read-change-write at a time per file, across the tasks of
         # this event loop (see `_ContentMixin._change`).
         async with _transaction.afile_lock(self):
-            buffer = _Buffer()
-            change(await self._load(buffer, create=True))
-            for path, data in buffer.plan():
-                await _transaction.awrite_file(path, data)
+            # Checked again under the lock (see `_ContentMixin._change`).
+            active_for(self, write=True)
+            with _transaction.marking_through(self):
+                buffer = _Buffer()
+                change(await self._load(buffer, create=True))
+                with _transaction.writing_through():
+                    for path, data in buffer.plan():
+                        await _transaction.awrite_file(path, data)
 
 
 class AsyncJSONContentMixin(_AsyncContentMixin):
@@ -1276,7 +1583,15 @@ class AsyncJSONContentMixin(_AsyncContentMixin):
         return (await self.as_dict()).items()
 
     async def get(self, key: str, default: object = None) -> object:
-        """Return the value of `key`, or `default`."""
+        """Return the value of `key`, or `default`.
+
+        Outside an `async with` block it is a copy. Inside one, on a
+        writable path, it is the transaction's own value, so a nested value
+        changed in place is saved when the block ends.
+        """
+        live = await self._live()
+        if live is not None:
+            return json_object(self, live[1].content).get(key, default)
         return (await self.as_dict()).get(key, default)
 
     def __getitem__(self, key: str) -> NoReturn:
@@ -1360,8 +1675,16 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
 
     # -- mapping of columns --------------------------------------------------
     async def get(self, column: str, default: object = None) -> object:
-        """Return the column called `column`, typed, or `default`."""
+        """Return the column called `column`, typed, or `default`.
+
+        Outside an `async with` block it is a `list`, a copy. Inside one, on
+        a writable path, it is a `LiveColumn` over the transaction's own
+        table (see `BidsPath.__getitem__`).
+        """
         try:
+            live = await self._live()
+            if live is not None:
+                return _live_column(self, *live, column)
             return _column(await self._table(), column)
         except KeyError:
             return default

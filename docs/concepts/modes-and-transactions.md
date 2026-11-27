@@ -136,6 +136,12 @@ in the block behaves as though the files had changed. The changed files are
 written when the block ends cleanly, and are discarded if it ends with an
 exception.
 
+The two ways also differ in what a read gives you. Outside a transaction, every
+read returns a copy, so changing a nested value in place changes nothing on
+storage. Inside one, the transaction holds the file anyway, and a key of a JSON
+file, or a column of a table, gives the transaction's own value; see
+[Editing values in place](#editing-values-in-place).
+
 ### Concurrent writes to one file
 
 Two writes to the same file at the same time are made one after the other, under
@@ -170,6 +176,71 @@ buffer, and a read of any of them sees the edits.
 False
 ```
 
+### Editing values in place
+
+Inside a block, on a writable path, `sidecar[key]` returns the transaction's own
+value rather than a copy, and so does `sidecar.get(key)`. A change made to a
+list or a dictionary it holds is therefore an edit like any other: it is seen by
+every read in the block, written when the block ends cleanly, and discarded with
+the rest if it ends with an exception. A column of a table, `table[column]`,
+is likewise a live column: a `list` kept in step with the transaction's table,
+so `table["age"][0] = 31` sets one cell, and the cells around it keep their
+exact text. It is a real list, so it can be indexed, sliced, sorted, added to
+another list, or passed to `json.dumps` and pandas, at the speed of a list. A column holds one value per
+row, so it refuses to grow or shrink (`append`, `del`, `+=`, a slice of another
+length raise `TypeError`); rows are added by writing the table. `sort()` and
+`reverse()` reorder the values of the column, not the rows.
+
+```pycon
+>>> bold = writer["task-rest_bold.json"]
+>>> bold["Extra"] = {"Coils": ["head"]}
+>>> with writer:
+...     bold["Extra"]["Coils"].append("neck")
+...     snapshot = bold.as_dict()
+...     snapshot["Extra"]["Coils"].append("spine")
+>>> bold["Extra"]
+{'Coils': ['head', 'neck']}
+```
+
+```pycon
+>>> (writer / "participants.tsv").write([
+...     {"participant_id": "sub-01", "group": "patient"},
+...     {"participant_id": "sub-02", "group": "patient"},
+... ])
+>>> with writer:
+...     groups = writer["participants.tsv"]["group"]
+...     groups[1] = "control"
+...     print(isinstance(groups, list), sorted(groups))
+True ['control', 'patient']
+>>> writer["participants.tsv"]["group"]
+['patient', 'control']
+```
+
+Every read that loads a whole file returns a copy, inside a block too: `as_dict()`,
+`as_list()`, `rows()`, `values()`, `items()`, `as_dataframe()`, and the merged
+`sidecar` of a data file. That makes `as_dict()` a snapshot, as the first example
+shows. A value you assign to a file, as in `sidecar[key] = value`, `update()`,
+`write()` or `table[column] = values`, is copied in, so your own object never
+becomes part of the file. A value you store inside one of the transaction's own
+values is not: after `ds["b.json"]["Y"]["s"] = ds["a.json"]["X"]`, the two files
+share one object, and a later change to it in the block is written to both. Take
+a copy (`copy.deepcopy`) to keep them apart. A live column stored that way is
+written as the list it holds. A read-only path is given copies inside a block as
+well, so it still cannot change anything.
+
+A value you keep after the block has ended no longer belongs to any file. A JSON
+value is then a plain object: change it, and nothing is saved. A live column
+raises `RuntimeError` when it is used at all, since its values are no longer the
+file's, whether the block committed or was discarded; read the column again.
+Inside the block, a column that is dropped raises `KeyError` until it is set
+again. Either way, its `repr()` says what happened instead of raising, so a value
+that holds it can still be printed. A live column compares as a list does, so
+`column == [30.0, None]` is true and `column == (30.0, None)` is not. A value that JSON cannot hold, stored inside a live value, fails when the
+block ends, with an error that names the file and the key, and nothing written.
+
+In the async family the same holds for `await sidecar.get(key)` and
+`await table.get(column)`, inside `async with`.
+
 ### Files are known by location
 
 The buffer is keyed on where a file is, not on the path object or the spelling
@@ -202,7 +273,15 @@ the running code, which is why the boundary falls where it does.
 
 A write to a covered file from any of the last three is refused with a
 `RuntimeError`, because it could otherwise be lost or written ahead of the
-transaction and then overwritten by its commit.
+transaction and then overwritten by its commit. So does a write that started
+before the block opened, if the block covers the file by the time the write
+reaches it; one that got there first is simply read by the block. That order is
+kept when the write and the block go through the same family, and in the async
+family the same event loop. Across them, for example a write from a plain thread
+while an `async with` block runs, or a write in one event loop while a block is
+open in another, whichever comes second raises `RuntimeError`: the write, with
+nothing written, if the block has already read the file, or the block's first use
+of the file, while the write is being made. Neither write is lost.
 
 ```pycon
 >>> import threading
@@ -227,13 +306,50 @@ two threads or tasks, sync or async. A second `with ds:` inside the first raises
 one on `ds["sub-01"]` and another on `ds["sub-02"]` together. A write to a file
 outside every open transaction is simply written through, as usual.
 
-!!! warning "Only brainfilter's writes are buffered"
+### Raw writes inside a block
 
-    The buffer holds the edits made through the JSON and TSV interface. A raw
-    operation on the path, such as `write_text`, goes to storage immediately and
-    is not part of the transaction. If it touches a file the transaction also
-    covers, the commit later replaces the file with the buffered version, and the
-    raw write is lost. Do not mix the two on one file.
+The buffer holds the edits made through the JSON and TSV interface. A raw
+operation on a path, such as `write_text`, would go to storage at once, outside
+the transaction, and the commit would later replace the file with the buffered
+version, losing the raw write. brainfilter therefore refuses, with a
+`RuntimeError`, a raw write to a JSON or TSV file below the root of an open
+transaction, whether the transaction has read the file yet or not. Every member
+that a read-only path refuses is refused here too, with the same rules for the
+two sides of a `rename`, `move` or `copy`. `mkdir` is allowed, since creating a
+directory cannot lose an edit, except where the transaction holds a file (one
+with content, at that path or above it), where the commit would find a
+directory in its place. A directory that holds a file the transaction holds, one
+it has read or edited, cannot be removed, renamed or replaced either, since the
+commit could write that file back. `touch` and `chmod` of a directory that
+exists change it alone, so they are allowed; on a remote store, where a directory
+is only a prefix, that means one that holds a file the transaction read. So is a
+`copy_into` or `download_to` into it of a file the transaction does not cover.
+
+```pycon
+>>> with writer:
+...     bold["Checked"] = True
+...     try:
+...         bold.write_text("{}")
+...     except RuntimeError as error:
+...         print(error)
+cannot write to 'memory://ds/task-rest_bold.json' with write_text(): a transaction on 'memory://ds' is open, and it covers this file, so its commit could overwrite this write; inside the block, change a JSON or TSV file through brainfilter (`path[key] = value`, `path.write(...)`), or make this write after the block ends
+>>> bold["Checked"]
+True
+```
+
+Reads are not refused, and neither are raw writes to the other files below the
+root, such as an image, which a transaction never holds. The refusal applies
+whichever path the write goes through, one derived from the block's path or one
+built from a string, and from every thread and task while the transaction is
+open or committing.
+
+!!! warning "Writes past brainfilter are not seen"
+
+    The refusal is made by brainfilter's paths. A write through the wrapped
+    driver object (`path.wrapped`), through the backend's own handles, through a
+    plain `pathlib` or `bagof.paths` path, or by another program, is not seen. If
+    it touches a file the transaction holds, the commit replaces it and the
+    write is lost. Do not mix the two on one file.
 
 ## What is, and is not, atomic
 
@@ -247,7 +363,9 @@ error is a `CommitError` from bagof-paths.
 
 Before the first file of a commit is replaced, every changed file is
 serialized. Content that cannot be written, such as a tab inside a TSV cell or an
-infinite float, raises its error at that point, with nothing written. This
+infinite float, raises its error at that point, with nothing written. So do two
+changed files where one is below the other, such as `a.json` and `a.json/b.json`,
+which raise `NotADirectoryError` on every store. This
 catches the common failures, which are about the data, before the risky part
 begins.
 

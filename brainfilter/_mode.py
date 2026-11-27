@@ -6,13 +6,22 @@ carried onto every path derived from it. It is a brainfilter rule, not a
 filesystem permission: the wrapped driver object (`path.wrapped`) and the
 backend's own handles (`path.fs`, `path.client`) reach the storage directly
 and are not guarded.
+
+The same members, on a writable path, refuse a raw write that an open
+transaction would lose: to a JSON or TSV file below its root, to a
+directory holding a file it holds, or a directory made where it holds a
+file (see `transaction.refuse_raw_write`).
 """
 from __future__ import annotations
 
 import functools
 import inspect
+import os
 from collections.abc import Callable
 from typing import Any
+
+from brainfilter._family import in_family
+from brainfilter.transaction import refuse_raw_write
 
 __all__ = ["MODES", "ReadOnlyError", "check_mode", "guard_members",
            "is_read_only", "require_writable"]
@@ -49,6 +58,23 @@ _MEMBERS: dict[str, tuple[str, bool, str | None]] = {
 
 # The characters of an `open()` mode that write.
 _WRITING = frozenset("wax+")
+
+# What a member does to its destination, said in the error of a raw write
+# that a transaction refuses.
+_ONTO = {
+    "rename": "rename onto",
+    "replace": "rename onto",
+    "move": "move onto",
+    "move_into": "move onto",
+    "copy": "copy onto",
+    "copy_into": "copy onto",
+    "link_to": "make a hard link at",
+    "download_to": "download to",
+}
+
+# The members whose destination is a directory, the path's name in it: a
+# `download_to` destination may be either.
+_INTO = frozenset({"copy_into", "move_into"})
 
 
 class ReadOnlyError(PermissionError):
@@ -114,10 +140,17 @@ def _guard(owner: type, name: str, real: Callable) -> Callable:
             mode = argument(args, kwargs, "mode")
             if not (isinstance(mode, str) and _WRITING & set(mode)):
                 return
+        destination = None
         if own:
             require_writable(path, verb)
         if target is not None:
-            require_writable(argument(args, kwargs, target), verb)
+            destination = argument(args, kwargs, target)
+            require_writable(destination, verb)
+        if own:
+            refuse_raw_write(path, name, verb)
+        if destination is not None:
+            for written in _destinations(name, path, destination):
+                refuse_raw_write(written, name, _ONTO[name])
 
     if inspect.iscoroutinefunction(real):
         async def member(self: Any, *args, **kwargs) -> Any:  # noqa: ANN401
@@ -131,12 +164,36 @@ def _guard(owner: type, name: str, real: Callable) -> Callable:
     return functools.wraps(real)(member)
 
 
+def _destinations(name: str, path: Any, destination: object) -> list:  # noqa: ANN401
+    """Return the paths that member `name` of `path` writes at `destination`.
+
+    Each is a path of the family of `path`, so that its location can be
+    told whatever `destination` is (a string, another path). One that
+    cannot be built is left out: the member raises its own error for it.
+    """
+    try:
+        family = getattr(type(path), "_root", type(path))
+        written = in_family(destination, family)
+        if name in _INTO:
+            return [written / path.name]
+        if name == "download_to" and written.is_local() and os.path.isdir(
+            os.fspath(written)
+        ):
+            # Into a directory (which is not changed), under the path's name.
+            return [written / path.name]
+        return [written]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def guard_members(cls: type) -> type:
     """Guard the members of `cls` that change the filesystem (a decorator).
 
     Each refuses, with `ReadOnlyError`, to write to or remove a read-only
-    path, and to write onto a read-only destination. A member the base
-    class does not have is left out.
+    path, and to write onto a read-only destination; and, with
+    `RuntimeError`, a write that an open transaction would lose (see
+    `transaction.refuse_raw_write`). A member the base class does not have
+    is left out.
     """
     for name in _MEMBERS:
         real = _inherited(cls, name)
