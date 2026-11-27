@@ -460,3 +460,38 @@ def test_is_file_name():
     assert parse_name("sub-01_task-x_meg").is_file_name
     for name in ("anat", "README", "sub-01", "sub-01_ses-1", "a_b.txt"):
         assert not parse_name(name).is_file_name
+
+
+def test_entities_compare_index_labels_by_number():
+    one, padded = BidsEntities(sub="01", run="1"), BidsEntities(sub="01", run="01")
+    assert one <= padded and one >= padded
+    assert not one < padded and not one > padded
+    assert one != padded  # `==` stays the plain dict comparison
+    more = BidsEntities(sub="01", run="1", echo="2")
+    assert more < padded and padded > more
+    assert more <= padded and padded >= more
+    assert BidsEntities(run="1", echo="02") < BidsEntities(echo="2")
+
+
+def test_entities_non_numeric_index_label_compares_as_text():
+    assert BidsEntities(sub="01", run="a") < BidsEntities(run="a")
+    assert not BidsEntities(sub="01", run="a") < BidsEntities(run="A")
+    assert not BidsEntities(sub="01", run="1a") <= BidsEntities(run="01a")
+
+
+def test_entities_non_index_labels_compare_as_written():
+    assert not BidsEntities(sub="1", task="x") < BidsEntities(sub="01")
+    assert not BidsEntities(sub="1") <= BidsEntities(sub="01")
+    assert BidsEntities(sub="01", task="x") < BidsEntities(sub="01")
+
+
+def test_exported_names_report_the_package_and_pickle():
+    import pickle
+
+    import brainfilter
+
+    assert brainfilter.ReadOnlyError.__module__ == "brainfilter"
+    assert "brainfilter.ReadOnlyError" in repr(brainfilter.ReadOnlyError)
+    err = pickle.loads(pickle.dumps(brainfilter.ReadOnlyError("x")))
+    assert type(err) is brainfilter.ReadOnlyError and err.args == ("x",)
+    assert pickle.loads(pickle.dumps(brainfilter.Table)) is brainfilter.Table

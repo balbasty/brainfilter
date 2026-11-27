@@ -42,3 +42,11 @@ __all__ = [
     "Version",
     "__version__",
 ]
+
+# Show exported names as `brainfilter.X` (in reprs and tracebacks), not
+# under the private module that defines them.
+for _name in __all__:
+    _obj = globals()[_name]
+    if getattr(_obj, "__module__", "").startswith("brainfilter._"):
+        _obj.__module__ = __name__
+del _name, _obj

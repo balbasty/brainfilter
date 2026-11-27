@@ -1075,8 +1075,8 @@ class TSVContentMixin(_ContentMixin):
     1. its description in the table's JSON sidecar (`participants.json`
        for `participants.tsv`), if it has a `Format`: `number` reads as
        `float`, `integer` and `index` as `int`, `boolean` as `bool`
-       (`true`/`false`), `date`, `datetime` and `time` as `datetime`
-       objects, any other format as `str`;
+       (`true`/`false`), `date` as `datetime.date`, `datetime`
+       as `datetime.datetime` and `time` as `datetime.time`, any other format as `str`;
     2. its standard BIDS definition (`age` is a number, `onset` too,
        `participant_id` a string, ...);
     3. its values: `int` if every value is an integer written as Python
