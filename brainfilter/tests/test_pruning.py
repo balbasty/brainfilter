@@ -35,6 +35,9 @@ FILES = {
     "sub-10/ses-1/func/sub-10_ses-1_task-rest_events.tsv": "onset\n0\n",
     "sub-10/ses-1/beh/sub-10_ses-1_task-x_events.tsv": "onset\n0\n",
     "sub-10/ses-2/anat/sub-10_ses-2_T1w.nii.gz": "x",
+    # names without the subject or the session of their folders
+    "sub-02/notes.txt": "x",
+    "sub-01/ses-2/anat/sub-01_T1w.nii.gz": "x",
 }
 ROOT = "memory://pruned"
 
@@ -47,6 +50,10 @@ PRUNING = [
     Filter(subjects={typing_extensions.Never, "02"}),
     Filter(subjects=lambda s: s.endswith("1")),
     Filter(exclude_subjects=["01", "10"]),
+    Filter(exclude_subjects="02"),
+    Filter(subjects=typing_extensions.Never),
+    Filter(subjects={typing_extensions.Never, "01"}),
+    Filter(subjects="01", sessions="1"),
     Filter(sessions="1"),
     Filter(sessions=2),
     Filter(sessions=typing_extensions.Never),
@@ -114,6 +121,37 @@ def test_walk_prunes_without_changing_results(store, listed_dirs, no_pruning):
             assert pruned[id(f)][1] < len(listed_dirs)
         else:
             assert pruned[id(f)][1] == len(listed_dirs)
+
+
+def test_a_file_takes_the_labels_of_its_folders():
+    # a name without the subject (session) has its folder's, in select as in
+    # a walk, which prunes by folder
+    assert Filter(exclude_subjects="02").select(["sub-02/notes.txt"]) == []
+    assert Filter(subjects="02").select(["sub-02/notes.txt"]) == [
+        "sub-02/notes.txt"
+    ]
+    assert Filter(subjects=typing_extensions.Never).select(
+        ["sub-02/notes.txt"]
+    ) == []
+    t1w = ["sub-01/ses-2/anat/sub-01_T1w.nii.gz"]
+    assert Filter(sessions=typing_extensions.Never).select(t1w) == []
+    assert Filter(sessions="2").select(t1w) == t1w
+    assert Filter(sessions="1").select(t1w) == []
+    assert Filter().keep_data(t1w[0])
+    assert not Filter(sessions="1").keep_data(t1w[0])
+
+
+def test_a_name_that_contradicts_its_folder_is_judged_on_the_name(store):
+    # not valid BIDS: select judges it on its name; a walk prunes by folder,
+    # and so misses it when the folder's label fails (documented in walk)
+    odd = "sub-01/anat/sub-02_T1w.nii.gz"
+    root = BidsPath(ROOT, mode="w")
+    (root / odd).parent.mkdir(parents=True, exist_ok=True)
+    (root / odd).write_text("x")
+    assert Filter(subjects="02").select([odd]) == [odd]
+    assert Filter(subjects="01").select([odd]) == []
+    assert odd not in _rel(Filter(subjects="01").walk(ROOT), root)
+    assert odd not in _rel(Filter(subjects="02").walk(ROOT), root)
 
 
 def test_pruned_folders_are_not_listed(store, listed_dirs):

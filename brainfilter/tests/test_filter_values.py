@@ -162,6 +162,19 @@ def test_a_test_that_raises_on_a_wrong_value_fails(ds):
         Filter(TaskName=lambda v: {}[v]).walk(ds)
 
 
+@pytest.mark.parametrize("keyword, meant", [
+    ("Subjects", "subjects"), ("Subject", "subjects"), ("Sessions", "sessions"),
+    ("Datatypes", "datatypes"), ("Suffix", "suffixes"), ("Tasks", "tasks"),
+    ("Exclude_Subjects", "exclude_subjects"), ("Participants", "participants"),
+    ("Acq", "acq"), ("Run", "run"), ("Runs", "run"), ("Sub", "sub"),
+])
+def test_a_capitalised_keyword_is_a_misspelling(keyword, meant):
+    with pytest.raises(TypeError, match=f"write {meant}=.*sidecar="):
+        Filter(**{keyword: "01"})
+    # a sidecar field of that name goes in the mapping
+    assert set(Filter(sidecar={keyword: "01"}).sidecar) == {keyword}
+
+
 def test_sidecar_keywords_and_mapping():
     with pytest.raises(TypeError, match="RepetitionTime"):
         Filter(RepetitionTime=2, sidecar={"RepetitionTime": 2})
@@ -321,7 +334,34 @@ def test_never_keeps_files_without_the_entity(never):
     assert _images(Filter(acq=never)) == {0, 3, 4, 5}
     assert _images(Filter(entities={"acq": never})) == {0, 3, 4, 5}
     assert _images(Filter(run=never)) == {0, 1, 2, 5}
-    assert _images(Filter(tasks=never)) == {0, 1, 2}
+    assert _images(Filter(task=never)) == {0, 1, 2}
+    if never is not None:   # None is no filter on a label keyword
+        assert _images(Filter(tasks=never)) == {0, 1, 2}
+        assert _images(Filter(sessions=never)) == set(range(len(PRESENCE)))
+        assert _images(Filter(subjects=never)) == set()
+        assert _images(Filter(datatypes=never)) == set()
+
+
+LABEL_KEYWORDS = [
+    "subjects", "exclude_subjects", "sessions", "datatypes", "suffixes",
+    "tasks",
+]
+
+
+@pytest.mark.parametrize("keyword", LABEL_KEYWORDS)
+def test_none_is_no_filter_on_a_label_keyword(keyword):
+    import inspect
+
+    assert inspect.signature(Filter).parameters[keyword].default is None
+    assert _images(Filter(**{keyword: None})) == set(range(len(PRESENCE)))
+    with pytest.raises(TypeError, match=f"{keyword}=.*Never"):
+        Filter(**{keyword: [None, "x"]})
+
+
+def test_none_is_never_on_an_entity_keyword():
+    assert _images(Filter(sub=None)) == set()
+    assert _images(Filter(entities={"task": None})) == {0, 1, 2}
+    assert _images(Filter(task=[None, "rest"])) == set(range(len(PRESENCE)))
 
 
 @pytest.mark.parametrize("anything", PRESENT_MARKERS)
@@ -356,21 +396,50 @@ ORPHAN = ["sub-01/beh/sub-01_task-x_events.tsv"]
     ("x", True),             # a filter on an entity it does not have passes
     (Never, True),           # it does not have it
     ({Never, "x"}, True),
-    ({Any, "x"}, True),
     (Any, False),            # ... unless it asks for the entity to be there
     (Required, False),
+    ({Any, "x"}, False),     # ... beside values too
+    ({Any, Never}, True),    # ... but for one that admits it is not
 ])
 def test_presence_on_metadata_judged_on_its_own_name(value, kept):
     assert Filter(acq=value).select(ORPHAN) == (ORPHAN if kept else [])
 
 
 @pytest.mark.parametrize("value, kept", [
-    (2, True), (Never, True), (Any, False), ({Any, 2}, True),
+    (2, True), ({2, None}, True), (Never, True), ({Never, 2}, True),
+    (Any, False), (Required, False), ({Any, 2}, False), ({Any, Never}, True),
 ])
 def test_sidecar_filters_on_metadata_judged_on_its_own_name(value, kept):
     plan = filter_module._Plan(Filter(RepetitionTime=value), ORPHAN)
     assert plan.reads == set()
     assert plan.finish({}) == (ORPHAN if kept else [])
+
+
+@pytest.mark.parametrize("content, error, message", [
+    ("{bad", json.JSONDecodeError, "sub-01_task-rest_bold.json.*not valid JSON"),
+    ("[1, 2]", TypeError, "sub-01_task-rest_bold.json.*not hold a JSON object"),
+])
+def test_a_sidecar_that_cannot_be_read(tmp_path, content, error, message):
+    root = BidsPath(str(tmp_path))
+    _write(root, DATASET)
+    _write(root, {"sub-01/func/sub-01_task-rest_bold.json": content})
+    with pytest.raises(error, match=message):
+        Filter(EchoTime=Any).walk(root)
+    listing = [p for p in root.rglob("*") if p.is_file()]
+    with pytest.raises(error, match=message):
+        Filter(EchoTime=Any).select(listing, root=root)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("content, error", [
+    ("{bad", json.JSONDecodeError), ("[1, 2]", TypeError),
+])
+async def test_awalk_a_sidecar_that_cannot_be_read(tmp_path, content, error):
+    _write(BidsPath(str(tmp_path)), DATASET)
+    _write(BidsPath(str(tmp_path)),
+           {"sub-01/func/sub-01_task-rest_bold.json": content})
+    with pytest.raises(error, match="sub-01_task-rest_bold.json"):
+        await Filter(EchoTime=Any).awalk(str(tmp_path))
 
 
 # -- async ----------------------------------------------------------------------
@@ -416,6 +485,38 @@ async def test_awalk_values(ads, tmp_path, monkeypatch):
         "task-rest_bold.json", "sub-01_task-rest_bold.json",
         "sub-02_task-rest_bold.json",
     })
+
+
+@pytest.mark.anyio
+async def test_awalk_reads_and_lists_a_few_at_a_time(tmp_path, monkeypatch):
+    import asyncio
+
+    files = dict(DATASET)
+    for s in range(10):
+        files[f"sub-1{s}/func/sub-1{s}_task-rest_bold.nii.gz"] = b""
+        files[f"sub-1{s}/func/sub-1{s}_task-rest_bold.json"] = {"EchoTime": 1}
+    _write(BidsPath(str(tmp_path)), files)
+    monkeypatch.setattr(filter_module, "_CONCURRENCY", 3)
+    running, most = 0, {}
+
+    def counting(name, real):
+        async def call(path):
+            nonlocal running
+            running += 1
+            most[name] = max(most.get(name, 0), running)
+            await asyncio.sleep(0.001)
+            try:
+                return await real(path)
+            finally:
+                running -= 1
+        return call
+
+    for name in ("_aread_json", "_alist"):
+        monkeypatch.setattr(filter_module, name,
+                            counting(name, getattr(filter_module, name)))
+    kept = await Filter(EchoTime=Any).awalk(str(tmp_path))
+    assert len(_data(kept, AsyncBidsPath(str(tmp_path)))) == 12
+    assert most == {"_aread_json": 3, "_alist": 3}
 
 
 @pytest.mark.anyio

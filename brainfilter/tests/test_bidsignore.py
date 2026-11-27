@@ -1,4 +1,5 @@
 """`.bidsignore`: the files it names are not part of the dataset."""
+import re
 import typing
 
 import pytest
@@ -55,18 +56,67 @@ from brainfilter.filter import Filter, _BidsIgnore
     # ... but not a file inside an ignored directory
     ("extra/\n!extra/keep.json", "extra/keep.json", False, True),
     ("extra/*\n!extra/keep.json", "extra/keep.json", False, False),
+    # trailing spaces are dropped, unless escaped
+    ("trail\\ ", "trail ", False, True),
+    ("trail\\ ", "trail", False, False),
+    ("trail ", "trail ", False, False),
+    ("trail\\\\ ", "trail\\", False, True),        # an escaped backslash
+    # classes, as git reads them (each checked against `git check-ignore`)
+    ("foo[!x]bar", "foo/bar", False, False),            # never matches /
+    ("foo[!x]bar", "fooybar", False, True),
+    ("[!/]x", "ax", False, True),
+    ("[/]x", "ax", False, False),
+    ("[\\d]x", "dx", False, True),                       # backslash escapes
+    ("[\\d]x", "\\x", False, False),
+    ("[\\d]x", "5x", False, False),
+    ("[[]x", "[x", False, True),
+    ("[]]x", "]x", False, True),                         # ] first is literal
+    ("[!]]x", "ax", False, True),
+    ("[!]]x", "]x", False, False),
+    ("[a-]x", "-x", False, True),
+    ("[[:digit:]]x", "5x", False, True),
+    ("[[:digit:]]x", "dx", False, False),
+    ("[[:alpha:]-z]x", "-x", False, True),
+    ("[z-a]x", "zx", False, True),                       # a reversed range
+    ("[z-a]x", "bx", False, False),                      # ... is its start
+    ("[z-ab]x", "bx", False, True),
+    # what git cannot match matches nothing
+    ("foo[bar", "foo[bar", False, False),                # unterminated
+    ("[[:bogus:]]x", "ax", False, False),                # unknown class
+    ("trail\\", "trail\\", False, False),               # trailing backslash
     # never ignored
     ("*", "dataset_description.json", False, False),
     ("*", ".bidsignore", False, False),
     ("*", "sub-01/dataset_description.json", False, True),
 ])
 def test_patterns(text, rel, is_dir, ignored):
-    assert _BidsIgnore.parse(text).ignores(rel, is_dir) is ignored
+    ignore = _BidsIgnore.parse(text)   # None when no pattern can match
+    assert (ignore is not None and ignore.ignores(rel, is_dir)) is ignored
 
 
 def test_no_patterns():
     assert _BidsIgnore.parse("") is None
     assert _BidsIgnore.parse("# only a comment\n\n   \n/\n") is None
+
+
+@pytest.mark.parametrize("pattern", [
+    "[z-a]*", "[[]x", "foo[bar", "[[:bogus:]]x", "x[", "\\", "[\\",
+])
+def test_odd_patterns_neither_raise_nor_warn(pattern, recwarn):
+    re.purge()      # a regex already compiled would not warn again
+    ignore = _BidsIgnore.parse(f"{pattern}\nextra\n")
+    for rel in ("zz", "[x", "foo[bar", "ax", "x[", "\\"):
+        ignore.ignores(rel)
+    assert ignore.ignores("extra")
+    assert not recwarn.list
+
+
+def test_a_walk_survives_a_malformed_class(tmp_path):
+    root = BidsPath(str(tmp_path))
+    _write(root, {**FILES, ".bidsignore": "[z-a]*\n[[:bogus:]]\n"})
+    assert _rel(Filter().walk(root), root) == _rel(
+        Filter(bidsignore=False).walk(root), root
+    )
 
 
 # -- walking ------------------------------------------------------------------

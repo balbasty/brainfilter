@@ -21,7 +21,9 @@ The input is a listing of files; see `Filter.select` for directories.
    kept if they pass every filter: subjects, sessions, datatypes, suffixes,
    tasks, other entities, the `include` patterns, the participants filter
    (on the subject's row of `participants.tsv`) and the sidecar filters
-   (on the merged sidecar of the file). A table that is a recording
+   (on the merged sidecar of the file). A file's subject and session are
+   those its name gives, else those of the `sub-<label>/` and
+   `ses-<label>/` folders it is in. A table that is a recording
    (`*_beh.tsv`, `*_motion.tsv`, `*_blood.tsv`) is a data file, and so is
    a continuous recording (`*_physio.tsv.gz`). A data file that is a
    directory (a CTF MEG `*_meg.ds/`, an OME-Zarr `*.ome.zarr/`) is one
@@ -37,11 +39,13 @@ The input is a listing of files; see `Filter.select` for directories.
    recording) is judged on what it names: it is kept if its subject,
    session, datatype, suffix and path pass the filters, and the entity
    filters for the entities it has. An entity filter on an entity it does
-   not have passes, unless all it asks is that the entity be there
-   (`Any`, `Required`); `Never` passes. A sidecar filter is judged the same
-   way, as a filter on a field it does not have, and the participants
-   filter on its subject, when it has one. So an empty `Filter()` keeps
-   every file that rule 5 does not skip.
+   not have passes if it admits a file without it: one with `Never` among
+   its values, or one made of values only (`acq="mprage"`). One that asks
+   for the entity to be there fails: `Any` or `Required`, alone or beside
+   values (`acq={Any, "mprage"}`), unless `Never` is there too. A sidecar
+   filter is judged the same way, as a filter on a field it does not have,
+   and the participants filter on its subject, when it has one. So an
+   empty `Filter()` keeps every file that rule 5 does not skip.
 4. Dataset-level files (`dataset_description.json`, `participants.tsv`,
    `README`, `CHANGES`, `.bidsignore`, ...), other top-level files that are
    not sidecars, and `phenotype/` are always kept. Top-level sidecars
@@ -65,9 +69,12 @@ a list or a set (any of them), a glob ([`Glob`][brainfilter.Glob]), a regex
 whole label: `re.compile("1")` matches `sub-1` but not `sub-10`; a
 `Regex(..., full=False)` is found anywhere in it instead), a function of
 the label that says whether it matches, or a marker of presence:
-`typing.Never` (or `None`) matches a file that does not have the entity,
-and `typing.Any` (or `typing.Required`) one that has it, whatever its
-label. A list or a set may mix all of these: `acq={Never, "mprage"}`.
+`typing.Never` matches a file that does not have the entity, and
+`typing.Any` (or `typing.Required`) one that has it, whatever its label. A
+list or a set may mix all of these: `acq={Never, "mprage"}`. On an entity
+keyword (`acq=None`, `sub=None`, `entities={"acq": None}`), `None` is
+`Never`; on `subjects`, `exclude_subjects`, `sessions`, `datatypes`,
+`suffixes` and `tasks`, it is no filter, their default.
 Plain labels may keep their `<key>-` prefix (`"sub-01"` is `"01"`); a
 pattern is matched against the bare label.
 
@@ -102,7 +109,7 @@ import json
 import pathlib
 import re
 import typing
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import PurePosixPath
 from typing import TypeVar
 
@@ -130,6 +137,7 @@ from brainfilter.conditions import Condition, Or, Regex, default_full
 __all__ = ["Filter"]
 
 T = TypeVar("T")
+R = TypeVar("R")
 
 # Never removed by `exclude`.
 _PROTECTED = frozenset({"dataset_description.json"})
@@ -161,16 +169,6 @@ _PRESENT_MARKERS = tuple({
 # The exceptions that make a test fail on a value instead of raising: what
 # a test of the wrong type of value raises (`None < 0.03`, `(2).lower()`).
 _WRONG_VALUE = (TypeError, ValueError, AttributeError)
-
-
-class _NoFilter:
-    """The default of a label keyword: no filter on it."""
-
-    def __repr__(self) -> str:
-        return "<no filter>"
-
-
-_NO_FILTER: object = _NoFilter()
 
 
 class _Absent:
@@ -224,16 +222,28 @@ class _LabelMatch:
     any entity. With `index`, a plain string and the label compare by number
     too; otherwise a string compares as exact text. Conditions and tests
     see the label as written; a regex must match all of it.
+
+    `keyword` names the label keyword (`subjects`, ...) the values were
+    given to, on which `None` is not a value; without it, `None` is `Never`.
     """
 
-    def __init__(self, values: list, key: str | None, index: bool) -> None:
-        self.absent = False      # `Never` / `None`: no such entity
+    def __init__(
+        self, values: list, key: str | None, index: bool,
+        keyword: str | None = None,
+    ) -> None:
+        self.absent = False      # `Never` (or `None`): no such entity
         self.present = False     # `Any` / `Required`: any label
         self.exact: set[object] = set()
         self.numbers: set[int] = set()
         self.tests: list[Callable[[object], bool]] = []
         self.index = index
         for item in values:
+            if item is None and keyword is not None:
+                raise TypeError(
+                    f"Filter got None among the values of {keyword}=: None "
+                    f"is no filter there; use typing.Never for the files "
+                    f"that have no such label"
+                )
             if item is None or _is_marker(item, _ABSENT_MARKERS):
                 self.absent = True
                 continue
@@ -259,10 +269,12 @@ class _LabelMatch:
     def lenient(self) -> bool:
         """Whether a file without the entity passes, judged on its own name.
 
-        For selection rule 3: every filter but one that only asks for the
-        entity to be there.
+        For selection rule 3: a filter that admits a file without the entity
+        (`Never` among its values), or one made of values only. A filter
+        that asks for the entity to be there (`Any`, `Required`, with or
+        without other values) does not.
         """
-        return self.absent or bool(self.exact or self.numbers or self.tests)
+        return self.absent or not self.present
 
     def __call__(self, label: object) -> bool:
         if label is None:
@@ -280,15 +292,20 @@ class _LabelMatch:
 
 
 def _matcher(
-    value: object, key: str | None, index: bool = False
+    value: object, key: str | None, index: bool = False,
+    keyword: str | None = None,
 ) -> _LabelMatch | None:
-    """Build the test of a label filter; `None` keeps everything."""
-    if value is _NO_FILTER:
+    """Build the test of a label filter; `None` keeps everything.
+
+    On a label keyword (`keyword`, such as `"subjects"`), a value of `None`
+    is no filter; on an entity keyword, it is `Never`.
+    """
+    if value is None and keyword is not None:
         return None
     values = list(value) if _is_many(value) else [value]
     if not values:
         return None
-    return _LabelMatch(values, key, index)
+    return _LabelMatch(values, key, index, keyword)
 
 
 def _equal(value: object, expected: object) -> bool:
@@ -344,9 +361,11 @@ class _ValueMatch:
     def __init__(self, value: object) -> None:
         items = list(value) if isinstance(value, (set, frozenset)) else [value]
         self.tests = [_value_test(item) for item in items]
+        # Whether a file without the field passes, for selection rule 3:
+        # one with `Never` among its values, or one made of values only.
         self.lenient = any(
-            not _is_marker(item, _PRESENT_MARKERS) for item in items
-        )
+            _is_marker(item, _ABSENT_MARKERS) for item in items
+        ) or not any(_is_marker(item, _PRESENT_MARKERS) for item in items)
 
     def __call__(self, value: object) -> bool:
         return any(test(value) for test in self.tests)
@@ -377,6 +396,43 @@ def _patterns(value: object) -> Condition | None:
     return Or(*values)
 
 
+# The keywords of `Filter` itself, beside the entities.
+_KEYWORDS = (
+    "subjects", "exclude_subjects", "sessions", "datatypes", "suffixes",
+    "tasks", "include", "exclude", "folders", "entities", "sidecar",
+    "participants", "bidsignore",
+)
+
+
+def _meant_keyword(name: str) -> str | None:
+    """Return the keyword a capitalised keyword misspells, or `None`.
+
+    `Subjects` is `subjects`, `Acq` is `acq`, and a plural or singular form
+    of a keyword or an entity (`Runs`, `Subject`) names it too.
+    """
+    low = name.lower()
+    if low in _KEYWORDS or low in SORTED_ENTITIES:
+        return low
+    for keyword in _KEYWORDS:
+        if low in (keyword[:-1], keyword[:-2]) and keyword.endswith("s"):
+            return keyword
+    if low.endswith("s") and low[:-1] in SORTED_ENTITIES:
+        return low[:-1]
+    return None
+
+
+def _refuse_capitalised_keywords(fields: Mapping[str, object]) -> None:
+    """Refuse a sidecar keyword that is a `Filter` keyword with a capital."""
+    for name in fields:
+        meant = _meant_keyword(name)
+        if meant is not None:
+            raise TypeError(
+                f"Filter got {name}=, which looks like {meant}= with a "
+                f"capital letter: write {meant}=, or, to filter on a sidecar "
+                f"field named {name!r}, sidecar={{{name!r}: ...}}"
+            )
+
+
 class Filter:
     """Filters applied to a BIDS listing. Empty filters select everything.
 
@@ -391,10 +447,14 @@ class Filter:
     `sub-10`; a `Regex(..., full=False)` is found anywhere in the label. A
     glob or regex on an index entity sees the label as written. A list or
     a set is any of its values, and a function of the label is a test.
-    `typing.Never` (or `None`) keeps the files that do not have the entity,
-    and `typing.Any` (or `typing.Required`) those that have it:
+    `typing.Never` keeps the files that do not have the entity, and
+    `typing.Any` (or `typing.Required`) those that have it:
     `acq={Never, "mprage"}` keeps the files with no `acq` entity and those
-    with `acq-mprage`.
+    with `acq-mprage`. On an entity keyword (`acq=None`,
+    `entities={"acq": None}`), `None` means `Never`; on the label keywords
+    below, it is no filter. A file's subject and session are those its
+    name gives, else those of its `sub-<label>/` and `ses-<label>/`
+    folders.
 
     Sidecar filters, given as keywords that start with a capital letter
     (`RepetitionTime=2.0`), and the `participants` filters match a value of
@@ -417,6 +477,7 @@ class Filter:
     subjects, exclude_subjects, sessions, datatypes, suffixes, tasks
         Keep data files whose subject, session, datatype directory, BIDS
         suffix or task match (`exclude_subjects`: whose subject does not).
+        `None`, the default, is no filter.
     include, exclude
         Patterns matched against the path relative to the dataset root
         (a string is a glob, a `re.Pattern` a regex; a list is any-of).
@@ -441,7 +502,9 @@ class Filter:
     **kwargs
         Filters on a known BIDS entity (`acq="mprage"`, `run=[1, 2]`,
         `sub=...`, ...), and on a sidecar field for a keyword that starts
-        with a capital letter (`RepetitionTime=2.0`).
+        with a capital letter (`RepetitionTime=2.0`). A capitalised keyword
+        that is a keyword of `Filter` or an entity (`Subjects=`, `Acq=`) is
+        refused as a misspelling; give such a field in `sidecar`.
 
     Notes
     -----
@@ -453,12 +516,12 @@ class Filter:
     def __init__(
         self,
         *,
-        subjects: object = _NO_FILTER,
-        exclude_subjects: object = _NO_FILTER,
-        sessions: object = _NO_FILTER,
-        datatypes: object = _NO_FILTER,
-        suffixes: object = _NO_FILTER,
-        tasks: object = _NO_FILTER,
+        subjects: object = None,
+        exclude_subjects: object = None,
+        sessions: object = None,
+        datatypes: object = None,
+        suffixes: object = None,
+        tasks: object = None,
         include: object = None,
         exclude: object = None,
         folders: Iterable[str] = (),
@@ -470,6 +533,7 @@ class Filter:
     ) -> None:
         fields = {k: v for k, v in kwargs.items() if k[:1].isupper()}
         kwargs = {k: v for k, v in kwargs.items() if k not in fields}
+        _refuse_capitalised_keywords(fields)
         unknown = set(kwargs) - set(SORTED_ENTITIES)
         if unknown:
             raise TypeError(
@@ -483,16 +547,18 @@ class Filter:
             if name in given:
                 raise TypeError(f"Filter got two filters for entity {name!r}")
             given[name] = value
+        keywords: dict[str, str] = {}   # entity -> the label keyword given
         for name, key in _ALIASES.items():
             value = {"subjects": subjects, "sessions": sessions,
                      "tasks": tasks}[name]
-            if value is _NO_FILTER:
+            if value is None:
                 continue
             if key in given:
                 raise TypeError(
                     f"Filter got both {name}= and a filter on entity {key!r}"
                 )
             given[key] = value
+            keywords[key] = name
         on_sidecar = dict(sidecar or {})
         for name, value in fields.items():
             if name in on_sidecar:
@@ -503,12 +569,16 @@ class Filter:
 
         self.entities: dict[str, _LabelMatch] = {}
         for key, value in given.items():
-            match = _matcher(value, str(key), str(key) in INDEX_ENTITIES)
+            match = _matcher(
+                value, str(key), str(key) in INDEX_ENTITIES, keywords.get(key)
+            )
             if match is not None:
                 self.entities[str(key)] = match
-        self.exclude_subjects = _matcher(exclude_subjects, "sub")
-        self.datatypes = _matcher(datatypes, None)
-        self.suffixes = _matcher(suffixes, None)
+        self.exclude_subjects = _matcher(
+            exclude_subjects, "sub", keyword="exclude_subjects"
+        )
+        self.datatypes = _matcher(datatypes, None, keyword="datatypes")
+        self.suffixes = _matcher(suffixes, None, keyword="suffixes")
         self.include = _patterns(include)
         self.exclude = _patterns(exclude)
         self.sidecar = _value_matchers(on_sidecar, "sidecar")
@@ -530,20 +600,22 @@ class Filter:
 
         `path` is relative to the dataset root. A file inside a data file
         that is a directory (`sub-01_meg.ds/x`) is judged on that
-        directory's name and datatype. The sidecar and participants filters
-        read files, and are not applied here.
+        directory's name and datatype. The subject and session of a file
+        are those its name gives, else those of the `sub-<label>/` and
+        `ses-<label>/` folders it is in. The sidecar and participants
+        filters read files, and are not applied here.
         """
         return self._passes(parse_path(path))
 
-    def _passes(self, name: ParsedPath, entities: dict | None = None) -> bool:
+    def _passes(self, name: ParsedPath, partial: bool = False) -> bool:
         """Whether a parsed path passes every filter on its name.
 
-        With `entities` (for a metadata file that applies to no data file),
-        the entity filters read them instead, and one on an entity they do
-        not have passes if it is lenient.
+        The name's entities are read with the subject and session of its
+        folders when it lacks them (`_with_directory_entities`). With
+        `partial` (for a metadata file that applies to no data file), an
+        entity filter on an entity it does not have passes if it is lenient.
         """
-        partial = entities is not None
-        ent = name.entities if entities is None else entities
+        ent = _with_directory_entities(name)
         for key, match in self.entities.items():
             label = ent.get(key)
             if label is None and partial:
@@ -680,6 +752,12 @@ class Filter:
         storage options. The files have the mode of `root` (read-only for a
         string).
 
+        A walk keeps what `select` keeps of the whole listing, with one
+        exception, for a dataset that is not valid BIDS: a file whose name
+        gives another subject or session than its folder
+        (`sub-01/anat/sub-02_T1w.nii.gz`) is judged on its name, and is
+        missed when the folder's own label leaves the folder out.
+
         Raises
         ------
         FileNotFoundError
@@ -759,7 +837,7 @@ class Filter:
             plan = _Plan(self, found, state.ignore, state.subjects)
         reads = sorted(plan.reads)
         contents = dict(zip(
-            reads, await asyncio.gather(*(_aread_json(found[r]) for r in reads))
+            reads, await _gather(_aread_json, [found[r] for r in reads])
         ))
         return [found[rel] for rel in plan.finish(contents)]
 
@@ -781,7 +859,7 @@ class Filter:
         file of `unsure` above it is left unsettled, and returns those left.
         """
         while level:
-            listings = await asyncio.gather(*map(_alist, level))
+            listings = await _gather(_alist, level)
             if not state.started:
                 state.started = True
                 await self._aread_root(root, listings[0], state)
@@ -877,13 +955,15 @@ class Filter:
         """Whether a walk lists directory `name` of the directory `parts`.
 
         `parts` is the relative path of the directory being listed (`()` at
-        the root). Pruning never changes a result. A subject or session
-        folder is left out (with `prune`) when its label fails a filter
-        that every data file inside it is judged on, since BIDS names every
-        file under `sub-<label>/` (and `ses-<label>/`) with that label, and
-        recorded in `state.pruned`: a metadata file above it may apply to
-        a data file inside it and to none of those listed, and the walk
-        then lists it after all (see `_Plan.unsure`).
+        the root). Pruning never changes a result on a valid dataset. A
+        subject or session folder is left out (with `prune`) when its label
+        fails a filter that every data file inside it is judged on, since a
+        file's subject (session) is its name's, else its folder's, and BIDS
+        names every file under `sub-<label>/` with that label; a name that
+        contradicts its folder is not valid BIDS, and may be missed. The
+        folder is recorded in `state.pruned`: a metadata file above it may
+        apply to a data file inside it and to none of those listed, and the
+        walk then lists it after all (see `_Plan.unsure`).
         """
         ignore = None if state is None else state.ignore
         if ignore is not None and ignore.ignores("/".join((*parts, name)), True):
@@ -986,8 +1066,7 @@ class _Plan:
         f = self.filter
         if not all(test.lenient for test in f.sidecar.values()):
             return False
-        entities = _with_directory_entities(m)
-        return f._passes(m, entities) and self._has_subject(m, entities)
+        return f._passes(m, partial=True) and self._has_subject(m, partial=True)
 
     def unsure(self, pruned: list[str]) -> list[ParsedPath]:
         """Return the metadata files whose fate depends on pruned folders.
@@ -1018,20 +1097,17 @@ class _Plan:
                 unsure = [m for m in unsure if not applies_to(m, d)]
         return unsure
 
-    def _has_subject(self, name: ParsedPath, entities: dict | None = None) -> bool:
+    def _has_subject(self, name: ParsedPath, partial: bool = False) -> bool:
         """Whether a file's subject passes the participants filters.
 
-        With `entities` (a metadata file judged on its own name), a file
-        without a subject passes.
+        The subject is the name's, else its folder's. With `partial` (a
+        metadata file judged on its own name), a file without one passes.
         """
         if self.subjects is None:
             return True
-        if entities is None:
-            label = _with_directory_entities(name).get("sub")
-        else:
-            label = entities.get("sub")
+        label = _with_directory_entities(name).get("sub")
         if label is None:
-            return entities is not None
+            return partial
         return label in self.subjects
 
     def finish(self, contents: Mapping[str, object]) -> list[str]:
@@ -1130,12 +1206,12 @@ def _sidecar_chains(
     return chains
 
 
-def _sidecar_passes(f: Filter, contents: list[object]) -> bool:
+def _sidecar_passes(f: Filter, contents: list[Mapping]) -> bool:
     """Whether the merged content of a chain of sidecars passes `f`."""
     for key, test in f.sidecar.items():
         value = _ABSENT
         for content in contents:
-            if isinstance(content, Mapping) and key in content:
+            if key in content:
                 value = content[key]
                 break
         if not test(value):
@@ -1143,22 +1219,33 @@ def _sidecar_passes(f: Filter, contents: list[object]) -> bool:
     return True
 
 
-def _read_json(path: object) -> object:
-    """Read a JSON sidecar of a listing (inside a transaction, as it holds it)."""
+def _read_json(path: object) -> dict:
+    """Read a JSON sidecar of a listing (inside a transaction, as it holds it).
+
+    One that is not a JSON object raises `TypeError`, and one that is not
+    valid JSON `json.JSONDecodeError`, both naming the file.
+    """
     path = in_family(path, BidsPath)
-    as_dict = getattr(path, "as_dict", None)
-    if as_dict is not None:
-        return as_dict()
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    try:
+        return path.as_dict()
+    except json.JSONDecodeError as e:
+        raise _not_json(path, e) from e
 
 
-async def _aread_json(path: object) -> object:
+async def _aread_json(path: object) -> dict:
     """Read a JSON sidecar of a listing, as a coroutine."""
     path = in_family(path, AsyncBidsPath)
-    as_dict = getattr(path, "as_dict", None)
-    if as_dict is not None:
-        return await as_dict()
-    return json.loads(await path.read_text(encoding="utf-8-sig"))
+    try:
+        return await path.as_dict()
+    except json.JSONDecodeError as e:
+        raise _not_json(path, e) from e
+
+
+def _not_json(path: object, error: json.JSONDecodeError) -> json.JSONDecodeError:
+    return json.JSONDecodeError(
+        f"the sidecar {path} that a sidecar filter reads is not valid JSON "
+        f"({error.msg})", error.doc, error.pos,
+    )
 
 
 def _read_rows(path: BidsPath) -> list[dict]:
@@ -1189,6 +1276,26 @@ async def _nothing() -> None:
     return None
 
 
+# The most reads (or listings) an asynchronous walk has under way at once.
+_CONCURRENCY = 32
+
+
+async def _gather(
+    call: Callable[[T], Awaitable[R]], items: Iterable[T]
+) -> list[R]:
+    """`await call(item)` for every item, `_CONCURRENCY` at a time at most.
+
+    The results are in the order of `items`.
+    """
+    semaphore = asyncio.Semaphore(_CONCURRENCY)
+
+    async def one(item: T) -> R:
+        async with semaphore:
+            return await call(item)
+
+    return list(await asyncio.gather(*map(one, items)))
+
+
 def _by_directory(data: Iterable[ParsedPath]) -> dict:
     """Index data items by every directory they are in, at any depth."""
     by_dir: dict[PurePosixPath, list[ParsedPath]] = {}
@@ -1204,12 +1311,18 @@ def _applies(meta: ParsedPath, by_dir: dict) -> bool:
 
 
 def _with_directory_entities(name: ParsedPath) -> dict:
-    """Return a name's entities, with `sub`/`ses` from its directories if absent."""
+    """Return a name's entities, with `sub`/`ses` from its folders if absent.
+
+    The folders are the top-level `sub-<label>/` and the `ses-<label>/`
+    directly in it, the ones a walk prunes by label. Where the name has the
+    entity, the name wins.
+    """
     entities = dict(name.entities)
-    for part in PurePosixPath(name.path).parts[:-1]:
-        for key in ("sub", "ses"):
-            if _is_entity_directory(part, key):
-                entities.setdefault(key, parse_name(part).entities[key])
+    parts = PurePosixPath(name.path).parts[:-1]
+    if parts and _is_entity_directory(parts[0], "sub"):
+        entities.setdefault("sub", parse_name(parts[0]).entities["sub"])
+        if len(parts) > 1 and _is_entity_directory(parts[1], "ses"):
+            entities.setdefault("ses", parse_name(parts[1]).entities["ses"])
     return entities
 
 
@@ -1244,18 +1357,24 @@ def _is_bids_directory(parts: tuple[str, ...]) -> bool:
 # -- .bidsignore -----------------------------------------------------------------
 
 class _BidsIgnore:
-    """The patterns of a `.bidsignore`, with the rules of `.gitignore`.
+    r"""The patterns of a `.bidsignore`, with the rules of `.gitignore`.
 
     One pattern per line; blank lines and lines starting with `#` are
-    skipped, and a backslash before a leading `#` or `!` makes it part of
-    the pattern. `!`
-    re-includes what an earlier pattern ignored, and the last pattern that
-    matches a path decides; a file inside an ignored directory cannot be
-    re-included. A pattern ending in `/` matches directories only. A
-    pattern with a `/` at its start or in its middle is matched against the
-    path from the dataset root; any other against a name at any depth. `*`
-    and `?` match within one name, `[...]` is a class, and `**` matches any
-    number of directories (`**/x`, `a/**/x`, `a/**`).
+    skipped, trailing spaces are dropped unless escaped with a backslash
+    (`trail\ `), and a backslash makes the next character part of the
+    pattern (`\#`, `\!`, `\*`). `!` re-includes what an earlier pattern
+    ignored, and the last pattern that matches a path decides; a file
+    inside an ignored directory cannot be re-included. A pattern ending in
+    `/` matches directories only. A pattern with a `/` at its start or in
+    its middle is matched against the path from the dataset root; any other
+    against a name at any depth. `*` and `?` match within one name, and
+    `**` matches any number of directories (`**/x`, `a/**/x`, `a/**`).
+    `[...]` is a class of characters as in git: ranges, `!` or `^` to
+    negate it, a backslash to escape, and the POSIX classes
+    (`[[:digit:]]`); it never matches `/`. As in git, a reversed range
+    (`[z-a]`) matches its first character only, and a pattern git cannot
+    match (an unterminated class, an unknown POSIX class, a trailing
+    backslash) matches nothing.
     """
 
     def __init__(self, rules: list[tuple[re.Pattern, bool, bool]]) -> None:
@@ -1267,21 +1386,21 @@ class _BidsIgnore:
         """Parse the text of a `.bidsignore`; `None` when it has no pattern."""
         rules = []
         for line in text.splitlines():
-            line = line.rstrip()
-            if not line or line.startswith("#"):
+            if line.startswith("#"):
                 continue
+            line = _trim_trailing_spaces(line)
             negated = line.startswith("!")
             if negated:
                 line = line[1:]
-            elif line[:2] in ("\\#", "\\!"):
-                line = line[1:]
             dir_only = line.endswith("/")
-            line = line.rstrip("/")
+            if dir_only:
+                line = line[:-1]
             if not line:
                 continue
             anchored = "/" in line
-            rules.append((_ignore_regex(line.lstrip("/"), anchored),
-                          negated, dir_only))
+            regex = _ignore_regex(line.lstrip("/"), anchored)
+            if regex is not None:
+                rules.append((regex, negated, dir_only))
         return cls(rules) if rules else None
 
     def _decide(self, rel: str, is_dir: bool) -> bool:
@@ -1310,53 +1429,172 @@ class _BidsIgnore:
         return self._decide(rel, is_dir)
 
 
-def _ignore_regex(pattern: str, anchored: bool) -> re.Pattern:
-    """Translate one `.gitignore` pattern (no `!`, no trailing `/`)."""
-    segments = pattern.split("/")
+def _trim_trailing_spaces(line: str) -> str:
+    """Drop the trailing spaces of a line, but those escaped (as git does)."""
+    end = len(line)
+    while end and line[end - 1] == " ":
+        backslashes = len(line[:end - 1]) - len(line[:end - 1].rstrip("\\"))
+        if backslashes % 2:
+            break
+        end -= 1
+    return line[:end]
+
+
+def _ignore_regex(pattern: str, anchored: bool) -> re.Pattern | None:
+    """Translate one `.gitignore` pattern (no `!`, no trailing `/`).
+
+    `None` for a pattern that git can never match.
+    """
+    segments = _ignore_segments(pattern)
+    if segments is None:
+        return None
     out = ["" if anchored else "(?:.*/)?"]
     for i, segment in enumerate(segments):
         last = i == len(segments) - 1
         if segment == "**":
             out.append(".*" if last else "(?:.*/)?")
-        else:
-            out.append(_ignore_segment(segment) + ("" if last else "/"))
+            continue
+        translated = _ignore_segment(segment)
+        if translated is None:
+            return None
+        out.append(translated + ("" if last else "/"))
     return re.compile("".join(out) + r"\Z")
 
 
-def _ignore_segment(segment: str) -> str:
-    """Translate the glob of one path segment to a regex."""
+def _ignore_segments(pattern: str) -> list[str] | None:
+    """Split a pattern on the `/` that are not in a class or escaped.
+
+    `None` for a pattern git can never match.
+    """
+    segments, start, i, n = [], 0, 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "[":
+            translated, i = _ignore_class(pattern, i)
+            if translated is None:
+                return None
+            continue
+        if c == "/":
+            segments.append(pattern[start:i])
+            start = i + 1
+        i += 1
+    segments.append(pattern[start:])
+    return segments
+
+
+def _ignore_segment(segment: str) -> str | None:
+    """Translate the glob of one path segment to a regex.
+
+    `None` for a segment git can never match.
+    """
     out = []
     i, n = 0, len(segment)
     while i < n:
         c = segment[i]
-        if c == "\\" and i + 1 < n:
+        if c == "\\":
+            if i + 1 == n:
+                return None     # a trailing backslash escapes nothing
             out.append(re.escape(segment[i + 1]))
             i += 2
+            continue
+        if c == "[":
+            translated, i = _ignore_class(segment, i)
+            if translated is None:
+                return None
+            out.append(translated)
             continue
         if c == "*":
             out.append("[^/]*")
         elif c == "?":
             out.append("[^/]")
-        elif c == "[":
-            start = i + 1
-            if start < n and segment[start] in "!^":
-                start += 1
-            if start < n and segment[start] == "]":
-                start += 1
-            end = segment.find("]", start)
-            if end == -1:
-                out.append(re.escape(c))
-            else:
-                body = segment[i + 1:end]
-                if body[:1] in ("!", "^"):
-                    body = "^" + body[1:]
-                out.append("[" + body.replace("\\", "\\\\") + "]")
-                i = end + 1
-                continue
         else:
             out.append(re.escape(c))
         i += 1
     return "".join(out)
+
+
+# The POSIX classes git knows, `[[:name:]]`, in ASCII.
+_POSIX_CLASSES = {
+    "alnum": "a-zA-Z0-9", "alpha": "a-zA-Z", "blank": " \\t",
+    "cntrl": "\\x00-\\x1f\\x7f", "digit": "0-9", "graph": "\\x21-\\x7e",
+    "lower": "a-z", "print": "\\x20-\\x7e",
+    "punct": "!-/:-@\\[-`{-~", "space": " \\t\\n\\r\\f\\v", "upper": "A-Z",
+    "xdigit": "0-9A-Fa-f",
+}
+
+
+def _ignore_class(segment: str, i: int) -> tuple[str | None, int]:
+    """Translate the class that starts at `segment[i]` (a `[`), as git does.
+
+    Return the regex and the index after the class; the regex is `None`
+    when git can never match the pattern (an unterminated class, an unknown
+    POSIX class). A `]` first in the class is a character of it, a
+    backslash escapes the next character, a reversed range matches no
+    character, and a negated class never matches `/`.
+    """
+    n = len(segment)
+    j = i + 1
+    negated = j < n and segment[j] in "!^"
+    if negated:
+        j += 1
+    items: list[str] = []
+    previous: str | None = None     # the character a `-` starts a range from
+    first = True
+    while True:
+        if j >= n:
+            return None, n
+        c = segment[j]
+        if c == "]" and not first:
+            break
+        first = False
+        if c == "\\":
+            j += 1
+            if j >= n:
+                return None, n
+            previous = segment[j]
+            items.append(re.escape(previous))
+        elif (
+            c == "-" and previous is not None and j + 1 < n
+            and segment[j + 1] != "]"
+        ):
+            j += 1
+            high = segment[j]
+            if high == "\\":
+                j += 1
+                if j >= n:
+                    return None, n
+                high = segment[j]
+            if previous <= high:
+                items[-1] = re.escape(previous) + "-" + re.escape(high)
+            # else git matches the start of a reversed range, and no more
+            previous = None
+        elif c == "[" and segment[j + 1:j + 2] == ":":
+            end = segment.find("]", j + 2)
+            if end == -1:
+                return None, n
+            if end == j + 2 or segment[end - 1] != ":":
+                previous = "["      # not a POSIX class: `[` is a character
+                items.append(re.escape(previous))
+            else:
+                posix = _POSIX_CLASSES.get(segment[j + 2:end - 1])
+                if posix is None:
+                    return None, n
+                items.append(posix)
+                previous = None
+                j = end
+        else:
+            previous = c
+            items.append(re.escape(c))
+        j += 1
+    body = "".join(items)
+    if negated:
+        return "[^" + body + "/]", j + 1
+    if re.fullmatch("[" + body + "]", "/"):
+        return "(?!/)[" + body + "]", j + 1    # a class never matches `/`
+    return "[" + body + "]", j + 1
 
 
 async def _alist(directory: AsyncBidsPath) -> list[tuple]:

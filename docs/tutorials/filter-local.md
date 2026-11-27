@@ -186,10 +186,13 @@ sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
 ```
 
-`None` means the same as `Never`, since a label is never empty, and
-`typing.Required` the same as `Any`. On Python 3.10, which lacks `Never` and
-`Required`, import them from `typing_extensions`. A marker can sit in a set
-beside ordinary values. The filter below keeps the images that have no
+`typing.Required` means the same as `Any`. On an entity keyword such as
+`run` or `acq`, `None` means the same as `Never`, since a label is never
+empty. On `subjects`, `sessions`, `tasks`, `datatypes`, `suffixes` and
+`exclude_subjects`, `None` is the default and applies no filter, so ask for
+the files without a session with `sessions=Never`. On Python 3.10, which
+lacks `Never` and `Required`, import them from `typing_extensions`. A marker
+can sit in a set beside ordinary values. The filter below keeps the images that have no
 acquisition label, together with those acquired with the `fse` sequence.
 
 ```pycon
