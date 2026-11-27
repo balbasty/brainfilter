@@ -647,7 +647,7 @@ class TreeMixin:
     def filter(self, *args: BidsFilter, **kwargs: object) -> list[Self]:
         """Return the files of this dataset that a filter keeps, sorted.
 
-        `ds.filter(subjects=1, suffixes="bold")` builds the
+        `ds.filter(sub=1, suffix="bold")` builds the
         `brainfilter.BidsFilter` from its keywords; `ds.filter(f)` uses a
         filter already made. It lists the dataset as `BidsFilter.walk` does.
         """

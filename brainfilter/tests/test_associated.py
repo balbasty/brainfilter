@@ -305,7 +305,7 @@ def test_an_acq_tag_above_the_recordings(tmp_path, other_acq, applies):
     assert (shape in _rel((root / b).companions, root)) is (
         applies or other_acq == "X"
     )
-    kept = BidsFilter(subjects="01", tasks="a", sessions="1").select(
+    kept = BidsFilter(sub="01", task="a", ses="1").select(
         sorted(["dataset_description.json", shape, a, b, elsewhere])
     )
     assert (shape in kept) is applies

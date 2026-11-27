@@ -30,26 +30,28 @@ the helper is dropped, to look at everything that comes along with the images.
 
 ## Subjects and sessions
 
-The `subjects` and `sessions` keywords take a label, or a list of labels. A
+The `sub` and `ses` keywords take a label, or several labels. Several
+labels can come in any iterable but a string -- a list, a tuple, a set, a
+`range`, even a generator -- and a file matches if it has any of them. A
 label can be written with or without its `sub-` or `ses-` prefix.
 
 ```pycon
->>> images(BidsFilter(subjects="01", datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(sub="01", datatype="anat", suffix="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
->>> images(BidsFilter(subjects=["sub-01", "sub-02"], datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(sub=["sub-01", "sub-02"], datatype="anat", suffix="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 ```
 
 Labels in BIDS are text, and a subject called `01` is not the same text as
 `1`. For the common case of zero-padded numbers, an integer matches by value:
-`subjects=1` selects `sub-1`, `sub-01` and `sub-001`, but never `sub-10` or
+`sub=1` selects `sub-1`, `sub-01` and `sub-001`, but never `sub-10` or
 `sub-1a`. A string, in contrast, matches exactly.
 
 ```pycon
->>> images(BidsFilter(subjects=1, datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(sub=1, datatype="anat", suffix="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
->>> images(BidsFilter(subjects="1", datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(sub="1", datatype="anat", suffix="T2w").walk(ds))
 ```
 
 The second call prints nothing, because the dataset has no subject whose label
@@ -61,14 +63,16 @@ Sessions work in the same way, and combine with subjects. The filter below asks
 for the second session of subjects 1 and 10, and only subject 10 has one.
 
 ```pycon
->>> images(BidsFilter(subjects=[1, 10], sessions=2, suffixes="T2w").walk(ds))
+>>> images(BidsFilter(sub=[1, 10], ses=2, suffix="T2w").walk(ds))
 sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
 ```
 
-To keep everyone except a few subjects, use `exclude_subjects`:
+To keep everyone except a few subjects, wrap them in `Not`, which keeps
+whatever the value it is given does not:
 
 ```pycon
->>> images(BidsFilter(exclude_subjects=[1, 10], datatypes="anat", suffixes="T2w").walk(ds))
+>>> from brainfilter import Not
+>>> images(BidsFilter(sub=Not([1, 10]), datatype="anat", suffix="T2w").walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 ```
 
@@ -76,16 +80,16 @@ sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 
 A *datatype* is the folder a recording lives in (`anat`, `func`, `dwi`, ...),
 and a *suffix* is the last part of its name (`T1w`, `bold`, `events`). Both
-take a value or a list, and `tasks` selects on the `task-` entity of
+take a value or a list, and `task` selects on the `task-` entity of
 functional recordings.
 
 ```pycon
->>> images(BidsFilter(subjects=2, datatypes="func").walk(ds))
+>>> images(BidsFilter(sub=2, datatype="func").walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(BidsFilter(subjects=2, tasks="rest").walk(ds))
+>>> images(BidsFilter(sub=2, task="rest").walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(BidsFilter(subjects=2, suffixes=["T1w", "T2w"]).walk(ds))
+>>> images(BidsFilter(sub=2, suffix=["T1w", "T2w"]).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
@@ -94,7 +98,7 @@ sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
 Filters combine with "and": a file is kept only if it passes every one of
 them. This has a consequence worth knowing about. A filter on an entity
 rejects the files that do not have that entity at all. Asking for
-`tasks="rest"` therefore drops the anatomical images of the subject, since an
+`task="rest"` therefore drops the anatomical images of the subject, since an
 anatomical image has no task, and the third example above is the way to ask for
 anatomy and function in one go.
 
@@ -104,10 +108,10 @@ Any other entity of the BIDS specification can be given as a keyword of its
 own name, such as `acq`, `run`, `echo`, `dir` or `space`.
 
 ```pycon
->>> images(BidsFilter(subjects=2, datatypes="anat", acq="mprage").walk(ds))
+>>> images(BidsFilter(sub=2, datatype="anat", acq="mprage").walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
->>> images(BidsFilter(subjects=2, datatypes="anat", run=[2]).walk(ds))
+>>> images(BidsFilter(sub=2, datatype="anat", run=[2]).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
 ```
 
@@ -129,10 +133,10 @@ accepts the usual wildcards, and a regular expression is given as a compiled
 
 ```pycon
 >>> from brainfilter import Glob
->>> images(BidsFilter(datatypes="anat", suffixes="T2w", subjects=Glob("0*")).walk(ds))
+>>> images(BidsFilter(datatype="anat", suffix="T2w", sub=Glob("0*")).walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
->>> images(BidsFilter(subjects=2, datatypes="anat", acq=Glob("mp*"), run=1).walk(ds))
+>>> images(BidsFilter(sub=2, datatype="anat", acq=Glob("mp*"), run=1).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 ```
 
@@ -144,10 +148,10 @@ nothing else; it does not match `01`, and it certainly does not match `10`.
 
 ```pycon
 >>> import re
->>> images(BidsFilter(subjects=re.compile("0[12]"), datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(sub=re.compile("0[12]"), datatype="anat", suffix="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
->>> images(BidsFilter(subjects=re.compile("1"), datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(sub=re.compile("1"), datatype="anat", suffix="T2w").walk(ds))
 ```
 
 When a partial match is what you want, say so with `Regex(..., full=False)`,
@@ -155,7 +159,7 @@ which finds the pattern anywhere in the label.
 
 ```pycon
 >>> from brainfilter import Regex
->>> images(BidsFilter(subjects=Regex("1", full=False), datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(sub=Regex("1", full=False), datatype="anat", suffix="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-1/anat/sub-10_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
@@ -170,34 +174,51 @@ the label and says whether it matches, such as
 
 A filter on an entity keeps only the files that have it, as the section on
 tasks pointed out. Sometimes the files you want are precisely those without
-it, or those with it whatever its label. The markers of the standard `typing`
-module say so: `Never` selects the files that do not have the entity, and
-`Any` the files that have it with any label. Here are the images of subject 2
+it, or those with it whatever its label. Two markers say so: `Missing`
+selects the files that do not have the entity, and `Present` the files that
+have it with any label. Here are the images of subject 2
 with no run number, and then those with one.
 
 ```pycon
->>> from typing import Any, Never
->>> images(BidsFilter(subjects=2, run=Never).walk(ds))
+>>> from brainfilter import Missing, Present
+>>> images(BidsFilter(sub=2, run=Missing).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(BidsFilter(subjects=2, run=Any).walk(ds))
+>>> images(BidsFilter(sub=2, run=Present).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
 ```
 
-`typing.Required` means the same as `Any`. On an entity keyword such as
-`run` or `acq`, `None` means the same as `Never`, since a label is never
-empty. On `subjects`, `sessions`, `tasks`, `datatypes`, `suffixes` and
-`exclude_subjects`, `None` is the default and applies no filter, so ask for
-the files without a session with `sessions=Never`. On Python 3.10, which
-lacks `Never` and `Required`, import them from `typing_extensions`. A marker
+`Missing` and `Present` are the markers `typing.Never` and
+`typing.Required` under other names, so those work the same (on Python
+3.10, which lacks them, import them from `typing_extensions`). `Missing`
+works on `datatype`, `suffix` and `extension` too: `datatype=Missing` keeps
+the files that are not in a datatype folder. `None` is the default of every
+keyword and applies no filter, so `acq=None` is the same as leaving `acq`
+out. It is never one value among others: write "no acquisition label" as
+`Missing`, and `acq={None, "fse"}` raises a `TypeError` saying so. A marker
 can sit in a set beside ordinary values. The filter below keeps the images that have no
 acquisition label, together with those acquired with the `fse` sequence.
 
 ```pycon
->>> images(BidsFilter(subjects=2, acq={Never, "fse"}).walk(ds))
+>>> images(BidsFilter(sub=2, acq={Missing, "fse"}).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
+```
+
+`Not` turns any of these values around. A file that lacks the entity
+passes `Not(x)` unless `x` itself keeps such a file, so `acq=Not("fse")`
+keeps the images with no acquisition label as well as the others, while
+`Not(Missing)` keeps exactly the files that have the entity, as `Present` does.
+`Not` goes around the whole value, `Not({"fse", "mprage"})`, and works on
+the sidecar and participants filters as well.
+
+```pycon
+>>> images(BidsFilter(sub=2, acq=Not("fse")).walk(ds))
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
 ```
@@ -214,9 +235,9 @@ recordings take their repetition time of 2 seconds from the top-level
 own that say 1.5.
 
 ```pycon
->>> images(BidsFilter(subjects=2, RepetitionTime=1.5).walk(ds))
+>>> images(BidsFilter(sub=2, RepetitionTime=1.5).walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
->>> images(BidsFilter(subjects=2, RepetitionTime=2).walk(ds))
+>>> images(BidsFilter(sub=2, RepetitionTime=2).walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
 ```
 
@@ -226,10 +247,10 @@ expresses a condition, and the markers of the previous section ask whether a
 field is there at all.
 
 ```pycon
->>> images(BidsFilter(subjects=2, EchoTime=lambda echo: echo < 0.01).walk(ds))
+>>> images(BidsFilter(sub=2, EchoTime=lambda echo: echo < 0.01).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
->>> images(BidsFilter(subjects=2, RepetitionTime=Never).walk(ds))
+>>> images(BidsFilter(sub=2, RepetitionTime=Missing).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
@@ -239,11 +260,12 @@ The function is only asked about recordings that have the field, and one that
 fails on a value of the wrong type (a comparison between a number and a
 string, say) does not match it rather than stopping the walk. Two forms
 differ from the label filters, because a sidecar value need not be text. A
-list is a value in its own right, compared as a whole, so
+list (or a tuple) is a value in its own right, compared as a whole, so
 `SliceTiming=[0.0, 0.5]` selects the recordings with exactly those slice
 times; to accept one of several values, put them in a set, as in
-`PhaseEncodingDirection={"j", "j-"}`. And `None` matches a field whose value
-is the JSON `null`, while `Never` matches one that is absent. A field whose
+`PhaseEncodingDirection={"j", "j-"}`. And `None` in a set matches a field
+whose value is the JSON `null` (`IntendedFor={None}`), while `Missing` matches
+one that is absent; `None` on its own, as everywhere, applies no filter. A field whose
 name is not a valid keyword goes in a dictionary instead:
 `BidsFilter(sidecar={"Field-Name": 1})`.
 
@@ -259,18 +281,18 @@ values take the same forms as for sidecars, and they are compared with the
 typed values of the table, so the ages below are numbers.
 
 ```pycon
->>> images(BidsFilter(participants={"age": lambda age: age > 28}, suffixes="T2w").walk(ds))
+>>> images(BidsFilter(participants={"age": lambda age: age > 28}, suffix="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
->>> images(BidsFilter(participants={"sex": "F"}, suffixes="T2w").walk(ds))
+>>> images(BidsFilter(participants={"sex": "F"}, suffix="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-1/anat/sub-10_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
 ```
 
-A cell written `n/a` reads as `None`, so `None` selects the subjects whose
-value is missing, and a condition on the value does not match them. `Any`
-asks for the column to exist, and `Never` for it not to. A subject that has
+A cell written `n/a` reads as `None`, so `{None}` selects the subjects whose
+value is missing, and a condition on the value does not match them.
+`Present` asks for the column to exist, and `Missing` for it not to. A subject that has
 no row in the table is left out, and the filter combines with `subjects` and
 the other keywords: a recording is kept only if it passes them all. A dataset
 without a `participants.tsv` cannot answer the question, and filtering it on
@@ -284,10 +306,10 @@ relative to the dataset root. A string is a glob, which must match the entire
 path, and a compiled regex is searched for anywhere in it.
 
 ```pycon
->>> images(BidsFilter(subjects=2, include="*/func/*").walk(ds))
+>>> images(BidsFilter(sub=2, include="*/func/*").walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(BidsFilter(subjects=2, exclude=re.compile("run-02|task-nback")).walk(ds))
+>>> images(BidsFilter(sub=2, exclude=re.compile("run-02|task-nback")).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
@@ -306,7 +328,7 @@ default selection to the raw data. Other top-level folders and hidden files,
 such as `.datalad`, are never listed.
 
 ```pycon
->>> files = BidsFilter(subjects=1, datatypes="anat", suffixes="T2w", folders="derivatives").walk(ds)
+>>> files = BidsFilter(sub=1, datatype="anat", suffix="T2w", folders="derivatives").walk(ds)
 >>> print(*[p.relative_to(ds).as_posix() for p in files if "derivatives" in p.parts], sep="\n")
 derivatives/fmriprep/dataset_description.json
 derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz
@@ -361,7 +383,7 @@ only derivatives use, such as `space` and `desc`.
 
 ```pycon
 >>> fmriprep = ds["derivatives"]["fmriprep"]
->>> files = fmriprep.filter(subjects=1, space="MNI152NLin2009cAsym", desc="preproc")
+>>> files = fmriprep.filter(sub=1, space="MNI152NLin2009cAsym", desc="preproc")
 >>> print(*[p.relative_to(fmriprep).as_posix() for p in files], sep="\n")
 dataset_description.json
 sub-01/anat/sub-01_space-MNI152NLin2009cAsym_desc-preproc_T1w.nii.gz
@@ -380,7 +402,7 @@ and brainfilter adds those without being asked. Here is the complete result for
 the *n*-back recording of one subject.
 
 ```pycon
->>> files = BidsFilter(subjects=1, tasks="nback").walk(ds)
+>>> files = BidsFilter(sub=1, task="nback").walk(ds)
 >>> print(*[p.relative_to(ds).as_posix() for p in files], sep="\n")
 README
 dataset_description.json
@@ -399,7 +421,7 @@ recording, following the [inheritance principle](../concepts/inheritance.md),
 and that rule reaches files at any level of the tree. A top-level
 `task-rest_bold.json` is left out here, because it describes resting-state
 recordings and none was selected, while the same file appears in the result for
-`tasks="rest"`. The dataset-level `T1w.json` is left out for the same reason.
+`task="rest"`. The dataset-level `T1w.json` is left out for the same reason.
 
 A few rules follow BIDS rather than the file extension. Tables that are
 recordings in their own right (`*_beh.tsv`, `*_physio.tsv.gz`) are treated as
@@ -409,7 +431,7 @@ own that describes other recordings, such as an events table, a
 `*_photo.jpg` of the electrodes, the `*_headshape.pos` of a MEG session and
 its crosstalk and fine-calibration files, is kept with the recordings it
 describes, as metadata is, and is also a file a filter can select on its
-own: `suffixes="events"` keeps the events tables (with their JSON files)
+own: `suffix="events"` keeps the events tables (with their JSON files)
 without the images, and `acq="crosstalk"` the crosstalk files. The
 [`BidsFilter`][brainfilter.BidsFilter] reference gives the complete rules.
 
@@ -425,7 +447,7 @@ file, a database or a previous call.
 ...     "sub-01/anat/sub-01_acq-mprage_run-1_T1w.nii.gz",
 ...     "sub-02/anat/sub-02_acq-mprage_run-1_T1w.nii.gz",
 ... ]
->>> BidsFilter(subjects="01", datatypes="anat", acq=Glob("mp*"), run=[1, 2]).select(listing)
+>>> BidsFilter(sub="01", datatype="anat", acq=Glob("mp*"), run=[1, 2]).select(listing)
 ['sub-01/anat/sub-01_acq-mprage_run-1_T1w.nii.gz']
 ```
 

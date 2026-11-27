@@ -8,7 +8,7 @@ import typing_extensions
 
 import brainfilter.filter as filter_module
 from brainfilter.bidspath import AsyncBidsPath, BidsPath, PureBidsPath
-from brainfilter.conditions import Glob
+from brainfilter.conditions import Glob, Not
 from brainfilter.filter import BidsFilter
 
 Any = typing.Any
@@ -124,8 +124,11 @@ def _all(paths, root):
      {BOLD["01"], BOLD["03"], *T1W.values()}),
     ({"B0FieldIdentifier": {Never, "fm"}},
      set(BOLD.values()) | set(T1W.values())),
-    # None is the JSON null, and null is there
-    ({"IntendedFor": None}, {BOLD["01"]}),
+    # None in a set is the JSON null, and null is there; alone, no filter
+    ({"IntendedFor": {None}}, {BOLD["01"]}),
+    ({"IntendedFor": {None, "x"}}, {BOLD["01"]}),
+    ({"IntendedFor": lambda v: v is None}, {BOLD["01"]}),
+    ({"IntendedFor": None}, set(BOLD.values()) | set(T1W.values())),
     ({"IntendedFor": Any}, {BOLD["01"]}),
     # a bool is not a number
     ({"Flag": True}, {BOLD["01"]}),
@@ -163,9 +166,10 @@ def test_a_test_that_raises_on_a_wrong_value_fails(ds):
 
 
 @pytest.mark.parametrize("keyword, meant", [
-    ("Subjects", "subjects"), ("Subject", "subjects"), ("Sessions", "sessions"),
-    ("Datatypes", "datatypes"), ("Suffix", "suffixes"), ("Tasks", "tasks"),
-    ("Exclude_Subjects", "exclude_subjects"), ("Participants", "participants"),
+    ("Subjects", "sub"), ("Subject", "sub"), ("Sessions", "ses"),
+    ("Datatypes", "datatype"), ("Suffix", "suffix"), ("Suffixes", "suffix"),
+    ("Tasks", "task"), ("Extension", "extension"), ("Acquisition", "acq"),
+    ("Participants", "participants"),
     ("Acq", "acq"), ("Run", "run"), ("Runs", "run"), ("Sub", "sub"),
 ])
 def test_a_capitalised_keyword_is_a_misspelling(keyword, meant):
@@ -199,10 +203,10 @@ def test_sidecars_are_read_once_and_only_for_passing_data(ds, monkeypatch):
         "sub-02_task-rest_bold.json",
     })
     read.clear()
-    BidsFilter(subjects="02", EchoTime=Any).walk(ds)
+    BidsFilter(sub="02", EchoTime=Any).walk(ds)
     assert sorted(read) == ["sub-02_task-rest_bold.json", "task-rest_bold.json"]
     read.clear()
-    BidsFilter(subjects="02").walk(ds)
+    BidsFilter(sub="02").walk(ds)
     assert read == []
 
 
@@ -222,16 +226,19 @@ def test_select_reads_sidecars_from_path_objects(ds):
 @pytest.mark.parametrize("kwargs, expected", [
     ({"participants": {"age": lambda a: a >= 18}}, {"01"}),
     ({"participants": {"group": {"control", "sham"}}}, {"01", "03"}),
-    ({"participants": {"group": "patient", "age": None}}, {"02"}),
-    ({"participants": {"age": 30}}, {"01"}),          # 30.0 in the table
+    ({"participants": {"group": "patient", "age": {None}}}, {"02"}),
+    ({"participants": {"age": 30}}, {"01"}),
+    # a list or a tuple is one value, compared whole; a set is any of
+    ({"participants": {"group": ["control", "sham"]}}, set()),
+    ({"participants": {"group": ("control",)}}, set()),          # 30.0 in the table
     ({"participants": {"age": Any}}, {"01", "02", "03"}),
     ({"participants": {"weight": Never}}, {"01", "02", "03"}),
     ({"participants": {"weight": Any}}, set()),
     ({"participants": {"weight": 3}}, set()),
     ({"participants": {"group": Glob("c*")}}, {"01"}),
-    # with subjects=: both
+    # with sub=: both
     ({"participants": {"group": {"control", "patient"}},
-      "subjects": ["02", "03"]}, {"02"}),
+      "sub": ["02", "03"]}, {"02"}),
     ({"participants": {}}, {"01", "02", "03", "04"}),   # no filter
 ])
 def test_participants(ds, kwargs, expected):
@@ -328,7 +335,7 @@ def _images(f, listing=PRESENCE):
 
 # typing and typing_extensions give distinct objects on older Pythons
 ABSENT_MARKERS = [typing.NoReturn, typing_extensions.Never, typing_extensions.NoReturn,
-          None, *filter(None, [getattr(typing, "Never", None)])]
+          *filter(None, [getattr(typing, "Never", None)])]
 PRESENT_MARKERS = [typing.Any, typing_extensions.Any, typing_extensions.Required,
         *filter(None, [getattr(typing, "Required", None)])]
 
@@ -339,46 +346,76 @@ def test_never_keeps_files_without_the_entity(never):
     assert _images(BidsFilter(entities={"acq": never})) == {0, 3, 4, 5}
     assert _images(BidsFilter(run=never)) == {0, 1, 2, 5}
     assert _images(BidsFilter(task=never)) == {0, 1, 2}
-    if never is not None:   # None is no filter on a label keyword
-        assert _images(BidsFilter(tasks=never)) == {0, 1, 2}
-        assert _images(BidsFilter(sessions=never)) == set(range(len(PRESENCE)))
-        assert _images(BidsFilter(subjects=never)) == set()
-        assert _images(BidsFilter(datatypes=never)) == set()
+    assert _images(BidsFilter(ses=never)) == set(range(len(PRESENCE)))
+    assert _images(BidsFilter(sub=never)) == set()
+    assert _images(BidsFilter(datatype=never)) == set()
 
 
-LABEL_KEYWORDS = [
-    "subjects", "exclude_subjects", "sessions", "datatypes", "suffixes",
-    "tasks",
+REMOVED_KEYWORDS = [
+    ("subjects", "sub="), ("exclude_subjects", r"sub=Not\(\.\.\.\)"),
+    ("sessions", "ses="), ("datatypes", "datatype="), ("suffixes", "suffix="),
+    ("tasks", "task="),
 ]
 
 
-@pytest.mark.parametrize("keyword", LABEL_KEYWORDS)
-def test_none_is_no_filter_on_a_label_keyword(keyword):
+@pytest.mark.parametrize("keyword, hint", REMOVED_KEYWORDS)
+def test_a_plural_keyword_names_the_singular(keyword, hint):
+    with pytest.raises(TypeError, match=f"unknown keywords {keyword}; use {hint} "
+                       f"instead of {keyword}="):
+        BidsFilter(**{keyword: "01"})
+
+
+@pytest.mark.parametrize("keyword", ["datatype", "suffix", "extension"])
+def test_a_part_keyword_none_is_no_filter(keyword):
     import inspect
 
     assert inspect.signature(BidsFilter).parameters[keyword].default is None
-    assert _images(BidsFilter(**{keyword: None})) == set(range(len(PRESENCE)))
-    with pytest.raises(TypeError, match=f"{keyword}=.*Never"):
-        BidsFilter(**{keyword: [None, "x"]})
+    everything = set(range(len(PRESENCE)))
+    assert _images(BidsFilter()) == everything
+    assert _images(BidsFilter(**{keyword: None})) == everything
+    # every image has a suffix and an extension, and is in a datatype folder
+    assert _images(BidsFilter(**{keyword: Never})) == set()
 
 
-def test_none_is_never_on_an_entity_keyword():
-    assert _images(BidsFilter(sub=None)) == set()
-    assert _images(BidsFilter(entities={"task": None})) == {0, 1, 2}
-    assert _images(BidsFilter(task=[None, "rest"])) == set(range(len(PRESENCE)))
+def test_none_is_no_filter_on_an_entity_keyword():
+    everything = set(range(len(PRESENCE)))
+    assert _images(BidsFilter(sub=None)) == everything
+    assert _images(BidsFilter(entities={"task": None})) == everything
+    assert _images(BidsFilter(sub=Never)) == set()
+    assert _images(BidsFilter(entities={"task": Never})) == {0, 1, 2}
+    assert _images(BidsFilter(task=[Never, "rest"])) == everything
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"acq": {None, "x"}}, {"task": [None]}, {"entities": {"acq": (None,)}},
+    {"datatype": {None, "anat"}}, {"suffix": [None]}, {"extension": {None}},
+    {"acq": Not({None, "x"})},
+])
+def test_none_among_values_is_refused(kwargs):
+    with pytest.raises(TypeError, match=r"use Missing \(typing.Never\)"):
+        BidsFilter(**kwargs)
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"acq": Not(None)}, {"datatype": Not(None)}, {"RepetitionTime": Not(None)},
+    {"participants": {"age": Not(None)}},
+])
+def test_not_none_is_refused(kwargs):
+    with pytest.raises(TypeError, match=r"Not\(None\)"):
+        BidsFilter(**kwargs)
 
 
 @pytest.mark.parametrize("anything", PRESENT_MARKERS)
 def test_any_keeps_files_with_the_entity(anything):
     assert _images(BidsFilter(acq=anything)) == {1, 2}
     assert _images(BidsFilter(run=anything)) == {3, 4}
-    assert _images(BidsFilter(sessions=anything)) == set()
+    assert _images(BidsFilter(ses=anything)) == set()
 
 
 def test_presence_mixes_with_values():
     assert _images(BidsFilter(acq={Never, "mprage"})) == {0, 1, 3, 4, 5}
     assert _images(BidsFilter(acq=[Never, "mprage"])) == {0, 1, 3, 4, 5}
-    assert _images(BidsFilter(acq=(None, Glob("f*")))) == {0, 2, 3, 4, 5}
+    assert _images(BidsFilter(acq=(Never, Glob("f*")))) == {0, 2, 3, 4, 5}
     assert _images(BidsFilter(acq={Any, "mprage"})) == {1, 2}
     assert _images(BidsFilter(run={Never, 2})) == {0, 1, 2, 4, 5}
 
@@ -435,7 +472,7 @@ def test_presence_on_a_lone_companion_is_judged_as_on_data(value, kept):
 
 
 @pytest.mark.parametrize("value, kept", [
-    (2, True), ({2, None}, True), (Never, True), ({Never, 2}, True),
+    (2, True), ({2, None}, True), (None, True), (Never, True), ({Never, 2}, True),
     (Any, False), (Required, False), ({Any, 2}, False), ({Any, Never}, True),
 ])
 def test_sidecar_filters_on_metadata_judged_on_its_own_name(value, kept):
@@ -515,13 +552,13 @@ def test_without_a_description_nothing_is_inherited(tmp_path):
     assert _selects(BidsFilter(EchoTime=Any), root) == []
     assert _selects(BidsFilter(RepetitionTime=2), root) == []
     # and they do not come along with the data either
-    kept = _selects(BidsFilter(datatypes="func"), root)
+    kept = _selects(BidsFilter(datatype="func"), root)
     assert kept == [
         "sub-01/func/sub-01_task-rest_bold.json", bold,
         "sub-02/func/sub-02_task-rest_bold.nii.gz",
     ]
     # and on their subject
-    assert _selects(BidsFilter(subjects="02"), root) == [
+    assert _selects(BidsFilter(sub="02"), root) == [
         "sub-02/func/sub-02_task-rest_bold.nii.gz"
     ]
 
@@ -538,7 +575,7 @@ def test_with_a_description_sidecars_are_inherited(tmp_path):
         "sub-01/func/sub-01_task-rest_bold.json", bold,
         "sub-01/sub-01_task-rest_bold.json", "task-rest_bold.json",
     ]
-    assert "task-rest_bold.json" in _selects(BidsFilter(datatypes="func"), root)
+    assert "task-rest_bold.json" in _selects(BidsFilter(datatype="func"), root)
 
 
 def test_a_nested_description_is_the_root_of_what_is_below_it(tmp_path):
@@ -554,7 +591,7 @@ def test_a_nested_description_is_the_root_of_what_is_below_it(tmp_path):
         "sub-02/func/sub-02_task-rest_bold.nii.gz",
     }
     assert _data(BidsFilter(EchoTime=0.03).walk(root), root) == {bold}
-    kept = _selects(BidsFilter(subjects="01", datatypes="func"), root)
+    kept = _selects(BidsFilter(sub="01", datatype="func"), root)
     assert "task-rest_bold.json" not in kept
     assert "sub-01/sub-01_task-rest_bold.json" in kept
 
@@ -615,7 +652,7 @@ def ads(request, tmp_path):
 
 ASYNC_FILTERS = [
     BidsFilter(RepetitionTime=2), BidsFilter(EchoTime=lambda t: t < 0.028),
-    BidsFilter(B0FieldIdentifier=Never), BidsFilter(IntendedFor=None),
+    BidsFilter(B0FieldIdentifier=Never), BidsFilter(IntendedFor={None}),
     BidsFilter(participants={"group": {"control", "sham"}}),
     BidsFilter(participants={"age": Any}, PhaseEncodingDirection=Any),
     BidsFilter(acq={Never, "mprage"}, run=Never),
@@ -683,3 +720,43 @@ async def test_awalk_participants_need_a_table(tmp_path):
            {k: v for k, v in DATASET.items() if k != "participants.tsv"})
     with pytest.raises(FileNotFoundError, match="participants.tsv"):
         await BidsFilter(participants={"age": Any}).awalk(str(tmp_path))
+
+
+def test_present_and_missing_are_the_typing_markers():
+    import brainfilter
+
+    assert brainfilter.Present is typing_extensions.Required
+    assert brainfilter.Missing is typing_extensions.Never
+    assert {"Present", "Missing"} <= set(brainfilter.__all__)
+    assert _images(BidsFilter(acq=brainfilter.Present)) == {1, 2}
+    assert _images(BidsFilter(acq=brainfilter.Missing)) == _images(
+        BidsFilter(acq=typing_extensions.Never)
+    )
+
+
+def test_dataclasses_missing_is_not_a_marker():
+    import dataclasses
+
+    # an ordinary value: a label never equals its text
+    assert _images(BidsFilter(acq=dataclasses.MISSING)) == set()
+
+
+@pytest.mark.parametrize("make", [
+    list, tuple, set, frozenset, lambda v: dict.fromkeys(v).keys(),
+    dict.fromkeys, iter, lambda v: (x for x in v),
+])
+def test_every_iterable_is_any_of_on_a_label(make):
+    assert _images(BidsFilter(acq=make(["mprage", "fse"]))) == _images(
+        BidsFilter(acq={"mprage", "fse"})
+    )
+    assert _images(BidsFilter(run=make([1, 2]))) == _images(BidsFilter(run={1, 2}))
+    assert _images(BidsFilter(extension=make(["nii.gz"]))) == _images(BidsFilter())
+
+
+def test_a_range_is_any_of_on_an_index_entity():
+    assert _images(BidsFilter(run=range(1, 3))) == _images(BidsFilter(run={1, 2}))
+
+
+def test_a_string_is_one_label():
+    assert _images(BidsFilter(acq="fse")) == _images(BidsFilter(acq={"fse"}))
+    assert _images(BidsFilter(acq=b"fse")) == set()

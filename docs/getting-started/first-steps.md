@@ -183,7 +183,7 @@ Suppose you want only the T1-weighted images of one subject. The dataset's
 and returns the files to keep.
 
 ```pycon
->>> kept = ds.filter(subjects=1, datatypes="anat", suffixes="T1w")
+>>> kept = ds.filter(sub=1, datatype="anat", suffix="T1w")
 >>> print(*[p.relative_to(ds).as_posix() for p in kept], sep="\n")
 README
 T1w.json
@@ -218,7 +218,7 @@ call its `walk()` method with the dataset; the two give the same files.
 
 ```pycon
 >>> from brainfilter import BidsFilter
->>> t1w_of_01 = BidsFilter(subjects=1, datatypes="anat", suffixes="T1w")
+>>> t1w_of_01 = BidsFilter(sub=1, datatype="anat", suffix="T1w")
 >>> ds.filter(t1w_of_01) == t1w_of_01.walk(ds) == kept
 True
 ```

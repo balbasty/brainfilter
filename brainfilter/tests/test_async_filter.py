@@ -7,8 +7,8 @@ from brainfilter.tests.test_filter import LISTING, SET_UP, _make
 
 pytestmark = pytest.mark.anyio
 
-FILTERS = [BidsFilter(), BidsFilter(subjects="02"), BidsFilter(folders="derivatives"),
-           BidsFilter(datatypes="anat"), BidsFilter(tasks="rest", exclude="*.tsv")]
+FILTERS = [BidsFilter(), BidsFilter(sub="02"), BidsFilter(folders="derivatives"),
+           BidsFilter(datatype="anat"), BidsFilter(task="rest", exclude="*.tsv")]
 
 
 async def test_awalk_local(tmp_path):
@@ -49,10 +49,10 @@ async def test_awalk_memory_native_async(memory_listing, async_memory):
 async def test_awalk_companion_files(tmp_path):
     _make(tmp_path, SET_UP)
     root = AsyncBidsPath(str(tmp_path))
-    for f in (BidsFilter(tasks="rest"), BidsFilter(sessions="2"),
-              BidsFilter(suffixes="pet"), BidsFilter(acq="crosstalk"),
-              BidsFilter(suffixes="photo"), BidsFilter(acq="b"),
-              BidsFilter(tasks="noise", sessions="1")):
+    for f in (BidsFilter(task="rest"), BidsFilter(ses="2"),
+              BidsFilter(suffix="pet"), BidsFilter(acq="crosstalk"),
+              BidsFilter(suffix="photo"), BidsFilter(acq="b"),
+              BidsFilter(task="noise", ses="1")):
         kept = await f.awalk(root)
         assert [p.relative_to(root).as_posix() for p in kept] == f.select(SET_UP)
 
@@ -159,7 +159,7 @@ async def test_awalk_lists_folders_asked_for(memory_listing, async_memory,
 async def test_walk_and_awalk_rebuild_a_root_of_the_other_family(
     memory_listing, async_memory, monkeypatch
 ):
-    f = BidsFilter(subjects="01")
+    f = BidsFilter(sub="01")
     expected = f.select(LISTING)
     native = AsyncBidsPath(memory_listing)
     assert type(native.wrapped).__name__ == "AsyncFSPath"

@@ -12,6 +12,18 @@ from functools import reduce
 from pathlib import Path
 from typing import Iterator
 
+import typing_extensions
+
+Present = typing_extensions.Required
+"""Matches a file that has the entity (or a sidecar field, a column), whatever
+its value: `BidsFilter(acq=Present)`. It is `typing.Required` itself, which
+works the same."""
+
+Missing = typing_extensions.Never
+"""Matches a file that does not have the entity (or a sidecar field, a
+column): `BidsFilter(acq=Missing)`. It is `typing.Never` itself, which works
+the same."""
+
 
 class NotACondition:
     """Placeholder for a value that is not a condition: raises when built."""
@@ -41,6 +53,36 @@ class NotARegex(NotACondition):
 
     def __init__(self, *args) -> None:
         raise self.Error("Not a regex:", *args)
+
+
+class Not:
+    """The opposite of a filter value: `BidsFilter(sub=Not("02"))`.
+
+    It takes any value a filter keyword takes (a value, a set, a glob, a
+    regex, a test, `Present` or `Missing`) and keeps what that value does
+    not. On an entity, a file without the entity passes `Not(x)` unless `x`
+    matches such a file (`Missing` among its values), so `Not(Missing)`
+    keeps the files that have the entity, as `Present` does. `Not(None)` is
+    refused, since `None` is no filter. `Not(Not(x))` is
+    `x`.
+    """
+
+    def __new__(cls, value: object) -> object:
+        """Build the opposite of `value`; `Not(Not(x))` is `x`."""
+        if isinstance(value, Not):
+            return value.value
+        self = super().__new__(cls)
+        self.value = value
+        return self
+
+    def __repr__(self) -> str:
+        return f"Not({self.value!r})"
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, Not) and other.value == self.value
+
+    def __hash__(self) -> int:
+        return hash(("Not", repr(self.value)))
 
 
 class Condition:

@@ -243,7 +243,7 @@ with it. Selecting the first run shows them, next to the dataset-level files
 that a filter always keeps.
 
 ```pycon
->>> for path in ds.filter(run=1, suffixes="bold"):
+>>> for path in ds.filter(run=1, suffix="bold"):
 ...     print(path.relative_to(ds))
 dataset_description.json
 sub-01/func/sub-01_task-rest_bold.json
@@ -259,7 +259,7 @@ The files of a MEG set-up come along with the recordings they describe in
 the same way, so selecting the MEG recordings brings them along.
 
 ```pycon
->>> for path in ds.filter(datatypes="meg"):
+>>> for path in ds.filter(datatype="meg"):
 ...     print(path.relative_to(ds))
 dataset_description.json
 sub-01/meg/sub-01_acq-calibration_meg.dat
@@ -279,7 +279,7 @@ alone, and asking for the events keeps the events of both runs.
 ```pycon
 >>> [path.name for path in ds.filter(acq="crosstalk")]
 ['dataset_description.json', 'sub-01_acq-crosstalk_meg.fif']
->>> for path in ds.filter(suffixes="events"):
+>>> for path in ds.filter(suffix="events"):
 ...     print(path.relative_to(ds))
 dataset_description.json
 sub-01/func/sub-01_task-rest_run-1_events.tsv
@@ -293,7 +293,7 @@ blood recording, which a filter keeps with its PET scan and also selects by
 its own suffix, without the scan.
 
 ```pycon
->>> for path in ds.filter(suffixes="blood"):
+>>> for path in ds.filter(suffix="blood"):
 ...     print(path.relative_to(ds))
 dataset_description.json
 sub-01/pet/sub-01_trc-FDG_recording-autosampler_blood.tsv

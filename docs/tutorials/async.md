@@ -212,7 +212,7 @@ the mode of the dataset. A `BidsFilter` that is reused does the same through its
 the labels, the subjects' sessions all at once.
 
 ```python
-kept = await ds.filter(subjects="01", suffixes="bold")
+kept = await ds.filter(sub="01", suffix="bold")
 [p.name for p in kept]
 # ['dataset_description.json', 'participants.tsv', 'sub-01_task-rest_bold.json',
 #  'sub-01_task-rest_bold.nii.gz', 'task-rest_bold.json']
