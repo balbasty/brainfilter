@@ -789,7 +789,11 @@ class BidsPath(TreeMixin, BidsPathMixin, Path):
     (`sidecar["RepetitionTime"]`, `as_dict()`), and a TSV file a mapping of
     its columns (`table["age"]`, `as_dict()`, `as_list()`,
     `as_dataframe()`). A file's `sidecars` are the JSON sidecars that apply
-    to it, nearest first, and its `sidecar` their merged content.
+    to it, nearest first, and its `sidecar` their merged content. A data
+    file's `companions` are the other files that come along with it
+    (`events.tsv`, `physio.tsv.gz`, a `.bval`, ...), nearest first, and its
+    `fieldmaps` the fieldmap images meant to correct it, named by their
+    `IntendedFor` or matched by `B0FieldIdentifier`, sorted by path.
 
     `dataset // "sub-01_ses-1_T1w.nii.gz"` is the path where BIDS puts a
     file of that name (`dataset/sub-01/ses-1/anat/...`), while `/` joins a
@@ -1084,8 +1088,9 @@ class AsyncBidsPath(AsyncTreeMixin, BidsPathMixin, AsyncPath):
     `await table.set(column, values)`, `await table.delete(column)`. The
     rest is awaited under its sync name (`await dataset.keys()`,
     `await sidecar.as_dict()`, `await table.as_list()`,
-    `await data.sidecars`, `await data.sidecar`), and iteration is
-    `async for`. Writes are kept until the end of `async with dataset:`.
+    `await data.sidecars`, `await data.sidecar`, `await data.companions`,
+    `await data.fieldmaps`), and iteration is `async for`. Writes are kept
+    until the end of `async with dataset:`.
     """
 
     __slots__ = ("_mode",)

@@ -194,7 +194,9 @@ numbers. A companion may also have an entity that the data file cannot have
 when that entity names the companion's own space or recording, so that
 `sub-01_space-CapTrak_electrodes.tsv` still goes with an EEG recording that
 has no `space` in its name. The `sidecar` property leaves companions out, since
-an `events.json` describes the events table and not the image.
+an `events.json` describes the events table and not the image, and the
+`companions` property of a data file lists them instead; see
+[Companions and fieldmaps](../tutorials/associated-files.md).
 
 ```pycon
 >>> from brainfilter import BidsFilter
