@@ -157,9 +157,28 @@ def _glyph_svg(title: str, shapes: str, themed: bool) -> str:
 '''
 
 
-def brainfilter_icon(themed: bool = True) -> str:
+def _theme_icon(name: str, shapes: str, crop: str) -> str:
+    """
+    Wrap mask shapes into a theme icon (overrides/.icons/).
+
+    The theme inlines it in its pages and colours it with the text around
+    it, so it has no style of its own (fill: currentColor), no fixed size,
+    a mask id of its own, and a view cropped to the drawing.
+    """
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="{crop}">
+  <defs>
+    <mask id="{name}-icon" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
+      {shapes}
+    </mask>
+  </defs>
+  <rect width="512" height="512" fill="currentColor" mask="url(#{name}-icon)"/>
+</svg>
+'''
+
+
+def brainfilter_icon(themed: bool = True, theme_icon: bool = False) -> str:
     """Draw the site icon: a dripper with its paper filter, handle and a drop."""
-    cx, rim_y, base_y, rt, bt = 232, 140, 346, 206, 60
+    cx, rim_y, base_y, rt, bt = 240, 140, 346, 194, 56
     cone = (f'M{cx-rt} {rim_y} L{cx+rt} {rim_y} L{cx+bt} {base_y} '
             f'L{cx-bt} {base_y} Z')
     pw, n = rt - 26, 8           # pinked edge of the paper, above the rim
@@ -185,6 +204,8 @@ def brainfilter_icon(themed: bool = True) -> str:
       <rect x="{cx-rt-30}" y="{rim_y-26}" width="{2*rt+60}" height="44" rx="22" {W}/>
       <rect x="{cx-bt-58}" y="{base_y+18}" width="{2*bt+116}" height="36" rx="18" {W}/>
       <path d="{drop}" {W}/>'''
+    if theme_icon:
+        return _theme_icon('brainfilter', shapes, '8 24 496 478')
     return _glyph_svg('brainfilter', shapes, themed)
 
 
@@ -219,9 +240,10 @@ def brainfilter_wordmark(themed: bool = True) -> str:
     size = 116                               # font size
     k = size / upm
     gap = 26
-    # baseline on the bottom of the server (484, plus half its 14 px outline):
-    # the name has no descenders, so both stand on the same line
-    base = (484 + 7 - ly) * H / lh
+    # the lowest point of the lettering (the overshoot of its round letters,
+    # y1 below the baseline) on the bottom of the server (484, plus half its
+    # 14 px outline): the name has no descenders, both stand on one line
+    base = (484 + 7 - ly) * H / lh - y1 * k
     tx = logo_w + gap - x0 * k
     width = tx + x1 * k + 8
     return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0f} {H}" width="{width:.0f}" height="{H}" role="img" aria-labelledby="title">
@@ -240,4 +262,8 @@ if __name__ == "__main__":
                        ("brainfilter-wordmark", brainfilter_wordmark),
                        ("brainfilter-icon", brainfilter_icon)):
         (Path(OUT) / f"{name}.svg").write_text(make())
+    # the site icon as a theme icon, used as the logo of the docs header
+    icons = HERE.parents[1] / "overrides" / ".icons" / "brainfilter"
+    icons.mkdir(parents=True, exist_ok=True)
+    (icons / "icon.svg").write_text(brainfilter_icon(theme_icon=True))
 
