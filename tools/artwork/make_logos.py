@@ -240,10 +240,11 @@ def brainfilter_wordmark(themed: bool = True) -> str:
     size = 116                               # font size
     k = size / upm
     gap = 26
-    # the lowest point of the lettering (the overshoot of its round letters,
-    # y1 below the baseline) on the bottom of the server (484, plus half its
-    # 14 px outline): the name has no descenders, both stand on one line
-    base = (484 + 7 - ly) * H / lh - y1 * k
+    # the middle of the lettering (tops of b, f, l to the baseline) on the
+    # middle of the server, from its lip (250) to its bottom (484, plus half
+    # its 14 px outline)
+    jug_middle = ((250 + 484 + 7) / 2 - ly) * H / lh
+    base = jug_middle - (y0 + y1) / 2 * k
     tx = logo_w + gap - x0 * k
     width = tx + x1 * k + 8
     return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0f} {H}" width="{width:.0f}" height="{H}" role="img" aria-labelledby="title">
