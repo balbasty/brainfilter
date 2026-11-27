@@ -1,5 +1,5 @@
 """
-Generate the brainfilter logo and site icon.
+Generate the brainfilter logo, wordmark and site icon.
 
 The BIDS mark (half brain and file tree), file and folder glyphs are
 adapted from the BIDS logo
@@ -7,6 +7,7 @@ adapted from the BIDS logo
 
 Usage: python tools/artwork/make_logos.py [OUTDIR]   (default: docs/images)
 """
+import re
 import sys
 from pathlib import Path
 
@@ -187,8 +188,56 @@ def brainfilter_icon(themed: bool = True) -> str:
     return _glyph_svg('brainfilter', shapes, themed)
 
 
+# ------------------------------------------------------------------- wordmark
+def _wordmark_text(text: str) -> tuple[int, float, list[float], str]:
+    """Return the outlines of `text` in Inter ExtraBold (see outline_text.py)."""
+    for line in (HERE / "wordmark.txt").read_text().splitlines():
+        name, upm, advance, bounds, d = line.split("\t")
+        if name == text:
+            return int(upm), float(advance), [float(v) for v in bounds.split()], d
+    raise KeyError(text)
+
+
+def brainfilter_wordmark(themed: bool = True) -> str:
+    """Draw the logo, and "brainfilter" in the ink of the logo."""
+    # the logo, cropped to its drawing (paper filter to server)
+    lx, ly, lw, lh = 80, 22, 356, 484
+    H = 240                                  # height of the logo
+    logo_w = lw * H / lh
+    logo = brainfilter(themed=False)
+    logo = logo.replace('viewBox="0 0 512 512" width="512" height="512"',
+                        f'viewBox="{lx} {ly} {lw} {lh}" x="0" y="0" '
+                        f'width="{logo_w:.1f}" height="{H}"', 1)
+    logo = logo.replace('id="server-inside"', 'id="wm-server-inside"')
+    logo = logo.replace("url(#server-inside)", "url(#wm-server-inside)")
+    logo = logo.replace(' role="img" aria-labelledby="title"', "")
+    logo = re.sub(r'<title id="title">[^<]*</title>', "", logo)
+    if themed:                               # the logo follows the palette
+        logo = re.sub(r"<style>.*?</style>", "", logo, flags=re.S)
+    # the name, as large as in the brainspresso wordmark
+    upm, advance, (x0, y0, x1, y1), d = _wordmark_text("brainfilter")
+    size = 116                               # font size
+    k = size / upm
+    gap = 26
+    # baseline on the bottom of the server (484, plus half its 14 px outline):
+    # the name has no descenders, so both stand on the same line
+    base = (484 + 7 - ly) * H / lh
+    tx = logo_w + gap - x0 * k
+    width = tx + x1 * k + 8
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width:.0f} {H}" width="{width:.0f}" height="{H}" role="img" aria-labelledby="title">
+  <title id="title">brainfilter</title>
+  {ATTR}
+  <!-- Lettering: Inter ExtraBold (rsms.me/inter, SIL OFL 1.1), as outlines. -->
+  {style(themed=themed)}
+  {logo}
+  <path class="ink" transform="translate({tx:.2f} {base:.2f}) scale({k:.5f})" d="{d}"/>
+</svg>
+'''
+
+
 if __name__ == "__main__":
     for name, make in (("brainfilter-logo", brainfilter),
+                       ("brainfilter-wordmark", brainfilter_wordmark),
                        ("brainfilter-icon", brainfilter_icon)):
         (Path(OUT) / f"{name}.svg").write_text(make())
 
