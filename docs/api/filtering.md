@@ -9,3 +9,7 @@ Select the files of a dataset with a `BidsFilter` and its conditions.
 ::: brainfilter.Regex
 
 ::: brainfilter.Not
+
+::: brainfilter.Present
+
+::: brainfilter.Missing

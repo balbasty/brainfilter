@@ -65,10 +65,10 @@ The input is a listing of files; see `BidsFilter.select` for directories.
    rule 2): it is kept if its subject, session, datatype, suffix and path
    pass the filters, and the entity filters for the entities it has. An
    entity filter on an entity it does not have passes if it admits a file
-   without it: one with `Never` among its values, or one made of values
+   without it: one with `Missing` among its values, or one made of values
    only (`acq="mprage"`). One that asks for the entity to be there fails:
-   `Any` or `Required`, alone or beside values (`acq={Any, "mprage"}`),
-   unless `Never` is there too. A sidecar filter is judged the same way, as
+   `Present`, alone or beside values (`acq={Present, "mprage"}`), unless
+   `Missing` is there too. A sidecar filter is judged the same way, as
    a filter on a field it does not have, and the participants filter on its
    subject, when it has one. So an empty `BidsFilter()` keeps every file of
    a dataset that rule 5 does not skip. A companion that describes no
@@ -99,22 +99,25 @@ The input is a listing of files; see `BidsFilter.select` for directories.
 
 Matching values
 ---------------
-Each label filter takes a plain value (matched exactly), several values in
-a list or a set (any of them), a glob ([`Glob`][brainfilter.Glob]), a regex
+Each label filter takes a plain value (matched exactly), several values
+(any of them) in any iterable but a string -- a list, a tuple, a set, a
+`range`, the keys of a dict, a generator (read once) -- a glob
+([`Glob`][brainfilter.Glob]), a regex
 (a `re.Pattern` or [`Regex`][brainfilter.Regex], which must match the
 whole label: `re.compile("1")` matches `sub-1` but not `sub-10`; a
 `Regex(..., full=False)` is found anywhere in it instead), a function of
 the label that says whether it matches, or a marker of presence:
-`typing.Never` matches a file that does not have the entity, and
-`typing.Any` (or `typing.Required`) one that has it, whatever its label. A
-list or a set may mix all of these: `acq={Never, "mprage"}`. On an entity
-keyword (`acq=None`, `sub=None`, `entities={"acq": None}`), and on
-`datatype`, `suffix` and `extension`, `None` is `Never`: `datatype=None`
-keeps the files outside a datatype folder. A keyword left out is no
-filter, so pass nothing rather than `None` to filter on nothing.
+[`Missing`][brainfilter.Missing] matches a file that does not have the
+entity, and [`Present`][brainfilter.Present] one that has it, whatever its
+label (`typing.Never` and `typing.Required` are the same markers). A list
+or a set may mix all of these: `acq={Missing, "mprage"}`. On `datatype`,
+`suffix` and `extension` too: `datatype=Missing` keeps the files outside a
+datatype folder. `None`, the default of every keyword, is no filter, so it
+is never a value among others: write "absent" as `Missing`
+(`acq={Missing, "x"}`, not `acq={None, "x"}`).
 [`Not`][brainfilter.Not] keeps what a value does not: `sub=Not("02")`
 keeps every subject but `02`. A file without the entity passes `Not(x)`
-unless `x` keeps such a file, so `Not(Never)` is `Any`. `Not` goes around
+unless `x` keeps such a file, so `Not(Missing)` is `Present`. `Not` goes around
 the whole value (`Not({"01", "02"})`), and works on sidecar and
 participants filters too.
 Plain labels may keep their `<key>-` prefix (`"sub-01"` is `"01"`); a
@@ -133,9 +136,11 @@ forms, on the value the JSON or the table holds, with three differences. A
 plain value is compared with `==` (`2` matches `2.0`, a string is exact
 text, and `True` is not `1`). A list is one value, compared whole
 (`SliceTiming=[0.0, 0.5]`), so several values to choose from go in a set.
-And `None` is a value: the JSON `null`, or `n/a` in the table. `Never`
+And `None` inside a set is a value, the JSON `null` (`n/a` in the table):
+`IntendedFor={None}` keeps the files whose sidecar holds `null`, while
+`IntendedFor=None` on its own is no filter. `Missing`
 matches a file whose sidecars lack the field (a table without the column),
-`Any` one that has it, `null` included. A glob or a regex matches text
+`Present` one that has it, `null` included. A glob or a regex matches text
 only, and a function that raises `TypeError`, `ValueError` or
 `AttributeError` on a value (a number compared with a string, say) does
 not match it.
@@ -198,8 +203,6 @@ _RENAMED = {
     "exclude_subjects": "sub=Not(...)",
 }
 
-# The default of a keyword that was not given (`None` is a value).
-_UNSET: object = type("_Unset", (), {"__repr__": lambda self: "<unset>"})()
 
 _PARTICIPANTS = "participants.tsv"
 _BIDSIGNORE = ".bidsignore"
@@ -240,7 +243,22 @@ def _is_marker(value: object, markers: tuple) -> bool:
 
 
 def _is_many(value: object) -> bool:
-    return isinstance(value, (list, tuple, set, frozenset))
+    """Whether a label filter value is several values (any of them).
+
+    Every iterable is, but a string, bytes and a condition (a glob or a
+    regex, which is one pattern).
+    """
+    if isinstance(value, (str, bytes, bytearray, Condition, re.Pattern, Not)):
+        return False
+    if _is_marker(value, _ABSENT_MARKERS) or _is_marker(value, _PRESENT_MARKERS):
+        return False
+    # A `typing` marker has `__getitem__`, which `iter()` takes for a
+    # sequence (or an `__iter__` that raises), so ask for it after them.
+    try:
+        iter(value)  # type: ignore[call-overload]
+    except TypeError:
+        return False
+    return True
 
 
 def _is_test(value: object) -> bool:
@@ -277,11 +295,11 @@ class _LabelMatch:
     too; otherwise a string compares as exact text. Conditions and tests
     see the label as written; a regex must match all of it.
 
-    `None` is `Never`.
+    `None` among the values is refused: "absent" is `Never`.
     """
 
     def __init__(self, values: list, key: str | None, index: bool) -> None:
-        self.absent = False      # `Never` (or `None`): no such entity
+        self.absent = False      # `Never`: no such entity
         self.present = False     # `Any` / `Required`: any label
         self.exact: set[object] = set()
         self.numbers: set[int] = set()
@@ -289,7 +307,12 @@ class _LabelMatch:
         self.index = index
         for item in values:
             _refuse_nested_not(item)
-            if item is None or _is_marker(item, _ABSENT_MARKERS):
+            if item is None:
+                raise TypeError(
+                    "BidsFilter got None among the values of a filter: None "
+                    "means no filter; use Missing (typing.Never) for \"absent\""
+                )
+            if _is_marker(item, _ABSENT_MARKERS):
                 self.absent = True
                 continue
             if _is_marker(item, _PRESENT_MARKERS):
@@ -357,6 +380,14 @@ class _NotMatch:
         return self.inner is not None and not self.inner(value)
 
 
+def _refuse_not_none(value: object) -> None:
+    if isinstance(value, Not) and value.value is None:
+        raise TypeError(
+            "BidsFilter got Not(None): None means no filter, so it has no "
+            "opposite; use Present for \"present\" or Missing for \"absent\""
+        )
+
+
 def _refuse_nested_not(item: object) -> None:
     if isinstance(item, Not):
         raise TypeError(
@@ -368,7 +399,10 @@ def _refuse_nested_not(item: object) -> None:
 def _matcher(
     value: object, key: str | None, index: bool = False,
 ) -> _LabelMatch | _NotMatch | None:
-    """Build the test of a label filter; an empty set keeps everything."""
+    """Build the test of a label filter; `None` or an empty set keeps all."""
+    _refuse_not_none(value)
+    if value is None:
+        return None
     if isinstance(value, Not):
         return _NotMatch(_matcher(value.value, key, index), None)
     values = list(value) if _is_many(value) else [value]
@@ -382,7 +416,7 @@ def _dotted(value: object) -> object:
     if isinstance(value, Not):
         return Not(_dotted(value.value))
     if _is_many(value):
-        return type(value)(_dotted(v) for v in value)
+        return [_dotted(v) for v in value]  # a generator is read once
     if isinstance(value, str) and not value.startswith("."):
         return "." + value
     return value
@@ -453,7 +487,13 @@ class _ValueMatch:
 
 
 def _value_matcher(value: object) -> _ValueMatch | _NotMatch | None:
-    """Build the test of a sidecar or table filter; `None` keeps everything."""
+    """Build the test of a sidecar or table filter; `None` keeps everything.
+
+    `None` inside a set is the JSON `null` (the table's `n/a`).
+    """
+    _refuse_not_none(value)
+    if value is None:
+        return None
     if isinstance(value, Not):
         return _NotMatch(_value_matcher(value.value), _ABSENT)
     if isinstance(value, (set, frozenset)) and not value:
@@ -545,13 +585,15 @@ class BidsFilter:
     `run="1"` matches `run-01`. A regex must match the whole label
     (`re.fullmatch`): `sub=re.compile("1")` keeps `sub-1`, not
     `sub-10`; a `Regex(..., full=False)` is found anywhere in the label. A
-    glob or regex on an index entity sees the label as written. A list or
-    a set is any of its values, and a function of the label is a test.
-    `typing.Never` keeps the files that do not have the entity, and
-    `typing.Any` (or `typing.Required`) those that have it:
-    `acq={Never, "mprage"}` keeps the files with no `acq` entity and those
-    with `acq-mprage`. `None` means `Never` (`acq=None`,
-    `datatype=None`); a keyword left out is no filter. `Not(value)` keeps
+    glob or regex on an index entity sees the label as written. Any
+    iterable but a string (a list, a tuple, a set, a `range`, a generator)
+    is any of its values, and a function of the label is a test.
+    `Missing` (or `typing.Never`) keeps the files that do not have the
+    entity, and `Present` (or `typing.Required`) those that have it:
+    `acq={Missing, "mprage"}` keeps the files with no `acq` entity and
+    those with `acq-mprage`. `None` (the default) is no filter, and is
+    refused among other values: "absent" is `Missing`
+    (`datatype=Missing`). `Not(value)` keeps
     what `value` does not (`sub=Not("02")`); a file without the entity
     passes it unless `value` keeps such a file. A file's subject and
     session are those its name gives, else those of its `sub-<label>/` and
@@ -561,13 +603,15 @@ class BidsFilter:
     (`RepetitionTime=2.0`), and the `participants` filters match a value of
     the merged sidecar of a data file, or of its subject's row of
     `participants.tsv`. A plain value is compared with `==` (`2` matches
-    `2.0`; `True` is not `1`), and a list is one value, compared whole, so
-    several values go in a set: `PhaseEncodingDirection={"j", "j-"}`. A
+    `2.0`; `True` is not `1`), and a list or a tuple is one value,
+    compared whole, so several values go in a set (or a frozenset):
+    `PhaseEncodingDirection={"j", "j-"}`. A
     function of the value is a test (`EchoTime=lambda t: t < 0.03`), and
     one that raises `TypeError`, `ValueError` or `AttributeError` on a
-    value does not match it. `None` is the JSON `null` or the table's
-    `n/a`; `Never` matches a field (or column) that is not there, and `Any`
-    one that is. A glob or a regex matches text only.
+    value does not match it. `None` alone is no filter; inside a set it
+    is the JSON `null` or the table's `n/a` (`IntendedFor={None}`).
+    `Missing` matches a field (or column) that is not there, and
+    `Present` one that is. A glob or a regex matches text only.
 
     Path filters (`include`, `exclude`) match the path relative to the
     dataset root. A glob must match the whole path (`fnmatch`); a regex is
@@ -577,9 +621,9 @@ class BidsFilter:
     ----------
     datatype, suffix, extension
         Keep data files whose datatype directory, BIDS suffix or extension
-        (`.nii.gz`; the leading dot may be left out) match. Left out, they
-        are no filter; `None` keeps the files that have none (`datatype=None`:
-        the files outside a datatype folder).
+        (`.nii.gz`; the leading dot may be left out) match. `None` (the
+        default) is no filter; `Missing` keeps the files that have none
+        (`datatype=Missing`: the files outside a datatype folder).
     include, exclude
         Patterns matched against the path relative to the dataset root
         (a string is a glob, a `re.Pattern` a regex; a list is any-of).
@@ -632,9 +676,9 @@ class BidsFilter:
     def __init__(
         self,
         *,
-        datatype: object = _UNSET,
-        suffix: object = _UNSET,
-        extension: object = _UNSET,
+        datatype: object = None,
+        suffix: object = None,
+        extension: object = None,
         include: object = None,
         exclude: object = None,
         folders: Iterable[str] = (),
@@ -685,13 +729,12 @@ class BidsFilter:
             match = _matcher(value, key, key in INDEX_ENTITIES)
             if match is not None:
                 self.entities[key] = match
-        # The parts of a name that are not entities; `None` is "not there".
         self.parts: dict[str, _LabelMatch | _NotMatch] = {}
         for part, value in (
             ("datatype", datatype), ("suffix", suffix),
             ("extension", _dotted(extension)),
         ):
-            match = None if value is _UNSET else _matcher(value, None)
+            match = _matcher(value, None)
             if match is not None:
                 self.parts[part] = match
         self.include = _patterns(include)

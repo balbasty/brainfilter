@@ -30,7 +30,9 @@ the helper is dropped, to look at everything that comes along with the images.
 
 ## Subjects and sessions
 
-The `subjects` and `sessions` keywords take a label, or a list of labels. A
+The `sub` and `ses` keywords take a label, or several labels. Several
+labels can come in any iterable but a string -- a list, a tuple, a set, a
+`range`, even a generator -- and a file matches if it has any of them. A
 label can be written with or without its `sub-` or `ses-` prefix.
 
 ```pycon
@@ -172,34 +174,35 @@ the label and says whether it matches, such as
 
 A filter on an entity keeps only the files that have it, as the section on
 tasks pointed out. Sometimes the files you want are precisely those without
-it, or those with it whatever its label. The markers of the standard `typing`
-module say so: `Never` selects the files that do not have the entity, and
-`Any` the files that have it with any label. Here are the images of subject 2
+it, or those with it whatever its label. Two markers say so: `Missing`
+selects the files that do not have the entity, and `Present` the files that
+have it with any label. Here are the images of subject 2
 with no run number, and then those with one.
 
 ```pycon
->>> from typing import Any, Never
->>> images(BidsFilter(sub=2, run=Never).walk(ds))
+>>> from brainfilter import Missing, Present
+>>> images(BidsFilter(sub=2, run=Missing).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(BidsFilter(sub=2, run=Any).walk(ds))
+>>> images(BidsFilter(sub=2, run=Present).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
 ```
 
-`typing.Required` means the same as `Any`. On an entity keyword such as
-`run` or `acq`, `None` means the same as `Never`, since a label is never
-empty, and the same holds for `datatype`, `suffix` and `extension`:
-`datatype=None` keeps the files that are not in a datatype folder. A
-keyword you leave out applies no filter, so pass nothing, not `None`, when
-you do not want to filter on it. On Python 3.10, which
-lacks `Never` and `Required`, import them from `typing_extensions`. A marker
+`Missing` and `Present` are the markers `typing.Never` and
+`typing.Required` under other names, so those work the same (on Python
+3.10, which lacks them, import them from `typing_extensions`). `Missing`
+works on `datatype`, `suffix` and `extension` too: `datatype=Missing` keeps
+the files that are not in a datatype folder. `None` is the default of every
+keyword and applies no filter, so `acq=None` is the same as leaving `acq`
+out. It is never one value among others: write "no acquisition label" as
+`Missing`, and `acq={None, "fse"}` raises a `TypeError` saying so. A marker
 can sit in a set beside ordinary values. The filter below keeps the images that have no
 acquisition label, together with those acquired with the `fse` sequence.
 
 ```pycon
->>> images(BidsFilter(sub=2, acq={Never, "fse"}).walk(ds))
+>>> images(BidsFilter(sub=2, acq={Missing, "fse"}).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
@@ -208,7 +211,7 @@ sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
 `Not` turns any of these values around. A file that lacks the entity
 passes `Not(x)` unless `x` itself keeps such a file, so `acq=Not("fse")`
 keeps the images with no acquisition label as well as the others, while
-`Not(Never)` keeps exactly the files that have the entity, as `Any` does.
+`Not(Missing)` keeps exactly the files that have the entity, as `Present` does.
 `Not` goes around the whole value, `Not({"fse", "mprage"})`, and works on
 the sidecar and participants filters as well.
 
@@ -247,7 +250,7 @@ field is there at all.
 >>> images(BidsFilter(sub=2, EchoTime=lambda echo: echo < 0.01).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
->>> images(BidsFilter(sub=2, RepetitionTime=Never).walk(ds))
+>>> images(BidsFilter(sub=2, RepetitionTime=Missing).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
@@ -257,11 +260,12 @@ The function is only asked about recordings that have the field, and one that
 fails on a value of the wrong type (a comparison between a number and a
 string, say) does not match it rather than stopping the walk. Two forms
 differ from the label filters, because a sidecar value need not be text. A
-list is a value in its own right, compared as a whole, so
+list (or a tuple) is a value in its own right, compared as a whole, so
 `SliceTiming=[0.0, 0.5]` selects the recordings with exactly those slice
 times; to accept one of several values, put them in a set, as in
-`PhaseEncodingDirection={"j", "j-"}`. And `None` matches a field whose value
-is the JSON `null`, while `Never` matches one that is absent. A field whose
+`PhaseEncodingDirection={"j", "j-"}`. And `None` in a set matches a field
+whose value is the JSON `null` (`IntendedFor={None}`), while `Missing` matches
+one that is absent; `None` on its own, as everywhere, applies no filter. A field whose
 name is not a valid keyword goes in a dictionary instead:
 `BidsFilter(sidecar={"Field-Name": 1})`.
 
@@ -286,9 +290,9 @@ sub-10/ses-1/anat/sub-10_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
 ```
 
-A cell written `n/a` reads as `None`, so `None` selects the subjects whose
-value is missing, and a condition on the value does not match them. `Any`
-asks for the column to exist, and `Never` for it not to. A subject that has
+A cell written `n/a` reads as `None`, so `{None}` selects the subjects whose
+value is missing, and a condition on the value does not match them.
+`Present` asks for the column to exist, and `Missing` for it not to. A subject that has
 no row in the table is left out, and the filter combines with `subjects` and
 the other keywords: a recording is kept only if it passes them all. A dataset
 without a `participants.tsv` cannot answer the question, and filtering it on

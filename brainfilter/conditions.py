@@ -12,6 +12,18 @@ from functools import reduce
 from pathlib import Path
 from typing import Iterator
 
+import typing_extensions
+
+Present = typing_extensions.Required
+"""Matches a file that has the entity (or a sidecar field, a column), whatever
+its value: `BidsFilter(acq=Present)`. It is `typing.Required` itself, which
+works the same."""
+
+Missing = typing_extensions.Never
+"""Matches a file that does not have the entity (or a sidecar field, a
+column): `BidsFilter(acq=Missing)`. It is `typing.Never` itself, which works
+the same."""
+
 
 class NotACondition:
     """Placeholder for a value that is not a condition: raises when built."""
@@ -47,10 +59,11 @@ class Not:
     """The opposite of a filter value: `BidsFilter(sub=Not("02"))`.
 
     It takes any value a filter keyword takes (a value, a set, a glob, a
-    regex, a test, `typing.Never` or `typing.Any`) and keeps what that
-    value does not. On an entity, a file without the entity passes
-    `Not(x)` unless `x` matches such a file (`Never` among its values), so
-    `Not(Never)` keeps the files that have the entity. `Not(Not(x))` is
+    regex, a test, `Present` or `Missing`) and keeps what that value does
+    not. On an entity, a file without the entity passes `Not(x)` unless `x`
+    matches such a file (`Missing` among its values), so `Not(Missing)`
+    keeps the files that have the entity, as `Present` does. `Not(None)` is
+    refused, since `None` is no filter. `Not(Not(x))` is
     `x`.
     """
 

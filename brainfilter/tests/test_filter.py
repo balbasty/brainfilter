@@ -2,6 +2,7 @@ import re
 import typing
 
 import pytest
+import typing_extensions
 
 from brainfilter._names import applies_to, parse_path
 from brainfilter.bidspath import BidsPath, PureBidsPath
@@ -339,7 +340,7 @@ def test_not():
     # a file without the entity passes Not(x) unless x keeps it
     assert BidsFilter(acq=Not("y")).select(listing) == listing
     assert BidsFilter(acq=Not("x")).select(listing) == listing[:1]
-    assert BidsFilter(acq=Not(None)).select(listing) == listing[1:]
+    assert BidsFilter(acq=Not(typing_extensions.Never)).select(listing) == listing[1:]
     with pytest.raises(TypeError, match="Not goes around"):
         BidsFilter(acq={Not("x"), "y"})
 
