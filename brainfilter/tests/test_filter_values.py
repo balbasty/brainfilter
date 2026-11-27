@@ -442,6 +442,134 @@ async def test_awalk_a_sidecar_that_cannot_be_read(tmp_path, content, error):
         await Filter(EchoTime=Any).awalk(str(tmp_path))
 
 
+# -- the dataset root ------------------------------------------------------------
+
+ROOTLESS = {
+    "task-rest_bold.json": {"RepetitionTime": 2},
+    "sub-01/sub-01_task-rest_bold.json": {"EchoTime": 0.03},
+    "sub-01/func/sub-01_task-rest_bold.nii.gz": b"",
+    "sub-01/func/sub-01_task-rest_bold.json": {"Flag": True},
+    "sub-02/func/sub-02_task-rest_bold.nii.gz": b"",
+}
+DESCRIPTION = {"dataset_description.json": {"Name": "x", "BIDSVersion": "1.10.0"}}
+
+
+def _selects(f, root):
+    """What walk keeps, after checking that select and awalk keep it too."""
+    import asyncio
+
+    kept = _all(f.walk(root), root)
+    listing = [p for p in root.rglob("*") if p.is_file()]
+    assert _all(f.select(listing, root=root), root) == kept
+    aroot = AsyncBidsPath(str(root))
+    assert _all(asyncio.run(f.awalk(aroot)), aroot) == kept
+    return kept
+
+
+def test_without_a_description_nothing_is_inherited(tmp_path):
+    root = BidsPath(str(tmp_path / "rootless"))
+    _write(root, ROOTLESS)
+    bold = "sub-01/func/sub-01_task-rest_bold.nii.gz"
+    assert [s.name for s in (root / bold).sidecars] == [
+        "sub-01_task-rest_bold.json"
+    ]
+    # the sidecar beside the file still applies; the ones above do not
+    assert _data(Filter(Flag=True).walk(root), root) == {bold}
+    assert _data(Filter(RepetitionTime=2).walk(root), root) == set()
+    assert _data(Filter(EchoTime=Any).walk(root), root) == set()
+    # describing nothing, the sidecars above are judged on their own names
+    # (rule 3), as a filter on a field they do not have
+    assert _selects(Filter(EchoTime=Any), root) == []
+    assert _selects(Filter(RepetitionTime=2), root) == [
+        "sub-01/sub-01_task-rest_bold.json", "task-rest_bold.json",
+    ]
+    # and they do not come along with the data either
+    kept = _selects(Filter(datatypes="func"), root)
+    assert kept == [
+        "sub-01/func/sub-01_task-rest_bold.json", bold,
+        "sub-02/func/sub-02_task-rest_bold.nii.gz",
+    ]
+    # and on their subject
+    assert "task-rest_bold.json" in _selects(Filter(subjects="02"), root)
+    assert "sub-01/sub-01_task-rest_bold.json" not in _selects(
+        Filter(subjects="02"), root
+    )
+
+
+def test_with_a_description_sidecars_are_inherited(tmp_path):
+    root = BidsPath(str(tmp_path / "rooted"))
+    _write(root, {**ROOTLESS, **DESCRIPTION})
+    bold = "sub-01/func/sub-01_task-rest_bold.nii.gz"
+    assert _data(Filter(RepetitionTime=2).walk(root), root) == {
+        bold, "sub-02/func/sub-02_task-rest_bold.nii.gz",
+    }
+    assert _selects(Filter(EchoTime=Any), root) == [
+        "dataset_description.json",
+        "sub-01/func/sub-01_task-rest_bold.json", bold,
+        "sub-01/sub-01_task-rest_bold.json", "task-rest_bold.json",
+    ]
+    assert "task-rest_bold.json" in _selects(Filter(datatypes="func"), root)
+
+
+def test_a_nested_description_is_the_root_of_what_is_below_it(tmp_path):
+    root = BidsPath(str(tmp_path / "nested"))
+    _write(root, {
+        **ROOTLESS, **DESCRIPTION, "sub-01/dataset_description.json": {},
+    })
+    bold = "sub-01/func/sub-01_task-rest_bold.nii.gz"
+    assert [s.name for s in (root / bold).sidecars] == [
+        "sub-01_task-rest_bold.json", "sub-01_task-rest_bold.json",
+    ]
+    assert _data(Filter(RepetitionTime=2).walk(root), root) == {
+        "sub-02/func/sub-02_task-rest_bold.nii.gz",
+    }
+    assert _data(Filter(EchoTime=0.03).walk(root), root) == {bold}
+    kept = _selects(Filter(subjects="01", datatypes="func"), root)
+    assert "task-rest_bold.json" not in kept
+    assert "sub-01/sub-01_task-rest_bold.json" in kept
+
+
+SHAPES = {
+    "rooted": {**DATASET},
+    "rootless": {k: v for k, v in DATASET.items()
+                 if k != "dataset_description.json"},
+    "nested": {**DATASET, "sub-01/dataset_description.json": {},
+               "sub-01/sub-01_task-rest_bold.json": {"X": 1},
+               "sub-02/sub-02_task-rest_bold.json": {"X": 2}},
+    "in a session": {
+        **DESCRIPTION,
+        "T1w.json": {}, "ses-1_T1w.json": {},
+        "sub-01/sub-01_T1w.json": {},
+        "sub-01/ses-1/dataset_description.json": {},
+        "sub-01/ses-1/sub-01_ses-1_T1w.json": {},
+        "sub-01/ses-1/anat/sub-01_ses-1_T1w.nii.gz": b"",
+        "sub-01/ses-1/anat/sub-01_ses-1_T1w.json": {},
+        "sub-01/ses-2/anat/sub-01_ses-2_T1w.nii.gz": b"",
+    },
+    "ignored": {**DATASET, ".bidsignore": "*.json\nsub-02/\n"},
+}
+
+
+@pytest.mark.parametrize("shape", sorted(SHAPES))
+def test_the_sidecars_a_filter_reads_are_path_sidecars(tmp_path, shape):
+    root = BidsPath(str(tmp_path / "shape"))
+    _write(root, SHAPES[shape])
+    listing = sorted(p.relative_to(root).as_posix()
+                     for p in root.rglob("*") if p.is_file())
+    ignore = filter_module._BidsIgnore.parse(
+        (root / ".bidsignore").read_text() if ".bidsignore" in listing else ""
+    )
+    plan = filter_module._Plan(Filter(), listing, ignore)
+    chains = filter_module._sidecar_chains(
+        plan.data.values(), plan.meta, plan.scopes
+    )
+    assert chains
+    for item, chain in chains.items():
+        expected = tuple(s.relative_to(root).as_posix()
+                         for s in (root / item).sidecars)
+        assert chain == expected, item
+
+
 # -- async ----------------------------------------------------------------------
 
 @pytest.fixture(params=["local", "memory"])

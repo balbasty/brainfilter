@@ -1,6 +1,5 @@
-"""`.bidsignore`: the files it names are not part of the dataset."""
+"""`.bidsignore`: the files it names are not data to select."""
 import re
-import typing
 
 import pytest
 
@@ -175,24 +174,24 @@ def _rel(paths, root):
     return [p.relative_to(root).as_posix() for p in paths]
 
 
+# The ignored sub-02_T1w.json still describes the image beside it, and
+# comes along with it; T2w.json describes the ignored T2w images only.
 KEPT = [
-    ".bidsignore", "README", "T2w.json", "dataset_description.json",
-    "participants.tsv",
+    ".bidsignore", "README", "dataset_description.json", "participants.tsv",
     "sub-01/anat/sub-01_T1w.json", "sub-01/anat/sub-01_T1w.nii.gz",
-    "sub-02/anat/sub-02_T1w.nii.gz",
+    "sub-02/anat/sub-02_T1w.json", "sub-02/anat/sub-02_T1w.nii.gz",
 ]
 
 
 def test_walk_honours_bidsignore(ds):
-    # T2w.json describes an image that is ignored: it applies to no data
-    # file, and is judged on its own name
     assert _rel(Filter().walk(ds), ds) == KEPT
     assert _rel(Filter(bidsignore=False).walk(ds), ds) == sorted([
         ".bidsignore", "README", "T2w.json", "dataset_description.json",
         "participants.tsv", *[k for k in FILES if k.startswith("sub-")],
     ])
+    # T2w.json applies to the ignored images, which are not selected
     assert _rel(Filter(suffixes="T2w").walk(ds), ds) == [
-        ".bidsignore", "README", "T2w.json", "dataset_description.json",
+        ".bidsignore", "README", "dataset_description.json",
         "participants.tsv",
     ]
 
@@ -235,11 +234,20 @@ def test_select_honours_a_bidsignore_it_can_read(ds):
 
 
 def test_an_ignored_participants_table(tmp_path):
+    # still read by a participants filter, but not kept
     root = BidsPath(str(tmp_path))
-    _write(root, {**FILES, ".bidsignore": "participants.tsv\n"})
+    _write(root, {
+        **FILES, ".bidsignore": "participants.tsv\n",
+        "participants.tsv": "participant_id\tgroup\nsub-01\ta\nsub-02\tb\n",
+    })
     assert "participants.tsv" not in _rel(Filter().walk(root), root)
-    with pytest.raises(FileNotFoundError, match="participants.tsv"):
-        Filter(participants={"participant_id": typing.Any}).walk(root)
+    f = Filter(participants={"group": "b"})
+    expected = ["sub-02/anat/sub-02_T1w.json", "sub-02/anat/sub-02_T1w.nii.gz"]
+    got = _rel(f.walk(root), root)
+    assert [p for p in got if p.startswith("sub-")] == expected
+    assert "participants.tsv" not in got
+    listing = [p for p in root.rglob("*") if p.is_file()]
+    assert _rel(f.select(listing, root=root), root) == got
 
 
 @pytest.mark.anyio
@@ -255,3 +263,128 @@ async def test_awalk_honours_bidsignore(backend, tmp_path, request):
         root = AsyncBidsPath(str(tmp_path))
     assert _rel(await Filter().awalk(root), root) == KEPT
     assert len(await Filter(bidsignore=False).awalk(root)) > len(KEPT)
+
+
+# -- ignored metadata still applies --------------------------------------------
+
+INHERIT = {
+    "dataset_description.json": "{}",
+    "participants.tsv": "participant_id\tgroup\nsub-01\ta\nsub-02\tb\n",
+    "task-rest_bold.json": '{"RepetitionTime": 2}',
+    "sub-01/func/sub-01_task-rest_bold.nii.gz": "x",
+    "sub-01/func/sub-01_task-rest_bold.json": '{"RepetitionTime": 1}',
+    "sub-01/func/sub-01_task-rest_events.tsv": "onset\n0\n",
+    "sub-01/func/sub-01_task-rest_physio.tsv.gz": "x",
+    "sub-02/func/sub-02_task-rest_bold.nii.gz": "x",
+    "sub-02/dwi/sub-02_dwi.nii.gz": "x",
+    "sub-02/dwi/sub-02_dwi.bval": "0",
+    "sub-02/dwi/sub-02_dwi.bvec": "0",
+}
+
+
+@pytest.fixture(params=["local", "memory"])
+def inherit(request, tmp_path):
+    if request.param == "memory":
+        request.getfixturevalue("memory_store")
+        return BidsPath("memory://inherit")
+    return BidsPath(str(tmp_path / "inherit"))
+
+
+def _walks(f, root):
+    """What walk keeps, after checking that select keeps the same."""
+    kept = _rel(f.walk(root), root)
+    listing = [p for p in root.rglob("*") if p.is_file()]
+    assert _rel(f.select(listing, root=root), root) == kept
+    return kept
+
+
+def test_an_ignored_nearest_sidecar_still_applies(inherit):
+    _write(inherit, {**INHERIT, ".bidsignore": "sub-01/func/*.json\n"})
+    bold = "sub-01/func/sub-01_task-rest_bold.nii.gz"
+    sidecar = "sub-01/func/sub-01_task-rest_bold.json"
+    # the value is the ignored sidecar's, and the sidecar comes along
+    kept = _walks(Filter(RepetitionTime=1), inherit)
+    assert bold in kept and sidecar in kept
+    assert "task-rest_bold.json" in kept
+    assert "sub-02/func/sub-02_task-rest_bold.nii.gz" not in kept
+    assert bold not in _walks(Filter(RepetitionTime=2), inherit)
+    assert sidecar in _walks(Filter(subjects="01"), inherit)
+    # alone, an ignored sidecar is not kept
+    assert sidecar not in _walks(Filter(subjects="01", suffixes="T1w"), inherit)
+
+
+def test_ignored_tables_bvals_and_companions_still_come_along(inherit):
+    _write(inherit, {
+        **INHERIT, ".bidsignore": "*.tsv\n*.tsv.gz\n*.bval\n*.bvec\n",
+    })
+    kept = _walks(Filter(), inherit)
+    for rel in (
+        "sub-01/func/sub-01_task-rest_events.tsv",
+        "sub-01/func/sub-01_task-rest_physio.tsv.gz",
+        "sub-02/dwi/sub-02_dwi.bval", "sub-02/dwi/sub-02_dwi.bvec",
+    ):
+        assert rel in kept
+    assert "participants.tsv" not in kept
+    kept = _walks(Filter(subjects="02"), inherit)
+    assert "sub-02/dwi/sub-02_dwi.bval" in kept
+    assert not any(p.startswith("sub-01/") for p in kept)
+
+
+def test_an_ignored_data_file_is_not_selected_but_still_described(inherit):
+    _write(inherit, {**INHERIT, ".bidsignore": "*_bold.nii.gz\n"})
+    kept = _walks(Filter(), inherit)
+    assert not any(p.endswith("_bold.nii.gz") for p in kept)
+    # its metadata describes it, so is not judged on its own name: with no
+    # bold kept, it does not come along
+    assert "task-rest_bold.json" not in kept
+    assert "sub-01/func/sub-01_task-rest_bold.json" not in kept
+
+
+def test_an_ignored_sidecar_directory(inherit):
+    _write(inherit, {
+        **INHERIT,
+        ".bidsignore": "sub-01/func/\n",
+        "sub-02/sub-02_task-rest_bold.json": '{"RepetitionTime": 3}',
+    })
+    # sub-02 is described by a sidecar of an unignored folder...
+    kept = _walks(Filter(RepetitionTime=3), inherit)
+    assert "sub-02/func/sub-02_task-rest_bold.nii.gz" in kept
+    assert "sub-02/sub-02_task-rest_bold.json" in kept
+    # ... and nothing of the ignored folder is kept, but it still holds the
+    # data the top-level sidecar applies to
+    kept = _walks(Filter(subjects="01"), inherit)
+    assert not any(p.startswith("sub-01/func/") for p in kept)
+    _write(inherit, {".bidsignore": "sub-01/func/\nsub-02/\n"})
+    assert "task-rest_bold.json" not in _walks(Filter(), inherit)
+
+
+def test_a_walk_lists_an_ignored_folder_only_when_metadata_above_needs_it(
+    memory_store, listed_dirs
+):
+    root = BidsPath("memory://lists")
+    _write(root, {**INHERIT, ".bidsignore": "sub-01/\n"})
+    Filter(subjects="02").walk(root)
+    assert not any(d.startswith("/lists/sub-01") for d in listed_dirs)
+    listed_dirs.clear()
+    # task-rest_bold.json applies to the bold of sub-02, which settles it;
+    # with both bolds in ignored folders, the walk looks for one
+    _write(root, {**INHERIT, ".bidsignore": "sub-01/\nsub-02/func/\n"})
+    listed_dirs.clear()
+    assert "task-rest_bold.json" not in _rel(Filter().walk(root), root)
+    assert "/lists/sub-01/func" in listed_dirs
+    assert "/lists/sub-02/func" not in listed_dirs
+    assert "task-rest_bold.json" not in _walks(Filter(), root)
+
+
+def test_an_ignored_participants_table_filters_awalk(tmp_path):
+    import asyncio
+
+    _write(BidsPath(str(tmp_path)), {
+        **INHERIT, ".bidsignore": "participants.tsv\n",
+    })
+    root = AsyncBidsPath(str(tmp_path))
+    f = Filter(participants={"group": "a"})
+    kept = _rel(asyncio.run(f.awalk(root)), root)
+    assert "sub-01/func/sub-01_task-rest_bold.nii.gz" in kept
+    assert not any(p.startswith("sub-02/") for p in kept)
+    assert "participants.tsv" not in kept

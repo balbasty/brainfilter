@@ -33,7 +33,11 @@ The input is a listing of files; see `Filter.select` for directories.
    are kept if they apply to at least one kept data file under the BIDS
    inheritance principle. So is a data file that is also a companion of
    another (`*_physio.tsv.gz` of a `*_bold.nii.gz`) and does not pass the
-   filters itself.
+   filters itself. A metadata file applies to a data file from the data
+   file's directory up to its dataset root, the nearest directory of the
+   listing above it that holds a `dataset_description.json`; without one,
+   only the metadata in the data file's own directory applies. These are
+   the sidecars `path.sidecars` finds.
 3. A metadata file that applies to no data file of the listing at all
    (`beh/*_events.tsv` alone, `electrodes.tsv` of a session with no
    recording) is judged on what it names: it is kept if its subject,
@@ -54,10 +58,15 @@ The input is a listing of files; see `Filter.select` for directories.
    requested with `folders`. Hidden files and folders (`.datalad/`,
    `.gitattributes`, ...) and other top-level folders are always skipped;
    a hidden name inside a data directory (`.zattrs` in `*.ome.zarr/`) is
-   part of the data file, and kept with it. The files the dataset's
-   `.bidsignore` names are not part of the dataset: they are neither data
-   nor metadata, and are skipped (but `dataset_description.json` and
-   `.bidsignore` itself).
+   part of the data file, and kept with it. The dataset's `.bidsignore`
+   decides which files are data to select, never which metadata applies.
+   A data file it names is never selected, and any other file it names is
+   kept only as the metadata of a kept data file (rule 2), never on its own
+   (rules 3 and 4); `dataset_description.json` and `.bidsignore` itself are
+   never ignored. So an ignored sidecar still applies to the data files it
+   describes, its values count for the sidecar filters, and it comes along
+   with them; an ignored `participants.tsv` is still read by the
+   participants filters, but not kept.
 6. Last, the `exclude` patterns remove any kept file but
    `dataset_description.json`.
 
@@ -150,6 +159,7 @@ _ALIASES = {"subjects": "sub", "sessions": "ses", "tasks": "task"}
 
 _PARTICIPANTS = "participants.tsv"
 _BIDSIGNORE = ".bidsignore"
+_DESCRIPTION = "dataset_description.json"
 
 # The markers of presence, from `typing` and `typing_extensions` (distinct
 # objects on older Pythons), compared by identity.
@@ -496,9 +506,13 @@ class Filter:
         Filters on the columns of `participants.tsv`, `{column: value}`:
         keep the data files of the subjects whose row matches every one.
         A subject without a row is not kept, and a dataset without
-        `participants.tsv` is an error.
+        `participants.tsv` is an error (one that `.bidsignore` names is
+        still read).
     bidsignore
-        Whether to skip the files that the dataset's `.bidsignore` names.
+        Whether to honour the dataset's `.bidsignore`: the data files it
+        names are not selected, and the other files it names are kept only
+        as the metadata of a kept data file. It never changes which
+        metadata applies to a data file, nor the values it reads.
     **kwargs
         Filters on a known BIDS entity (`acq="mprage"`, `run=[1, 2]`,
         `sub=...`, ...), and on a sidecar field for a keyword that starts
@@ -510,7 +524,10 @@ class Filter:
     -----
     The filtering tutorial walks through the selection rules and the values
     a filter takes; the inheritance page explains which sidecars and
-    companion files come along with the data files that are kept.
+    companion files come along with the data files that are kept. A data
+    file's sidecars are the ones `path.sidecars` finds, so a listing without
+    a `dataset_description.json` inherits nothing from above a data file's
+    own directory.
     """
 
     def __init__(
@@ -733,9 +750,7 @@ class Filter:
         subjects = None
         if self.participants:
             assert base is not None
-            subjects = self._subjects_from(
-                self._participants(base, None, ignore)
-            )
+            subjects = self._subjects_from(self._participants(base, None))
         plan = _Plan(self, items, ignore, subjects)
         contents = {rel: _read_json(items[rel]) for rel in plan.reads}
         return [items[rel] for rel in plan.finish(contents)]
@@ -747,10 +762,11 @@ class Filter:
         string. Hidden folders, the top-level folders that would be
         skipped, the folders `.bidsignore` names and the subject and
         session folders the filters on their labels (and on
-        `participants.tsv`) leave out are not listed. An `AsyncBidsPath` or
-        a pure path is listed through the `BidsPath` of its string and
-        storage options. The files have the mode of `root` (read-only for a
-        string).
+        `participants.tsv`) leave out are not listed, unless a metadata file
+        above one of them may describe nothing but what it holds. An
+        `AsyncBidsPath` or a pure path is listed through the `BidsPath` of
+        its string and storage options. The files have the mode of `root`
+        (read-only for a string).
 
         A walk keeps what `select` keeps of the whole listing, with one
         exception, for a dataset that is not valid BIDS: a file whose name
@@ -777,15 +793,15 @@ class Filter:
                         (root / _BIDSIGNORE).read_text(encoding="utf-8")
                     )
                 if self.participants:
-                    state.subjects = self._subjects_from(self._participants(
-                        root, _PARTICIPANTS in names, state.ignore
-                    ))
+                    state.subjects = self._subjects_from(
+                        self._participants(root, _PARTICIPANTS in names)
+                    )
             dirnames[:] = [d for d in dirnames if self._descend(parts, d, state)]
             for filename in filenames:
                 path = dirpath / filename
                 found[path.relative_to(root).as_posix()] = path
         if self.participants and not state.started:
-            self._participants(root, False, None)
+            self._participants(root, False)
         plan = _Plan(self, found, state.ignore, state.subjects)
         unsure = plan.unsure(state.pruned)
         for pruned in sorted(state.pruned):
@@ -903,21 +919,18 @@ class Filter:
         if read_ignore:
             state.ignore = _BidsIgnore.parse(text)
         if self.participants:
-            if not read_rows or (
-                state.ignore and state.ignore.ignores(_PARTICIPANTS)
-            ):
+            if not read_rows:
                 raise _no_participants(root)
             state.subjects = self._subjects_from(rows)
 
-    def _participants(
-        self, root: BidsPath, listed: bool | None, ignore: _BidsIgnore | None
-    ) -> list[dict]:
+    def _participants(self, root: BidsPath, listed: bool | None) -> list[dict]:
         """Read the rows of `participants.tsv` for the participants filters.
 
         `listed` says whether the listing has the table; `None` when it is
-        not known, and the table is read if it is there.
+        not known, and the table is read if it is there. A table that
+        `.bidsignore` names is read all the same.
         """
-        if listed is False or (ignore and ignore.ignores(_PARTICIPANTS)):
+        if listed is False:
             raise _no_participants(root)
         try:
             return _read_rows(root / _PARTICIPANTS)
@@ -964,10 +977,29 @@ class Filter:
         folder is recorded in `state.pruned`: a metadata file above it may
         apply to a data file inside it and to none of those listed, and the
         walk then lists it after all (see `_Plan.unsure`).
+
+        A folder that `.bidsignore` names is left out too (with `prune`),
+        and recorded the same way: every file in it is ignored, so none of
+        its data files is selected, and its metadata applies to nothing but
+        them.
         """
-        ignore = None if state is None else state.ignore
-        if ignore is not None and ignore.ignores("/".join((*parts, name)), True):
+        if not self._lists(parts, name, state, prune):
             return False
+        rel = "/".join((*parts, name))
+        ignore = None if state is None else state.ignore
+        if prune and ignore is not None and ignore.ignores(rel, True):
+            state.pruned.append(rel)  # type: ignore[union-attr]
+            return False
+        return True
+
+    def _lists(
+        self,
+        parts: tuple[str, ...],
+        name: str,
+        state: _Walk | None,
+        prune: bool,
+    ) -> bool:
+        """Whether `_descend` lists a folder, `.bidsignore` aside."""
         if parts and data_directory((*parts, name)) is not None:
             return True  # inside a data directory, every file is kept with it
         if name.startswith("."):
@@ -1005,7 +1037,7 @@ class _Walk:
         self.started = False
         self.ignore: _BidsIgnore | None = None
         self.subjects: set[str] | None = None
-        self.pruned: list[str] = []      # the folders left out, by label
+        self.pruned: list[str] = []      # the folders left out: label, ignore
 
 
 def _above_any(metadata: list[ParsedPath], directory: str) -> bool:
@@ -1021,6 +1053,11 @@ class _Plan:
     rest, and applies the filters on names and on `participants.tsv`.
     `reads` is then the sidecars to read for the sidecar filters, and
     `finish` takes their contents and returns the kept paths, sorted.
+
+    A file `.bidsignore` names is still sorted: an ignored data file is
+    never selected, but metadata still applies to it; ignored metadata
+    still applies to the data files it describes, and comes along with
+    them, but is never kept on its own (rule 3).
     """
 
     def __init__(
@@ -1034,36 +1071,47 @@ class _Plan:
         self.subjects = subjects
         self.data: dict[str, ParsedPath] = {}     # data item -> how it parses
         self.members: dict[str, list[str]] = {}   # data item -> its files
+        self.ignored: dict[str, list[str]] = {}   # ... and its ignored files
         self.meta: list[ParsedPath] = []
+        self.ignored_meta: set[str] = set()
         self.kept: set[str] = set()
         self.ignore = ignore
+        self.scopes = _Scopes()
         self.listed = list(paths)
         for path in self.listed:
             self._sort(path)
         self.passed = {
             item for item, d in self.data.items()
-            if f._passes(d) and self._has_subject(d)
+            if self.members.get(item) and f._passes(d) and self._has_subject(d)
         }
         self.chains: dict[str, tuple[str, ...]] = {}
         if f.sidecar:
             self.chains = _sidecar_chains(
-                [self.data[item] for item in self.passed], self.meta
+                [self.data[item] for item in self.passed], self.meta,
+                self.scopes,
             )
         self.reads = {rel for chain in self.chains.values() for rel in chain}
 
     def _sort(self, path: str) -> None:
-        kind, name = _classify(path, self.ignore, self.filter.folders)
-        if kind == "keep":
+        self.scopes.note(path)
+        kind, name = _classify(path, self.filter.folders)
+        ignored = self.ignore is not None and self.ignore.ignores(path)
+        if kind == "keep" and not ignored:
             self.kept.add(path)
         elif kind == "meta":
             self.meta.append(name)  # type: ignore[arg-type]
+            if ignored:
+                self.ignored_meta.add(path)
         elif kind == "data":
             self.data.setdefault(name.item, name)  # type: ignore[union-attr]
-            self.members.setdefault(name.item, []).append(path)  # type: ignore
+            files = self.ignored if ignored else self.members
+            files.setdefault(name.item, []).append(path)  # type: ignore
 
     def _kept_alone(self, m: ParsedPath) -> bool:
         """Whether a metadata file that applies to no data file is kept."""
         f = self.filter
+        if m.path in self.ignored_meta:
+            return False
         if not all(test.lenient for test in f.sidecar.values()):
             return False
         return f._passes(m, partial=True) and self._has_subject(m, partial=True)
@@ -1077,10 +1125,10 @@ class _Plan:
         """
         if not pruned:
             return []
-        all_data = _by_directory(self.data.values())
+        all_data = self.scopes.index(self.data.values())
         candidates = [
             m for m in self.meta
-            if not _applies(m, all_data) and self._kept_alone(m)
+            if not self.scopes.applies(m, all_data) and self._kept_alone(m)
         ]
         return [m for m in candidates
                 if any(_above_any([m], p) for p in pruned)]
@@ -1088,13 +1136,23 @@ class _Plan:
     def settle(
         self, unsure: list[ParsedPath], paths: Iterable[str]
     ) -> list[ParsedPath]:
-        """Return the files of `unsure` that apply to no data file of `paths`."""
+        """Return the files of `unsure` that apply to no data file of `paths`.
+
+        `paths` are the files of one more directory (or level) of the walk,
+        listed after every directory above them.
+        """
+        paths = list(paths)
+        for path in paths:
+            self.scopes.note(path)
         for path in paths:
             if not unsure:
                 break
-            kind, d = _classify(path, self.ignore, self.filter.folders)
+            kind, d = _classify(path, self.filter.folders)
             if kind == "data":
-                unsure = [m for m in unsure if not applies_to(m, d)]
+                unsure = [
+                    m for m in unsure
+                    if not self.scopes.applies_to(m, d)  # type: ignore[arg-type]
+                ]
         return unsure
 
     def _has_subject(self, name: ParsedPath, partial: bool = False) -> bool:
@@ -1121,20 +1179,23 @@ class _Plan:
             }
         for item in passed:
             kept.update(self.members[item])
-        kept_data = _by_directory(self.data[item] for item in passed)
-        all_data = _by_directory(self.data.values())
+        scopes = self.scopes
+        kept_data = scopes.index(self.data[item] for item in passed)
+        all_data = scopes.index(self.data.values())
 
         # A data file that is also a companion (`physio.tsv.gz` of a run)
-        # follows the data it describes, as its metadata does.
+        # follows the data it describes, as its metadata does, even when
+        # `.bidsignore` names it.
         for item, d in self.data.items():
             if (
                 item not in passed and d.suffix in COMPANION_SUFFIXES
-                and _applies(d, kept_data)
+                and scopes.applies(d, kept_data)
             ):
-                kept.update(self.members[item])
+                kept.update(self.members.get(item, ()))
+                kept.update(self.ignored.get(item, ()))
         for m in self.meta:
-            if _applies(m, kept_data) or (
-                not _applies(m, all_data) and self._kept_alone(m)
+            if scopes.applies(m, kept_data) or (
+                not scopes.applies(m, all_data) and self._kept_alone(m)
             ):
                 kept.add(m.path)
 
@@ -1144,15 +1205,16 @@ class _Plan:
 
 
 def _classify(
-    path: str, ignore: _BidsIgnore | None, folders: frozenset[str]
+    path: str, folders: frozenset[str]
 ) -> tuple[str, ParsedPath | None]:
     """Sort a relative path into what the selection makes of it.
 
     `("data", parsed)` or `("meta", parsed)`; `("keep", None)` for a file
-    kept whatever the filters, `("skip", None)` for one never kept.
+    kept whatever the filters, `("skip", None)` for one never kept. Whether
+    `.bidsignore` names the file is not asked here.
     """
     parts = PurePosixPath(path).parts
-    if not parts or (ignore is not None and ignore.ignores(path)):
+    if not parts:
         return "skip", None
     if path in TOP_LEVEL_FILES:
         return "keep", None
@@ -1178,15 +1240,89 @@ def _classify(
     return "skip", None
 
 
+class _Scopes:
+    """Where BIDS inheritance reaches, from the `dataset_description.json`s.
+
+    A metadata file applies to a data file only from the data file's own
+    directory up to its dataset root: the nearest of those directories that
+    holds a `dataset_description.json`. Without one, only the data file's
+    own directory counts. This is the search `path.sidecars` makes, on the
+    listing instead of the store.
+    """
+
+    def __init__(self) -> None:
+        self.roots: set[PurePosixPath] = set()
+        self._cache: dict[PurePosixPath, tuple] = {}
+
+    def note(self, path: str) -> None:
+        """Record a listed file, if it is a `dataset_description.json`."""
+        if path.rpartition("/")[2] == _DESCRIPTION:
+            self.roots.add(PurePosixPath(path).parent)
+            self._cache.clear()
+
+    def scope(
+        self, directory: PurePosixPath
+    ) -> tuple[tuple[PurePosixPath, ...], PurePosixPath | None]:
+        """Return the directories inheritance reaches from `directory`.
+
+        Nearest first, with the dataset root they end at (`None` without
+        one).
+        """
+        if directory not in self._cache:
+            reached = []
+            found = None
+            for parent in (directory, *directory.parents):
+                reached.append(parent)
+                if parent in self.roots:
+                    found = parent
+                    break
+            self._cache[directory] = (
+                (tuple(reached), found) if found is not None
+                else ((directory,), None)
+            )
+        return self._cache[directory]
+
+    def applies_to(
+        self, meta: ParsedPath, data: ParsedPath, companions: bool = True
+    ) -> bool:
+        """Whether `meta` applies to `data` within the data file's dataset."""
+        dirs, root = self.scope(data.directory)
+        if meta.directory not in dirs:
+            return False
+        if root is not None and root.parts:
+            # Judged relative to the dataset root, as `path.sidecars` does.
+            meta, data = _rerooted(meta, root), _rerooted(data, root)
+        return applies_to(meta, data, companions=companions)
+
+    def index(self, data: Iterable[ParsedPath]) -> dict:
+        """Index data items by every directory inheritance reaches them from."""
+        by_dir: dict[PurePosixPath, list[ParsedPath]] = {}
+        for d in data:
+            for parent in self.scope(d.directory)[0]:
+                by_dir.setdefault(parent, []).append(d)
+        return by_dir
+
+    def applies(self, meta: ParsedPath, by_dir: dict) -> bool:
+        """Whether `meta` applies to a data item of an `index`."""
+        return any(
+            self.applies_to(meta, d) for d in by_dir.get(meta.directory, ())
+        )
+
+
+def _rerooted(name: ParsedPath, root: PurePosixPath) -> ParsedPath:
+    """Parse a path again, relative to a dataset root below the listing's."""
+    return parse_path(PurePosixPath(name.path).relative_to(root).as_posix())
+
+
 def _sidecar_chains(
-    data: Iterable[ParsedPath], meta: Iterable[ParsedPath]
+    data: Iterable[ParsedPath], meta: Iterable[ParsedPath], scopes: _Scopes
 ) -> dict[str, tuple[str, ...]]:
     """Return the JSON sidecars of each data item, nearest first.
 
     The sidecars that apply to it (a `.json` with its suffix and a subset
-    of its entities, in its directory or above), as `path.sidecars` finds
-    them: nearer directories first, and within one directory the sidecars
-    with more entities.
+    of its entities, in its directory or above, up to its dataset root), as
+    `path.sidecars` finds them: nearer directories first, and within one
+    directory the sidecars with more entities.
     """
     by_dir: dict[PurePosixPath, list[ParsedPath]] = {}
     for m in meta:
@@ -1197,10 +1333,10 @@ def _sidecar_chains(
     chains = {}
     for d in data:
         chain = []
-        for directory in (d.directory, *d.directory.parents):
+        for directory in scopes.scope(d.directory)[0]:
             chain.extend(
                 m.path for m in by_dir.get(directory, ())
-                if applies_to(m, d, companions=False)
+                if scopes.applies_to(m, d, companions=False)
             )
         chains[d.item] = tuple(chain)
     return chains
@@ -1294,20 +1430,6 @@ async def _gather(
             return await call(item)
 
     return list(await asyncio.gather(*map(one, items)))
-
-
-def _by_directory(data: Iterable[ParsedPath]) -> dict:
-    """Index data items by every directory they are in, at any depth."""
-    by_dir: dict[PurePosixPath, list[ParsedPath]] = {}
-    for d in data:
-        for parent in (d.directory, *d.directory.parents):
-            by_dir.setdefault(parent, []).append(d)
-    return by_dir
-
-
-def _applies(meta: ParsedPath, by_dir: dict) -> bool:
-    """Whether `meta` applies to a data item of an index of `_by_directory`."""
-    return any(applies_to(meta, d) for d in by_dir.get(meta.directory, ()))
 
 
 def _with_directory_entities(name: ParsedPath) -> dict:

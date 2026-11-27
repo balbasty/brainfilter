@@ -320,16 +320,13 @@ lists the valid choices.
 
 ## Files the dataset ignores
 
-A dataset can declare files that are not part of it in a `.bidsignore` file
-at its root, which the BIDS validator reads with the same patterns as a
-`.gitignore`. A filter honours it: the files and folders it names are neither
-recordings nor metadata, so they are never selected, and a folder it names is
-not even listed. Lines starting with `#` are comments, a pattern ending in
-`/` names folders, a pattern containing a `/` is matched from the dataset
-root, `**` stands for any number of folders, and a pattern starting with `!`
-brings back a file that an earlier pattern left out. A dataset with the
-`.bidsignore` below keeps its notes and its scanner logs out of every
-selection.
+A dataset can name files that the BIDS validator should not check in a
+`.bidsignore` file at its root, written with the same patterns as a
+`.gitignore`. Lines starting with `#` are comments, a pattern ending in `/`
+names folders, a pattern containing a `/` is matched from the dataset root,
+`**` stands for any number of folders, and a pattern starting with `!` brings
+back a file that an earlier pattern left out. A dataset with the `.bidsignore`
+below keeps its notes and its scanner logs out of every selection.
 
 ```text
 # not part of the BIDS dataset
@@ -337,7 +334,19 @@ selection.
 sub-*/logs/
 ```
 
-`dataset_description.json` and the `.bidsignore` itself are always kept. To
+A filter reads `.bidsignore` to decide which files are recordings to select,
+and never to decide which metadata applies. A recording that it names is
+never selected, and a folder that it names is only looked into when the
+filter needs to know what the folder holds. A metadata file that it names
+still describes the recordings it applies to: an ignored sidecar, events table
+or `.bval` file counts for a filter on sidecar values, and comes along with
+the recordings it describes, exactly as `path.sidecars` finds it. An ignored
+file is never kept on its own account, though, so an ignored dataset-level
+file is left out, and so is ignored metadata that describes no kept
+recording. An ignored `participants.tsv` is still read by a filter on
+participants, and still left out of the result.
+
+`dataset_description.json` and the `.bidsignore` itself are never ignored. To
 see the files that the dataset ignores, build the filter with
 `bidsignore=False`.
 

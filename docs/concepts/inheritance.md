@@ -238,9 +238,16 @@ keyword such as `RepetitionTime=2.0`. The value it compares is the one the
 merged sidecar holds, found by the rules on this page: the nearest sidecar
 that has the field wins, so a value written once at the top of the dataset
 counts for every recording below it that does not override it. The sidecars
-are those of the listing the filter works on, and a file that the dataset's
-`.bidsignore` names is not part of that listing, so it neither describes a
-recording nor is kept with one.
+are those of the listing the filter works on, found exactly as `sidecars`
+finds them, up to the [dataset root](#the-dataset-root): the nearest folder of
+the listing that holds a `dataset_description.json`. A listing without one
+has no root, so nothing is inherited from above a recording's own folder, and
+the sidecars up there are neither read for its values nor kept with it.
+
+The dataset's `.bidsignore` decides which files are recordings to select,
+never which metadata applies. A sidecar, a table or a `.bval` file that it
+names still describes the recordings below it, still gives them its values,
+and is still kept with them; it is only never kept on its own.
 
 To see the merged values of a sidecar, rather than which files apply, read
 [Reading sidecars and tables](../tutorials/read-metadata.md). A write to
