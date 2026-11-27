@@ -126,6 +126,8 @@ convention = "numpy"
 
 [tool.ruff.lint.per-file-ignores]
 "brainfilter/tests/*.py" = ["ANN", "D"]
+# generators of the SVG artwork: long lines are SVG markup
+"tools/artwork/*.py" = ["E501"]
 
 [tool.ruff.format]
 quote-style = "double"

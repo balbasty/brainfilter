@@ -41,6 +41,9 @@ extra_css = ["stylesheets/extra.css"]
 [project.theme]
 
 language = "en"
+favicon = "images/brainfilter-icon.svg"
+# theme overrides; .icons/ holds our icons (overrides/.icons/brainfilter/)
+custom_dir = "overrides"
 
 features = [
   "content.code.copy",
@@ -84,7 +87,7 @@ toggle.name = "Switch to light mode"
 # - https://zensical.org/docs/authoring/icons-emojis/#search
 # ----------------------------------------------------------------------------
 [project.theme.icon]
-logo =  "fontawesome/solid/filter"
+logo = "brainfilter/icon"
 repo = "fontawesome/brands/github"
 
 # ----------------------------------------------------------------------------

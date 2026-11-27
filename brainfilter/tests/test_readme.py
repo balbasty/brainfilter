@@ -47,7 +47,7 @@ def _readme() -> str:
         return (checkout / "README.md").read_text(encoding="utf-8")
     meta = importlib.metadata.metadata("brainfilter")
     text = meta.get_payload() or meta.get("Description") or ""
-    assert "# brainfilter" in text, "the installed metadata holds no README"
+    assert "```python" in text, "the installed metadata holds no README"
     return text
 
 

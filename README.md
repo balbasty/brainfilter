@@ -1,4 +1,6 @@
-# brainfilter
+<h1 align="center">
+  <img src="docs/images/brainfilter-wordmark.svg" alt="brainfilter" width="400">
+</h1>
 
 Build, read and filter BIDS datasets on any storage backend.
 
