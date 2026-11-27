@@ -58,10 +58,11 @@ merged `sidecar`. A value written through a file (`path[key] = value`,
 never the file's. A value stored into a live value is not copied
 (`ds["b.json"]["Y"]["s"] = ds["a.json"]["X"]` makes the two files share
 one object, and a later change to it is written to both): copy it first
-to keep them apart. Outside a block, every read is a copy. A read-only path
-is given copies inside a block as well. Once the block has ended, a live
-column raises `RuntimeError` when it is used, and a live JSON value is a
-plain object that no longer belongs to the file.
+to keep them apart; a live column stored that way is written as the list
+it holds. Outside a block, every read is a copy. A read-only path is given
+copies inside a block as well. Once the block has ended, a live column
+raises `RuntimeError` when it is used (its `repr()` says so instead), and
+a live JSON value is a plain object that no longer belongs to the file.
 
 Inside a block, a raw write through a path to a file the block covers would
 be overwritten by the commit, or would mix with its edits, so it is refused
@@ -70,11 +71,12 @@ with `RuntimeError`: `write_text`, `write_bytes`, `open` for writing,
 member that a read-only path refuses, to a JSON or TSV file below the root,
 whether the transaction has read it yet or not, and to a directory that
 holds a file the transaction holds (one it has read or edited), apart from
-`touch`, `chmod` and `lchmod` of a directory that exists, which change it
-alone. Raw writes to other files (a `.nii.gz`, say) are allowed, and so are
-reads. `mkdir` is allowed, except where the transaction holds a file with
-content, at the path or above it, since the commit would find a directory
-in its place. The refusal holds whichever path the write goes through, and
+`touch`, `chmod` and `lchmod` of a directory that exists (on a remote
+store: one that holds a held file that existed), which change it alone.
+Raw writes to other files (a `.nii.gz`, say) are allowed, and so are reads.
+`mkdir` is allowed, except where the transaction holds a file with content,
+at the path or above it, since the commit would find a directory in its
+place. The refusal holds whichever path the write goes through, and
 from every thread and task while the transaction is open. The wrapped
 driver object and the backend's own handles are not checked.
 
@@ -88,7 +90,14 @@ from a task started outside the block, and, once the block has closed, from
 a task that outlived it or during its commit. A write that started before
 the block opened raises the same way if the block covers the file by the
 time the write holds it; if the write got there first, the block reads the
-file it wrote. Transactions on overlapping trees cannot be nested, nor be
+file it wrote. That ordering holds within one family (and, for the async
+family, one event loop), whose writes and blocks take one lock per file.
+Across them (a sync thread and an async block, two event loops, or a worker
+thread of an async block and a task of its loop), whichever comes second
+raises `RuntimeError` instead, and neither write is lost: the write raises,
+with nothing written, if the block has already read the file, and the
+block's first use of the file raises while the write is being made.
+Transactions on overlapping trees cannot be nested, nor be
 open at once in two threads or tasks, whether sync or async; on disjoint
 trees they can. A file is known by its
 location: two names for one file (`sub-01/../T1w.json` and `T1w.json`, or a
@@ -105,7 +114,9 @@ Before the first file is written, every changed file is serialized, so a
 value that cannot be written (a tab in a TSV cell, a value JSON cannot hold
 set inside a live value) raises its error with nothing written; the message
 names the file, and in a JSON file the key that holds the value
-(`T1w.json: Extra.Coils[0]: ...`). On a local disk, a directory found where
+(`T1w.json: Extra.Coils[0]: ...`). Two changed files where one is below the
+other (`a.json` and `a.json/b.json`) raise `NotADirectoryError` there too,
+on every store. On a local disk, a directory found where
 a file goes, or a file where its directory goes, raises too (an
 `IsADirectoryError` or `NotADirectoryError`), with nothing written. Then
 the files are written one at a time, in the order the transaction first
@@ -230,6 +241,17 @@ _WRITING_THROUGH: ContextVar[bool] = ContextVar(
     "brainfilter_writing_through", default=False
 )
 
+# `location -> how many`: the files being read, changed and written through
+# right now, outside every block (see `marking_through`). Guarded by
+# `_REGISTRY_LOCK`, as is what each transaction has claimed
+# (`_Buffer.claimed`).
+_THROUGH: dict[object, int] = {}
+
+# Held while a live column is put in step with its table or ended, so that
+# a change finishing as its block ends does not make an ended column live.
+# A leaf lock: nothing else is taken while it is held.
+LIVE_LOCK = threading.Lock()
+
 # The extensions of the files a transaction holds (JSON and TSV).
 _CONTENT_EXTENSIONS = (".json", ".tsv")
 
@@ -239,11 +261,46 @@ _KEEPS_FILES = frozenset({"touch", "chmod", "lchmod"})
 
 
 @contextlib.contextmanager
+def marking_through(path: object) -> Iterator[None]:
+    """Mark the file at `path` as being written through, for a block.
+
+    Used around the read, change and write of one file outside every
+    transaction, under the file's lock, once `active_for(path, write=True)`
+    has passed. A transaction in this family and event loop reads the file
+    under the same lock, so after the write. One that reads through another
+    lock (the other family, another event loop, a worker thread of an async
+    block) may have opened meanwhile, and neither may lose the other's
+    write: if one has already claimed the file (see
+    `_TransactionBase._claim`), the write raises here, before it reads or
+    writes anything, since the commit would overwrite it; one that claims
+    the file while it is marked raises instead.
+    """
+    location = _location(path)
+    with _REGISTRY_LOCK:
+        holder = next(
+            (tx for tx in _REGISTRY if location in tx._buffer.claimed), None
+        )
+        if holder is None:
+            _THROUGH[location] = _THROUGH.get(location, 0) + 1
+    if holder is not None:
+        raise holder._elsewhere_error(path)
+    try:
+        yield
+    finally:
+        with _REGISTRY_LOCK:
+            count = _THROUGH[location] - 1
+            if count:
+                _THROUGH[location] = count
+            else:
+                del _THROUGH[location]
+
+
+@contextlib.contextmanager
 def writing_through() -> Iterator[None]:
     """Mark the writes of a block as a write through, not raw writes.
 
-    Used around the write of one file, outside every transaction, once
-    `active_for(path, write=True)` has been checked under the file's lock.
+    Used around the write of one file, outside every transaction, inside
+    `marking_through(path)`.
     """
     token = _WRITING_THROUGH.set(True)
     try:
@@ -543,7 +600,12 @@ class _Buffer:
         # files that existed when held are at it or below it`, and the
         # files that did not exist (which count once they have content).
         self._below: dict[object, int] = {}
-        self._missing: dict[object, _Entry] = {}
+        # `location -> the held files that did not exist, at it or below it`.
+        self._missing_below: dict[object, list[_Entry]] = {}
+        # The locations the transaction has read, or begun to read: a write
+        # through to one raises (see `marking_through`). Changed and read
+        # under `_REGISTRY_LOCK`.
+        self.claimed: set[object] = set()
         # Tasks run in a thread with `asyncio.to_thread` join the block, so
         # two threads may hold a file at once.
         self._lock = threading.Lock()
@@ -585,13 +647,13 @@ class _Buffer:
         return entry
 
     def _index(self, location: tuple[str, Any], entry: _Entry) -> None:
-        if entry.missing:
-            self._missing[location] = entry
-            return
         kind, place = location
         for at in (place, *place.parents):
             key = (kind, at)
-            self._below[key] = self._below.get(key, 0) + 1
+            if entry.missing:
+                self._missing_below.setdefault(key, []).append(entry)
+            else:
+                self._below[key] = self._below.get(key, 0) + 1
 
     def exists_below(self, location: tuple[str, Any]) -> bool:
         """Whether a held file that existed when held is at or below it."""
@@ -602,8 +664,8 @@ class _Buffer:
         if self._below.get(location):
             return True
         return any(
-            _within(held, location) and not entry.absent()
-            for held, entry in list(self._missing.items())
+            not entry.absent()
+            for entry in list(self._missing_below.get(location, ()))
         )
 
     def file_at_or_above(
@@ -659,15 +721,16 @@ class _Buffer:
 
     def end_live(self) -> None:
         """End every live column read from a held table (the block ended)."""
-        for entry in list(self._entries.values()):
-            for column in list((entry.live or {}).values()):
-                column._end()
+        with LIVE_LOCK:
+            for entry in list(self._entries.values()):
+                for column in list((entry.live or {}).values()):
+                    column._end()
 
     def clear(self) -> None:
         with self._lock:
             self._entries.clear()
             self._below.clear()
-            self._missing.clear()
+            self._missing_below.clear()
 
 
 def _serializable(value: object) -> bool:
@@ -860,16 +923,43 @@ class _TransactionBase:
     def _close(self) -> None:
         _ACTIVE.set(tuple(t for t in _ACTIVE.get() if t is not self))
         self._state = _COMMITTING
-        # A live column holds the block's values; once the block has ended
-        # they are no longer the file's, so it is not read or written.
-        self._buffer.end_live()
+
+    def _plan(self) -> list:
+        """Serialize the changed files, then end the live columns.
+
+        A live column stored into a live JSON value is written as the list
+        it holds, so the files are serialized first. Once the block has
+        ended, a live column holds values that are no longer the file's, so
+        it is not read or written.
+        """
+        try:
+            plan = self._buffer.plan()
+        finally:
+            self._buffer.end_live()
+        self._check_plan(plan)
+        return plan
 
     def _check_plan(self, plan: list) -> None:
-        """Refuse, before the first write, a local file that cannot be written.
+        """Refuse, before the first write, a file that cannot be written.
 
-        A directory at the file's place, or a file at its parent's, would
-        stop the commit partway; the error raises with nothing written.
+        Two files of the plan where one is below the other cannot both be
+        written (anywhere: the check is on their names). On a local disk, a
+        directory at a file's place, or a file at its parent's, would stop
+        the commit partway too. Each error raises with nothing written.
         """
+        planned = {_location(path): path for path, _ in plan}
+        for (kind, place), path in planned.items():
+            for parent in place.parents:
+                above = planned.get((kind, parent))
+                if above is not None:
+                    raise NotADirectoryError(
+                        errno.ENOTDIR,
+                        f"cannot commit the transaction on "
+                        f"{str(self._root)!r}, nothing was written: it gives "
+                        f"content to the file {str(above)!r} and to a file "
+                        "below it, which would need it to be a directory",
+                        str(path),
+                    )
         for path, _ in plan:
             if not path.is_local():
                 continue
@@ -899,10 +989,35 @@ class _TransactionBase:
 
     def _finish(self) -> None:
         """Drop the held files, and let other contexts write the files."""
+        self._buffer.end_live()
         self._buffer.clear()
         self._state = _DONE
         with _REGISTRY_LOCK:
             _REGISTRY[:] = [t for t in _REGISTRY if t is not self]
+            self._buffer.claimed.clear()
+
+    def _claim(self, path: object) -> None:
+        """Claim the file at `path`, before this transaction first reads it.
+
+        Raises `RuntimeError` if the file is being written through outside
+        every block (see `marking_through`): the block would hold it as it
+        was before that write, and its commit would undo the write.
+        """
+        location = _location(path)
+        with _REGISTRY_LOCK:
+            busy = location in _THROUGH
+            if not busy:
+                self._buffer.claimed.add(location)
+        if busy:
+            raise RuntimeError(
+                f"cannot read {str(path)!r} into the transaction on "
+                f"{str(self._root)!r}: it is being written outside the block "
+                "at this moment, from another thread or task, so the block "
+                "could start from the file as it was before that write, and "
+                "its commit would undo it; make that write inside the block "
+                "(a task started there shares it), or let it finish before "
+                "the block opens"
+            )
 
     def _closed_error(self, path: object) -> RuntimeError:
         when = (
@@ -935,8 +1050,9 @@ class _TransactionBase:
 
         `"file"`: a JSON or TSV file below the root (held yet or not);
         `"directory"`: a directory that holds a file the transaction holds
-        (not said to `touch`, `chmod` or `lchmod` when one of those files
-        existed, so that the path is a directory, which they change alone);
+        (not said to `touch`, `chmod` or `lchmod` when the path is known
+        to be a directory, which they change alone: one of those files
+        existed, or the path is a directory on a local disk);
         `"pending"`, said to `mkdir` alone: a file the transaction holds is
         there, or above it, so the commit would find a directory there.
         Each check takes time in proportion to the depth of `path`.
@@ -951,8 +1067,12 @@ class _TransactionBase:
             _within(location, self._location)
         ):
             return "file"
-        if member in _KEEPS_FILES and self._buffer.exists_below(location):
-            # A directory, since a file below it existed: changed alone.
+        if member in _KEEPS_FILES and (
+            self._buffer.exists_below(location)
+            or (location[0] == "local" and os.path.isdir(location[1]))
+        ):
+            # A directory (a file below it existed, or it is one on a local
+            # disk): changed alone.
             return None
         if self._buffer.holds_below(location):
             return "directory"
@@ -1094,8 +1214,7 @@ class Transaction(_TransactionBase):
             self._finish()
 
     def _commit(self) -> None:
-        plan = self._buffer.plan()
-        self._check_plan(plan)
+        plan = self._plan()
         token = _COMMITTING_HERE.set(self)
         try:
             for index, (path, data) in enumerate(plan):
@@ -1145,8 +1264,7 @@ class AsyncTransaction(_TransactionBase):
             self._finish()
 
     async def _commit(self) -> None:
-        plan = self._buffer.plan()
-        self._check_plan(plan)
+        plan = self._plan()
         token = _COMMITTING_HERE.set(self)
         try:
             for index, (path, data) in enumerate(plan):

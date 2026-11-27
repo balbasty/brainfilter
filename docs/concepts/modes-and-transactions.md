@@ -223,15 +223,19 @@ shows. A value you assign to a file, as in `sidecar[key] = value`, `update()`,
 `write()` or `table[column] = values`, is copied in, so your own object never
 becomes part of the file. A value you store inside one of the transaction's own
 values is not: after `ds["b.json"]["Y"]["s"] = ds["a.json"]["X"]`, the two files
-share one object, and a later change to it in the block is written to both. Take a copy (`copy.deepcopy`) to keep them apart. A read-only path is given
-copies inside a block as well, so it still cannot change anything.
+share one object, and a later change to it in the block is written to both. Take
+a copy (`copy.deepcopy`) to keep them apart. A live column stored that way is
+written as the list it holds. A read-only path is given copies inside a block as
+well, so it still cannot change anything.
 
 A value you keep after the block has ended no longer belongs to any file. A JSON
 value is then a plain object: change it, and nothing is saved. A live column
 raises `RuntimeError` when it is used at all, since its values are no longer the
 file's, whether the block committed or was discarded; read the column again.
 Inside the block, a column that is dropped raises `KeyError` until it is set
-again. A value that JSON cannot hold, stored inside a live value, fails when the
+again. Either way, its `repr()` says what happened instead of raising, so a value
+that holds it can still be printed. A live column compares as a list does, so
+`column == [30.0, None]` is true and `column == (30.0, None)` is not. A value that JSON cannot hold, stored inside a live value, fails when the
 block ends, with an error that names the file and the key, and nothing written.
 
 In the async family the same holds for `await sidecar.get(key)` and
@@ -271,7 +275,13 @@ A write to a covered file from any of the last three is refused with a
 `RuntimeError`, because it could otherwise be lost or written ahead of the
 transaction and then overwritten by its commit. So does a write that started
 before the block opened, if the block covers the file by the time the write
-reaches it; one that got there first is simply read by the block.
+reaches it; one that got there first is simply read by the block. That order is
+kept when the write and the block go through the same family, and in the async
+family the same event loop. Across them, for example a write from a plain thread
+while an `async with` block runs, or a write in one event loop while a block is
+open in another, whichever comes second raises `RuntimeError`: the write, with
+nothing written, if the block has already read the file, or the block's first use
+of the file, while the write is being made. Neither write is lost.
 
 ```pycon
 >>> import threading
@@ -310,9 +320,10 @@ directory cannot lose an edit, except where the transaction holds a file (one
 with content, at that path or above it), where the commit would find a
 directory in its place. A directory that holds a file the transaction holds, one
 it has read or edited, cannot be removed, renamed or replaced either, since the
-commit could write that file back; `touch` and `chmod` of a directory that
-exists change it alone, so they are allowed, and so is a `copy_into` or `download_to` into it of
-a file the transaction does not cover.
+commit could write that file back. `touch` and `chmod` of a directory that
+exists change it alone, so they are allowed; on a remote store, where a directory
+is only a prefix, that means one that holds a file the transaction read. So is a
+`copy_into` or `download_to` into it of a file the transaction does not cover.
 
 ```pycon
 >>> with writer:
@@ -352,7 +363,9 @@ error is a `CommitError` from bagof-paths.
 
 Before the first file of a commit is replaced, every changed file is
 serialized. Content that cannot be written, such as a tab inside a TSV cell or an
-infinite float, raises its error at that point, with nothing written. This
+infinite float, raises its error at that point, with nothing written. So do two
+changed files where one is below the other, such as `a.json` and `a.json/b.json`,
+which raise `NotADirectoryError` on every store. This
 catches the common failures, which are about the data, before the risky part
 begins.
 

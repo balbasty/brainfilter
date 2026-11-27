@@ -290,7 +290,8 @@ wrong subject list
 The same is true when the content cannot be written. Before the first file is
 replaced, every changed file is turned into its final text. A value that cannot
 be written, such as a tab inside a TSV cell, fails at that point with an error
-that names the file, and then nothing has been written.
+that names the file, and then nothing has been written. So do two files where one
+would have to be the directory of the other.
 
 ```pycon
 >>> with ds:

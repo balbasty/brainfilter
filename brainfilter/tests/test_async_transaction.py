@@ -958,3 +958,233 @@ async def test_an_async_write_through_a_block_got_ahead_of_raises(
     assert "open in another thread or task" in message
     assert "staged()" not in message
     assert await on_disk(ds / "T1w.json") == {**FILES["T1w.json"], "Inside": 1}
+
+
+# -- a write through and a block that take different locks -----------------------
+#
+# A write through holds its file's lock for its family (sync: one per
+# process; async: one per event loop), and a block reads a file under the
+# lock of the family it reads through. Across families and loops the two
+# take different locks, so whichever comes second must raise: the write if
+# the block has already read the file, the block if it reads the file while
+# the write is being made. Neither may be lost.
+
+def _is_writer():
+    import threading
+
+    if threading.current_thread().name == "writer":
+        return True
+    try:
+        task = asyncio.current_task()
+    except RuntimeError:
+        return False
+    return task is not None and task.get_name() == "writer"
+
+
+class _Pause:
+    """Pause the write through made by "writer" (a thread or a task).
+
+    `at="write"`: as it writes the file (it has read and changed it);
+    `at="check"`: once it has checked that no block covers the file, before
+    it reads it.
+    """
+
+    def __init__(self, monkeypatch, at):
+        import contextlib
+        import threading
+
+        from brainfilter import transaction as T
+
+        self.reached, self.go = threading.Event(), threading.Event()
+        if at == "write":
+            real, areal = T.write_file, T.awrite_file
+
+            def write_file(path, data):
+                if _is_writer():
+                    self.reached.set()
+                    assert self.go.wait(5)
+                real(path, data)
+
+            async def awrite_file(path, data):
+                if _is_writer():
+                    self.reached.set()
+                    for _ in range(1000):           # without blocking a loop
+                        if self.go.is_set():
+                            break
+                        await asyncio.sleep(0.005)
+                    assert self.go.is_set()
+                await areal(path, data)
+
+            monkeypatch.setattr(T, "write_file", write_file)
+            monkeypatch.setattr(T, "awrite_file", awrite_file)
+        else:
+            real_mark = T.marking_through
+
+            @contextlib.contextmanager
+            def marking_through(path):
+                if _is_writer():                    # its own thread: blocks
+                    self.reached.set()
+                    assert self.go.wait(5)
+                with real_mark(path):
+                    yield
+
+            monkeypatch.setattr(T, "marking_through", marking_through)
+
+
+_ACROSS = ["sync writer, async block", "two event loops",
+           "async writer, sync block", "a block's worker thread"]
+
+
+@pytest.mark.parametrize("scenario", _ACROSS)
+def test_a_write_through_being_made_makes_a_block_raise(
+    tmp_path, monkeypatch, scenario
+):
+    import threading
+
+    root = str(tmp_path / "ds")
+    _populate(BidsPath(root))
+    ds, ads = BidsPath(root, mode="w"), AsyncBidsPath(root, mode="w")
+    pause = _Pause(monkeypatch, at="write")
+    errors = []
+
+    def sync_writer():
+        try:
+            ds["T1w.json"]["Outside"] = 1
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+
+    def async_writer():
+        try:
+            asyncio.run((ads / "T1w.json").set("Outside", 1))
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+
+    refused = "is being written outside the block at this moment"
+    if scenario == "a block's worker thread":
+        async def main():
+            writer = asyncio.create_task((ads / "T1w.json").set("Outside", 1),
+                                         name="writer")
+            assert await asyncio.to_thread(pause.reached.wait, 5)
+            with pytest.raises(RuntimeError, match=refused):
+                async with ads:
+                    await asyncio.to_thread(
+                        (ds / "T1w.json").__setitem__, "Inside", 1
+                    )
+            pause.go.set()
+            await writer
+
+        asyncio.run(main())
+    else:
+        target = (sync_writer if scenario == "sync writer, async block"
+                  else async_writer)
+        thread = threading.Thread(target=target, name="writer")
+        thread.start()
+        try:
+            assert pause.reached.wait(5)
+            with pytest.raises(RuntimeError, match=refused):
+                if scenario == "async writer, sync block":
+                    with ds:
+                        ds["T1w.json"]["Inside"] = 1
+                else:
+                    async def block():
+                        async with ads:
+                            await (ads / "T1w.json").set("Inside", 1)
+
+                    asyncio.run(block())
+        finally:
+            pause.go.set()
+            thread.join(10)
+        assert not thread.is_alive()
+    assert errors == []
+    assert json.loads((ds / "T1w.json").read_text()) == {
+        **FILES["T1w.json"], "Outside": 1
+    }
+
+
+@pytest.mark.parametrize("scenario", _ACROSS)
+def test_a_write_through_after_a_block_read_the_file_raises(
+    tmp_path, monkeypatch, scenario
+):
+    import contextvars
+    import threading
+
+    root = str(tmp_path / "ds")
+    _populate(BidsPath(root))
+    ds, ads = BidsPath(root, mode="w"), AsyncBidsPath(root, mode="w")
+    errors = []
+    elsewhere = "open in another thread or task"
+    if scenario == "a block's worker thread":
+        # One event loop: the write is a task of the loop the block runs
+        # on, started outside the block, and the block's worker reads first.
+        async def main():
+            start = asyncio.Event()
+
+            async def write():
+                await start.wait()
+                await (ads / "T1w.json").set("Outside", 1)
+
+            writer = contextvars.Context().run(asyncio.ensure_future, write())
+            async with ads:
+                await asyncio.to_thread(
+                    (ds / "T1w.json").__setitem__, "Inside", 1
+                )
+                start.set()
+                with pytest.raises(RuntimeError, match=elsewhere):
+                    await writer
+
+        asyncio.run(main())
+    else:
+        # The write has checked that no block covers the file; the block
+        # then opens and reads it before the write reads it.
+        pause = _Pause(monkeypatch, at="check")
+
+        def sync_writer():
+            try:
+                ds["T1w.json"]["Outside"] = 1
+            except Exception as error:  # noqa: BLE001
+                errors.append(error)
+
+        def async_writer():
+            try:
+                asyncio.run((ads / "T1w.json").set("Outside", 1))
+            except Exception as error:  # noqa: BLE001
+                errors.append(error)
+
+        target = (sync_writer if scenario == "sync writer, async block"
+                  else async_writer)
+        thread = threading.Thread(target=target, name="writer")
+        thread.start()
+        try:
+            assert pause.reached.wait(5)
+            if scenario == "async writer, sync block":
+                with ds:
+                    ds["T1w.json"]["Inside"] = 1        # read first
+                    pause.go.set()
+                    thread.join(10)
+            else:
+                async def block():
+                    async with ads:
+                        await (ads / "T1w.json").set("Inside", 1)
+                        pause.go.set()
+                        await asyncio.to_thread(thread.join, 10)
+
+                asyncio.run(block())
+        finally:
+            pause.go.set()
+            thread.join(10)
+        assert not thread.is_alive()
+        assert len(errors) == 1 and isinstance(errors[0], RuntimeError)
+        assert elsewhere in str(errors[0])
+    assert json.loads((ds / "T1w.json").read_text()) == {
+        **FILES["T1w.json"], "Inside": 1
+    }
+
+
+async def test_an_async_live_column_stored_in_a_live_json_value(ds):
+    await (ds / "T1w.json").set("Extra", {})
+    async with ds:
+        ages = await (ds / "participants.tsv").get("age")
+        extra = await (ds / "T1w.json").get("Extra")
+        extra["ages"] = ages                        # not copied: shared
+        ages[0] = 31
+    assert (await on_disk(ds / "T1w.json"))["Extra"] == {"ages": [31, None]}

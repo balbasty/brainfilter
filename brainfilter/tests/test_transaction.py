@@ -1318,12 +1318,16 @@ def test_a_live_column(ds):
             assert pool.submit(lambda: sex[0]).result() == "F"   # a read
         assert sex == ["F", "M"]
     for use in (lambda: sex[0], lambda: list(sex), lambda: len(sex),
-                lambda: repr(sex), lambda: sex == ["F", "M"],
+                lambda: bool(sex), lambda: sex == ["F", "M"],
                 lambda: sex + [1], lambda: sex.copy(), lambda: sorted(sex)):
         with pytest.raises(RuntimeError, match="has already closed"):
             use()
     with pytest.raises(RuntimeError, match="has already closed"):
         sex[0] = "x"
+    # printing it, or a value that holds it, says what it is
+    assert repr(sex) == (f"<column 'sex' of {str(table)!r}: read in a "
+                         "transaction that has ended>")
+    assert repr({"sex": sex}) == f"{{'sex': {sex!r}}}"
     assert table.read_text() == PARTICIPANTS
 
 
@@ -1337,9 +1341,13 @@ def test_a_live_column_follows_the_table(ds):
             table["sex"] = ["F"]                    # raises: put back
         assert sex == ["M", "M"]
         del table["sex"]                            # dropped: KeyError
-        for use in (lambda: sex[0], lambda: len(sex), lambda: list(sex)):
+        for use in (lambda: sex[0], lambda: len(sex), lambda: list(sex),
+                    lambda: bool(sex), lambda: sex == []):
             with pytest.raises(KeyError):
                 use()
+        assert repr(sex) == (f"<column 'sex' of {str(table)!r}: the table "
+                             "no longer has this column>")
+        assert "no longer has" in str({"sex": sex})  # does not raise
         with pytest.raises(KeyError):
             sex[0] = "F"
         table["sex"] = ["F", "F"]                   # back: the file's column
@@ -1368,6 +1376,66 @@ def test_a_live_column_assigned_into_json_is_a_copy(ds):
     assert ds["participants.tsv"].read_text() == PARTICIPANTS.replace(
         "30", "99"
     )
+
+
+def test_a_live_column_stored_in_a_live_json_value_is_written(ds):
+    ds["T1w.json"]["Extra"] = {}
+    with ds:
+        ages = ds["participants.tsv"]["age"]
+        ds["T1w.json"]["Extra"]["ages"] = ages      # not copied: shared
+        ages[0] = 31
+    assert on_disk(ds / "T1w.json")["Extra"] == {"ages": [31, None]}
+    assert ds["participants.tsv"].read_text() == PARTICIPANTS.replace(
+        "30", "31"
+    )
+    with pytest.raises(RuntimeError, match="has already closed"):
+        list(ages)                                  # ended once written
+
+
+def test_a_change_that_ends_after_its_block_does_not_revive_a_column(
+    local_ds, monkeypatch
+):
+    import contextvars
+    import threading
+
+    from brainfilter import transaction as T
+
+    ds = local_ds
+    table = ds / "participants.tsv"
+    reached, go = threading.Event(), threading.Event()
+    real = T._Entry.snapshot
+
+    def snapshot(self):
+        if threading.current_thread().name == "late":
+            reached.set()
+            assert go.wait(5)       # the block ends meanwhile
+        return real(self)
+
+    monkeypatch.setattr(T._Entry, "snapshot", snapshot)
+    errors = []
+
+    def late():
+        try:
+            table["age"] = [1, 2]
+        except Exception as error:  # noqa: BLE001
+            errors.append(error)
+
+    with ds:
+        ages = table["age"]
+        # a worker that shares the block, as `asyncio.to_thread` does
+        context = contextvars.copy_context()
+        thread = threading.Thread(target=context.run, args=(late,),
+                                  name="late")
+        thread.start()
+        assert reached.wait(5)
+    go.set()
+    thread.join(10)
+    assert not thread.is_alive() and errors == []
+    with pytest.raises(RuntimeError, match="has already closed"):
+        list(ages)
+    with pytest.raises(RuntimeError, match="has already closed"):
+        ages[0] = 5
+    assert table.read_text() == PARTICIPANTS
 
 
 def test_a_live_column_after_a_block_that_raised(ds):
@@ -1566,7 +1634,12 @@ def test_a_raw_write_check_does_not_scan_the_held_files(local_ds):
 
 def test_touch_and_chmod_of_a_directory_holding_edits_are_allowed(local_ds):
     ds = local_ds
+    (ds / "sub-05").mkdir()
     with ds:
+        # a directory that exists, holding only a file the block creates
+        (ds / "sub-05" / "sub-05_T1w.json").write({"New": 5})
+        (ds / "sub-05").touch()
+        (ds / "sub-05").chmod(0o755)
         ds["sub-01"]["sub-01_T1w.json"]["Inside"] = 1
         (ds / "sub-01").touch()
         (ds / "sub-01").chmod(0o755)
@@ -1579,6 +1652,33 @@ def test_touch_and_chmod_of_a_directory_holding_edits_are_allowed(local_ds):
             (ds / "sub-09").touch()
     assert on_disk(ds / "sub-01" / "sub-01_T1w.json")["Inside"] == 1
     assert on_disk(ds / "sub-09" / "sub-09_T1w.json") == {"New": 1}
+    assert on_disk(ds / "sub-05" / "sub-05_T1w.json") == {"New": 5}
+
+
+def test_a_raw_write_check_does_not_scan_the_new_files(local_ds, monkeypatch):
+    from brainfilter import transaction as T
+
+    ds = local_ds
+    count = 300
+    checked = []
+    absent, within = T._Entry.absent, T._within
+    with ds:
+        for i in range(count):
+            (ds / f"sub-{i:04d}" / f"sub-{i:04d}_T1w.json")["New"] = i
+        monkeypatch.setattr(T._Entry, "absent",
+                            lambda self: checked.append(self) or absent(self))
+        monkeypatch.setattr(T, "_within",
+                            lambda *places: checked.append(places)
+                            or within(*places))
+        for i in range(count):
+            directory = ds / f"sub-{i:04d}"
+            directory.mkdir(exist_ok=True)
+            (directory / f"sub-{i:04d}_T1w.nii.gz").write_bytes(b"x")
+        # each check looked at the new files below its own path (none),
+        # not at every new file the block holds (count * count looks)
+        assert len(checked) < 10 * count
+        monkeypatch.undo()
+    assert on_disk(ds / "sub-0007" / "sub-0007_T1w.json") == {"New": 7}
 
 
 def test_download_to_a_directory_checks_the_file_it_writes(local_ds):
@@ -1636,6 +1736,22 @@ def test_a_directory_where_the_commit_writes_writes_nothing(local_ds):
 
 
 # -- a value that cannot be written ---------------------------------------------------
+
+@pytest.mark.parametrize("file_first", [True, False])
+def test_a_file_and_a_file_below_it_write_nothing(ds, file_first):
+    a = ds / "sub-09" / "a.json"
+    edits = [lambda: a.__setitem__("k", 1),
+             lambda: (a / "b.json").__setitem__("k", 2)]
+    with pytest.raises(NotADirectoryError, match="nothing was written") as info:
+        with ds.transaction() as tx:
+            ds["T1w.json"]["Inside"] = 1
+            for edit in edits if file_first else reversed(edits):
+                edit()
+    assert str(a) in str(info.value)
+    assert tx.written == []
+    assert on_disk(ds / "T1w.json") == FILES["T1w.json"]
+    assert not (ds / "sub-09").exists()
+
 
 def test_a_nested_value_json_cannot_hold_names_its_file_and_key(ds):
     with pytest.raises(TypeError) as info:

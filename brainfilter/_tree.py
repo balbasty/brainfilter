@@ -215,22 +215,28 @@ def _sync_live(entry: _Entry) -> None:
     After a change through the mapping API (a column set or dropped, the
     table replaced, or a change that raised and was put back): a column the
     table still has holds its values again, and one it has lost raises
-    `KeyError` until the column is back.
+    `KeyError` until the column is back. A column that has ended stays
+    ended: a change that finishes once its block has closed (in a worker
+    that outlived it) does not make it live again.
     """
     live = entry.live
     if not live:
         return
     table = entry.content
     columns = set(table.columns) if isinstance(table, Table) else set()
-    for name, column in live.items():
-        if name in columns:
+    with _transaction.LIVE_LOCK:
+        for name, column in live.items():
+            if name not in columns:
+                column.__class__ = _EndedColumn
+                continue
+            is_open = column._tx._state == _transaction._OPEN
+            if not is_open and type(column) is not LiveColumn:
+                continue
             list.__setitem__(
                 column, slice(None), [row.get(name) for row in table]
             )
             column._rows = table
             column.__class__ = LiveColumn
-        else:
-            column.__class__ = _EndedColumn
 def _column_values(column: str, values: object) -> list:
     """Return a copy of `values` as a list: one value per row of `column`."""
     if isinstance(values, (str, bytes, bytearray, Mapping)):
@@ -270,7 +276,9 @@ class LiveColumn(list):
     outside the block, raises `RuntimeError`, as for the table itself.
     Once the column is dropped (`del table[column]`) it raises `KeyError`
     until the column is set again; once the block has ended, using it at
-    all raises `RuntimeError`: read the column again.
+    all raises `RuntimeError`: read the column again. Either way its
+    `repr()` says so, rather than raising. A column compares as a list
+    does: `column == [30.0, None]`, not a tuple.
     """
 
     __slots__ = ("_name", "_path", "_rows", "_tx")
@@ -371,10 +379,21 @@ class _EndedColumn(LiveColumn):
     """A live column that no longer holds a column of the file.
 
     Every use raises: `KeyError` while the block is open and the table has
-    no such column, `RuntimeError` once the block has ended.
+    no such column, `RuntimeError` once the block has ended. Its `repr()`
+    says which instead, so that printing a value that holds it works.
     """
 
     __slots__ = ()
+
+    def __repr__(self) -> str:
+        tx = self._tx
+        if tx._state == _transaction._OPEN:
+            why = "the table no longer has this column"
+        else:
+            why = "read in a transaction that has ended"
+        return (
+            f"<column {self._name!r} of {str(self._path)!r}: {why}>"
+        )
 
     def _gone(self, *args: object, **kwargs: object) -> NoReturn:
         tx = self._tx
@@ -394,7 +413,7 @@ class _EndedColumn(LiveColumn):
 
     for _member in (
         "__getitem__", "__setitem__", "__delitem__", "__iter__",
-        "__reversed__", "__len__", "__contains__", "__repr__", "__eq__",
+        "__reversed__", "__len__", "__contains__", "__eq__",
         "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__add__",
         "__radd__", "__mul__", "__rmul__", "__iadd__", "__imul__",
         "__bool__", "__copy__", "__deepcopy__", "__reduce_ex__",
@@ -887,6 +906,7 @@ class _ContentMixin:
             with _transaction.file_lock(self):
                 entry = tx._buffer.get(self)
                 if entry is None:
+                    tx._claim(self)
                     entry = self._load(tx._buffer, create)
         if not create and entry.absent():
             raise FileNotFoundError(2, "No such file or directory", str(self))
@@ -940,14 +960,16 @@ class _ContentMixin:
         with _transaction.file_lock(self):
             # A block opened meanwhile in another thread may cover the file
             # now: the write is refused, as one made after it opened is. A
-            # block reads the file under this lock, so one that opens later
-            # reads this write.
+            # block of this family reads the file under this lock, so one
+            # that opens later reads this write; one that reads it under
+            # another lock is kept apart by `marking_through`.
             active_for(self, write=True)
-            buffer = _Buffer()
-            change(self._load(buffer, create=True))
-            with _transaction.writing_through():
-                for path, data in buffer.plan():
-                    _transaction.write_file(path, data)
+            with _transaction.marking_through(self):
+                buffer = _Buffer()
+                change(self._load(buffer, create=True))
+                with _transaction.writing_through():
+                    for path, data in buffer.plan():
+                        _transaction.write_file(path, data)
 
 
 class JSONContentMixin(_ContentMixin):
@@ -1447,6 +1469,7 @@ class _AsyncContentMixin:
             async with _transaction.afile_lock(self):
                 entry = tx._buffer.get(self)
                 if entry is None:
+                    tx._claim(self)
                     entry = await self._load(tx._buffer, create)
         if not create and entry.absent():
             raise FileNotFoundError(2, "No such file or directory", str(self))
@@ -1487,11 +1510,12 @@ class _AsyncContentMixin:
         async with _transaction.afile_lock(self):
             # Checked again under the lock (see `_ContentMixin._change`).
             active_for(self, write=True)
-            buffer = _Buffer()
-            change(await self._load(buffer, create=True))
-            with _transaction.writing_through():
-                for path, data in buffer.plan():
-                    await _transaction.awrite_file(path, data)
+            with _transaction.marking_through(self):
+                buffer = _Buffer()
+                change(await self._load(buffer, create=True))
+                with _transaction.writing_through():
+                    for path, data in buffer.plan():
+                        await _transaction.awrite_file(path, data)
 
 
 class AsyncJSONContentMixin(_AsyncContentMixin):
