@@ -233,6 +233,33 @@ always kept. The filtering rules in full, and the cases where a metadata file
 applies to no data file at all, are in
 [Filtering a local dataset](../tutorials/filter-local.md).
 
+A filter can also choose recordings by the values in their sidecars, with a
+keyword such as `RepetitionTime=2.0`. The value it compares is the one the
+merged sidecar holds, found by the rules on this page: the nearest sidecar
+that has the field wins, so a value written once at the top of the dataset
+counts for every recording below it that does not override it. The sidecars
+are those of the listing the filter works on, found exactly as `sidecars`
+finds them, up to the [dataset root](#the-dataset-root): the nearest folder of
+the listing that holds a `dataset_description.json`. A listing without one
+has no root, so nothing is inherited from above a recording's own folder, and
+the sidecars up there are neither read for its values nor kept with it.
+Such a sidecar is not kept on its own either: outside every dataset root, a
+metadata file is kept only when it applies to a kept recording in its own
+folder.
+
+The filter sees only the folder it walks from. Walking from a folder inside a
+dataset, such as `sub-01/`, finds no `dataset_description.json` in the listing
+even though the dataset has one higher up, so nothing is inherited from above
+each recording's own folder. Walk from the dataset root, or from a nested
+dataset with its own `dataset_description.json`, for full inheritance.
+
+The dataset's `.bidsignore` decides which files are recordings to select,
+never which metadata applies. A sidecar, a table or a `.bval` file that it
+names still describes the recordings below it, still gives them its values,
+and is still kept with them; it is only never kept on its own. Dataset-level
+files, such as `participants.tsv` or `README`, are kept whether it names them
+or not.
+
 To see the merged values of a sidecar, rather than which files apply, read
 [Reading sidecars and tables](../tutorials/read-metadata.md). A write to
 `sidecar` goes to the nearest of the files listed here, and the page on

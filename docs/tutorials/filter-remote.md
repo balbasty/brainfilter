@@ -73,7 +73,8 @@ sub-03/anat/sub-03_T1w.nii.gz
 ```
 
 `walk()` listed the dataset folder by folder and applied the filter to the
-names it found, and no file was opened to do so. Three images were selected,
+names it found, and no file was opened to do so. It did not even list the
+folders of the other subjects, since none of their files could pass. Three images were selected,
 along with the files that every BIDS dataset carries. In `ds000001`, which
 includes no sidecar for these images, the three images are all there is to
 fetch. On a dataset with sidecars, `scans.tsv` files or events files, those
