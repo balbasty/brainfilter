@@ -295,16 +295,18 @@ def test_select_with_participants_needs_a_root(ds):
     assert f.select(under, root=str(ds)) == [str(p) for p in f.walk(ds)]
 
 
-def test_participants_with_orphan_metadata():
-    # a metadata file that applies to no data file is judged on its subject
+@pytest.mark.parametrize("suffix", ["beh.json", "events.tsv"])
+def test_participants_with_orphan_metadata(suffix):
+    # a metadata file that applies to no data file is judged on its subject,
+    # and so is a companion with no recording, as any data file
     listing = ["dataset_description.json", "participants.tsv",
-               "sub-01/beh/sub-01_task-x_events.tsv",
-               "sub-02/beh/sub-02_task-x_events.tsv"]
+               f"sub-01/beh/sub-01_task-x_{suffix}",
+               f"sub-02/beh/sub-02_task-x_{suffix}"]
     plan = filter_module._Plan(BidsFilter(participants={"age": Any}), listing,
                                subjects={"01"})
     assert plan.finish({}) == [
         "dataset_description.json", "participants.tsv",
-        "sub-01/beh/sub-01_task-x_events.tsv",
+        f"sub-01/beh/sub-01_task-x_{suffix}",
     ]
 
 
@@ -391,8 +393,11 @@ def test_an_empty_filter_still_keeps_everything():
     assert _images(BidsFilter(acq=[])) == set(range(len(PRESENCE)))
 
 
-ORPHAN = ["sub-01/beh/sub-01_task-x_events.tsv"]
+# A sidecar that describes no data file of the listing.
+ORPHAN = ["sub-01/beh/sub-01_task-x_beh.json"]
 ORPHAN_LISTING = ["dataset_description.json", *ORPHAN]
+# A companion with no recording to describe, which is judged as data.
+LONE_EVENTS = ["dataset_description.json", "sub-01/beh/sub-01_task-x_events.tsv"]
 
 
 @pytest.mark.parametrize("value, kept", [
@@ -409,6 +414,24 @@ def test_presence_on_metadata_judged_on_its_own_name(value, kept):
     assert kept_files == ["dataset_description.json"] + (ORPHAN if kept else [])
     # outside every dataset root, never kept on its own
     assert BidsFilter(acq=value).select(ORPHAN) == []
+
+
+@pytest.mark.parametrize("value, kept", [
+    ("x", False),            # a filter on an entity it does not have fails
+    (Never, True),           # ... unless it admits a file without it
+    ({Never, "x"}, True),
+    (Any, False),
+    ({Any, Never}, True),
+])
+def test_presence_on_a_lone_companion_is_judged_as_on_data(value, kept):
+    # a companion that describes no recording is a data file all the same
+    assert BidsFilter(acq=value).select(LONE_EVENTS) == (
+        LONE_EVENTS if kept else LONE_EVENTS[:1]
+    )
+    # ... with no dataset root too
+    assert BidsFilter(acq=value).select(LONE_EVENTS[1:]) == (
+        LONE_EVENTS[1:] if kept else []
+    )
 
 
 @pytest.mark.parametrize("value, kept", [

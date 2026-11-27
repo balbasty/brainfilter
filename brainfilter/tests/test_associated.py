@@ -79,6 +79,7 @@ FILES = {
     f"{MEG_DIR}headshape.pos": b"",
     f"{MEG_DIR}photo.jpg": b"",
     f"{MEG_DIR}acq-NAS_photo.jpg": b"",          # no recording has acq-NAS
+    f"{MEG_DIR}acq-b_headshape.pos": b"",         # MEG_ACQ has acq-b
     f"{MEG_DIR}task-rest_markers.mrk": b"",
     f"{MEG_DIR}task-other_markers.mrk": b"",      # another task
     # pet: two blood recordings of the tracer
@@ -260,7 +261,9 @@ def test_eeg_channels_electrodes_coordsystem(ds):
 def test_meg_set_up_files(ds):
     # the system files apply to every recording of the session, whatever
     # its `acq`; a photo or a headshape to every recording too; markers to
-    # the recordings of their task
+    # the recordings of their task. A photo or a headshape whose `acq` no
+    # recording has (`acq-NAS`) applies to every recording; one whose `acq`
+    # a recording has (`acq-b`) to that recording alone.
     session = [
         "sub-01/ses-1/sub-01_ses-1_scans.tsv",
         "sub-01/ses-1/sub-01_ses-1_task-rest_events.tsv",
@@ -268,6 +271,7 @@ def test_meg_set_up_files(ds):
         "task-rest_events.json",
     ]
     own = [
+        f"{MEG_DIR}acq-NAS_photo.jpg",
         f"{MEG_DIR}acq-calibration_meg.dat",
         f"{MEG_DIR}acq-crosstalk_meg.fif",
         f"{MEG_DIR}headshape.pos",
@@ -276,7 +280,45 @@ def test_meg_set_up_files(ds):
         f"{MEG_DIR}task-rest_markers.mrk",
     ]
     assert _rel((ds / MEG).companions, ds) == own + session
-    assert _rel((ds / MEG_ACQ).companions, ds) == own + session
+    assert _rel((ds / MEG_ACQ).companions, ds) == sorted(
+        [*own, f"{MEG_DIR}acq-b_headshape.pos"]
+    ) + session
+
+
+def _set_up(tmp_path, files):
+    _write(BidsPath(str(tmp_path)), dict.fromkeys(
+        ["dataset_description.json", *files], b""
+    ))
+    return BidsPath(str(tmp_path))
+
+
+@pytest.mark.parametrize("other_acq, applies", [("X", False), ("Y", True)])
+def test_an_acq_tag_above_the_recordings(tmp_path, other_acq, applies):
+    # a headshape of the session, above the datatype directories: whether a
+    # recording it applies to has its `acq` is asked of all of them
+    shape = "sub-01/ses-1/sub-01_ses-1_acq-X_headshape.pos"
+    a = "sub-01/ses-1/meg/sub-01_ses-1_task-a_meg.fif"
+    b = f"sub-01/ses-1/meg/sub-01_ses-1_task-b_acq-{other_acq}_meg.fif"
+    elsewhere = "sub-01/ses-2/meg/sub-01_ses-2_task-a_acq-X_meg.fif"
+    root = _set_up(tmp_path, [shape, a, b, elsewhere])
+    assert (shape in _rel((root / a).companions, root)) is applies
+    assert (shape in _rel((root / b).companions, root)) is (
+        applies or other_acq == "X"
+    )
+    kept = BidsFilter(subjects="01", tasks="a", sessions="1").select(
+        sorted(["dataset_description.json", shape, a, b, elsewhere])
+    )
+    assert (shape in kept) is applies
+
+
+def test_an_acq_tag_in_a_nested_dataset_is_not_asked_of_it(tmp_path):
+    # the recordings of a nested dataset inherit nothing from above it
+    shape = "sub-01/sub-01_acq-X_headshape.pos"
+    a = "sub-01/ses-1/meg/sub-01_ses-1_task-a_meg.fif"
+    nested = "sub-01/ses-2/meg/sub-01_ses-2_task-a_acq-X_meg.fif"
+    root = _set_up(tmp_path, [shape, a, nested,
+                              "sub-01/ses-2/dataset_description.json"])
+    assert shape in _rel((root / a).companions, root)
 
 
 def test_blood_recordings_of_a_pet_image(ds):
@@ -569,6 +611,8 @@ def _random_dataset(rng):
             files.append(f"sub-{sub}/sub-{sub}_sessions.tsv")
         if pick() < .2:
             files.append(f"sub-{sub}/sub-{sub}_task-rest_physio.tsv.gz")
+        if pick() < .2:     # the sidecar of the coordsystem.json below
+            files.append(f"sub-{sub}/sub-{sub}_space-CapTrak_coordsystem.json")
         for ses in sessions:
             base = f"sub-{sub}" + (f"/ses-{ses}" if ses else "")
             pre = f"sub-{sub}" + (f"_ses-{ses}" if ses else "")
@@ -576,6 +620,8 @@ def _random_dataset(rng):
                 files.append(f"{base}/dataset_description.json")
             if pick() < .3:
                 files.append(f"{base}/{pre}_scans.tsv")
+            if pick() < .15:    # above the datatype directories
+                files.append(f"{base}/{pre}_acq-{rng.choice('ab')}_headshape.pos")
             if pick() < .2:
                 files.append(f"{base}/{pre}_scans.json")
             for run in rng.sample(["", "_run-1", "_run-01", "_run-2"], 2):
@@ -628,6 +674,9 @@ def _random_dataset(rng):
                                 ("acq-calibration_meg.fif", .1),  # data
                                 ("headshape.pos", .4), ("photo.jpg", .3),
                                 ("acq-NAS_photo.jpg", .3),
+                                ("acq-a_photo.jpg", .3),
+                                ("acq-a_photo.json", .2),
+                                ("acq-b_headshape.pos", .2),
                                 ("space-CapTrak_markers.sqd", .2)):
                     if pick() < p:
                         files.append(f"{meg}_{name}")
@@ -657,13 +706,15 @@ def _random_dataset(rng):
 
 
 def _is_data(rel):
+    """Whether a filter judges `rel` as a data file, and whether it has
+    companions (a recording)."""
     from brainfilter._names import parse_path
 
-    path = PureBidsPath(rel)
-    return (
-        rel.startswith("sub-") and path.suffix is not None
-        and not path.is_metadata and not parse_path(rel).is_companion_file
+    path, parsed = PureBidsPath(rel), parse_path(rel)
+    data = rel.startswith("sub-") and path.suffix is not None and (
+        not path.is_metadata or parsed.is_companion
     )
+    return data, data and parsed.has_companions
 
 
 @pytest.mark.parametrize("seed", range(40))
@@ -678,13 +729,17 @@ def test_companions_and_sidecars_are_what_the_filter_keeps(memory_store, seed):
     always = set(nothing.select(listing))
     for rel in listing:
         path = root / rel
-        if not _is_data(rel):
-            if rel.startswith("sub-"):     # a top-level file is the dataset's
-                assert path.companions == ()
+        data, recording = _is_data(rel)
+        if not recording and rel.startswith("sub-"):
+            # a companion has no companions; a top-level file is the dataset's
+            assert path.companions == ()
+        if not data:
             continue
         only = BidsFilter(include=re.compile(f"^{re.escape(rel)}$"),
                           bidsignore=False)
-        kept = set(only.select(listing)) - {rel}
+        selected = set(only.select(listing))
+        assert rel in selected
+        kept = selected - {rel}
         companions = _rel(path.companions, root)
         sidecars = _rel(path.sidecars, root)
         found = set(companions) | set(sidecars)

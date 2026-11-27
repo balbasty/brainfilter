@@ -202,7 +202,9 @@ their subject or session, whatever acquisition the recording names. The
 `sidecar` property leaves companions out, since an `events.json` describes the
 events table and not the image, and the `companions` property of a data file
 lists them instead; see
-[Companions and fieldmaps](../tutorials/associated-files.md).
+[Companions and fieldmaps](../tutorials/associated-files.md). A companion is
+a file of its own as well, so a filter that names it (`suffixes="events"`)
+selects it with its own sidecars, and not the recordings it describes.
 
 ```pycon
 >>> from brainfilter import BidsFilter
@@ -264,7 +266,8 @@ dataset with its own `dataset_description.json`, for full inheritance.
 The dataset's `.bidsignore` decides which files are recordings to select,
 never which metadata applies. A sidecar, a table or a `.bval` file that it
 names still describes the recordings below it, still gives them its values,
-and is still kept with them; it is only never kept on its own. Dataset-level
+and is still kept with them; it is only never kept on its own. The same goes
+for a companion that it names, such as an events table. Dataset-level
 files, such as `participants.tsv` or `README`, are kept whether it names them
 or not.
 

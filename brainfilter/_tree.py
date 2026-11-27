@@ -827,15 +827,20 @@ class TreeMixin:
         `space` or `recording` entity that this file lacks. A MEG recording
         also has the fine-calibration and crosstalk files of its subject or
         session (`sub-01_acq-calibration_meg.dat`,
-        `sub-01_acq-crosstalk_meg.fif`), whatever its own `acq`. These are
-        the files a `BidsFilter` keeps with this file, besides its sidecars.
+        `sub-01_acq-crosstalk_meg.fif`), whatever its own `acq`. A photo,
+        a headshape or markers with an `acq` label (`acq-NAS`, the nasion)
+        apply only to the recordings with that label when one of the
+        recordings they would apply to has it, and to all of them, whatever
+        their `acq`, when none has it. These are the files a `BidsFilter`
+        keeps with this file, besides its sidecars.
         A single-band reference (`_sbref`), an M0 scan (`_m0scan`) or an MRS
         reference scan (`_mrsref`) is a data file of its own, not a
         companion; `companion("sbref")` finds it.
 
         Files in a nearer directory come first, and within one directory
-        they are sorted by name. A file that is not a data file (a sidecar,
-        a table, a photo, a directory, a `README`) has none. Inside a
+        they are sorted by name. A file that is not a recording (a sidecar,
+        a table, a photo, a directory, a `README`) has none, although a
+        `BidsFilter` can select it. Inside a
         transaction, new files count. The directories are listed each time
         this is read.
         """

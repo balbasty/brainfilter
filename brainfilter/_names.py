@@ -6,7 +6,7 @@ that do not exist yet.
 """
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import PurePath, PurePosixPath
 from typing import NamedTuple
 
@@ -185,10 +185,19 @@ COMPANION_SUFFIXES = frozenset({
 # recording's set-up (`.jpg`, `.png`, `.tif`; eeg, emg, ieeg, meg, micr,
 # nirs), and the `headshape` (`.pos`, or any extension) and `markers`
 # (`.sqd`, `.mrk`) of a MEG session. Their extensions are no metadata
-# extensions, but they describe recordings and hold none, so the selection
-# treats them as it treats metadata. A `.json` among them (the `photo` of
-# a `micr` sample may have one) is metadata already.
+# extensions, but they describe recordings and hold none. A `.json` among
+# them (the `photo` of a `micr` sample may have one) is metadata already.
 COMPANION_FILES = frozenset({"photo", "headshape", "markers"})
+
+# Companions whose `acq` may name what the file itself shows rather than an
+# acquisition of the recordings: on a `photo` the landmark (`acq-NAS`), on a
+# `headshape` the kind of digitization (`acq-HEAD`), in the text of the
+# official BIDS 1.11.2 specification; on `markers`, before or after the
+# recording (`acq-pre`, `acq-post`), as MNE-BIDS writes them. Such a file
+# applies only to the recordings with its `acq` label when one of the
+# recordings it may apply to has it, and its `acq` is not compared
+# otherwise (see `acq_required`).
+ACQ_TAGGED = frozenset({"photo", "headshape", "markers"})
 
 # MEG files named like a recording that describe every MEG recording of
 # their subject or session: in `rules.files.raw.meg` of the official BIDS
@@ -197,7 +206,7 @@ COMPANION_FILES = frozenset({"photo", "headshape", "markers"})
 # file (`crosstalk`: `..._acq-crosstalk_meg.fif`), whose `acquisition` is
 # fixed by an enum, with this extension each. They have no `task`, which
 # every MEG recording has. Each is a companion of those recordings, named
-# by its `acq` label, and not a data file of its own.
+# by its `acq` label.
 MEG_SYSTEM_FILES = {"calibration": ".dat", "crosstalk": ".fif"}
 
 # Entities a companion file may have that the data file it describes cannot:
@@ -548,6 +557,25 @@ class ParsedPath(NamedTuple):
             return False
         return is_companion_file(self.suffix, self.extension, self.entities)
 
+    @property
+    def is_companion(self) -> bool:
+        """Whether the data item is a companion (`events.tsv`, `photo.jpg`).
+
+        See `is_companion`. Never a file inside a directory-shaped data
+        file.
+        """
+        if self.item != self.path:
+            return False
+        return is_companion(self.suffix, self.extension, self.entities)
+
+    @property
+    def has_companions(self) -> bool:
+        """Whether the data item is a recording, which has companions.
+
+        See `has_companions`; a directory-shaped data file is one.
+        """
+        return has_companions(self.suffix, self.extension, self.entities)
+
 
 def is_metadata(suffix: str | None, extension: str) -> bool:
     """Whether a name with this suffix and extension is a metadata file."""
@@ -559,11 +587,11 @@ def is_metadata(suffix: str | None, extension: str) -> bool:
 def is_companion_recording(suffix: str | None, extension: str) -> bool:
     """Whether a file with this suffix and extension is a companion recording.
 
-    A data file, not metadata, whose suffix is a companion suffix
+    A file that is not metadata, whose suffix is a companion suffix
     (`*_physio.tsv.gz`, `*_stim.tsv.gz`, `*_blood.tsv`, `*_asllabeling.jpg`;
     see `COMPANION_SUFFIXES`) but not that of a companion file (see
-    `is_companion_file`): it comes along with the data files it applies
-    to, as their metadata does.
+    `is_companion_file`): a recording of its own, which has companions
+    too, and a companion of the recordings it applies to.
     """
     return (
         suffix in COMPANION_SUFFIXES and suffix not in COMPANION_FILES
@@ -594,15 +622,50 @@ def is_companion_file(
     """Whether a file that is not metadata describes recordings without being one.
 
     A `photo`, `headshape` or `markers` file that is not metadata (see
-    `COMPANION_FILES`), or a MEG system file (see `meg_system_file`). The
-    selection treats it as metadata: it comes along with the data files
-    it applies to, and is never a data file of its own.
+    `COMPANION_FILES`), or a MEG system file (see `meg_system_file`). It
+    comes along with the recordings it applies to, and has no companions
+    of its own.
     """
     if is_metadata(suffix, extension):
         return False
     return suffix in COMPANION_FILES or (
         meg_system_file(entities, suffix, extension) is not None
     )
+
+
+def is_companion(suffix: str | None, extension: str, entities: dict) -> bool:
+    """Whether a file is a companion: a file of its own that describes others.
+
+    A file whose suffix is a companion suffix (see `COMPANION_SUFFIXES`),
+    but not the JSON sidecar of one (`events.json`, `photo.json`) nor a
+    gradient table, or a MEG system file (see `meg_system_file`). A
+    `coordsystem` is the JSON itself (see `JSON_COMPANIONS`). The
+    selection treats every companion as a data file, which a filter can
+    select; it also comes along with the recordings it applies to.
+    """
+    if meg_system_file(entities, suffix, extension) is not None:
+        return True
+    if suffix not in COMPANION_SUFFIXES:
+        return False
+    if extension == ".json":
+        return suffix in JSON_COMPANIONS
+    return extension not in (".bval", ".bvec")
+
+
+def has_companions(suffix: str | None, extension: str, entities: dict) -> bool:
+    """Whether a data file of this name has companions: it is a recording.
+
+    A BIDS file name (a suffix, and entities or an extension) that is
+    neither metadata (`events.tsv`, `coordsystem.json`) nor a companion
+    file (`photo.jpg`, a MEG crosstalk file; see `is_companion_file`). A
+    companion recording (`physio.tsv.gz`) has companions too. Every other
+    data file has its JSON sidecars alone.
+    """
+    if suffix is None or not (entities or extension):
+        return False
+    if is_metadata(suffix, extension):
+        return False
+    return not is_companion_file(suffix, extension, entities)
 
 
 def parse_path(path: object) -> ParsedPath:
@@ -626,7 +689,9 @@ def parse_path(path: object) -> ParsedPath:
     )
 
 
-def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
+def applies_to(
+    meta: object, data: object, *, companions: bool = True, acq: bool = True
+) -> bool:
     """Whether a metadata file applies to a data file (BIDS inheritance).
 
     It does when all of these hold:
@@ -649,6 +714,8 @@ def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
     A MEG system file (`sub-01_acq-crosstalk_meg.fif`; see
     `meg_system_file`) is a companion of the MEG recordings (suffix `meg`,
     none a system file itself), and its `acq` is not compared with theirs.
+    With `acq` false, a companion's `acq` is not compared either (for a
+    `photo`, `headshape` or `markers` file; see `acq_required`).
 
     Pass `companions=False` for a JSON sidecar's metadata: a companion's
     sidecar (`events.json`) describes the companion file, not the data.
@@ -677,8 +744,9 @@ def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
             return False
     if meta.datatype and meta.datatype != data.datatype:
         return False
+    skip_acq = system is not None or (companion and not acq)
     for key, label in meta.entities.items():
-        if system is not None and key == "acq":
+        if skip_acq and key == "acq":
             continue
         other = data.entities.get(key)
         if other is None:
@@ -687,3 +755,43 @@ def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
         elif not same_label(key, label, other):
             return False
     return True
+
+
+def is_acq_tagged(meta: object) -> bool:
+    """Whether a file is a `photo`, `headshape` or `markers` with an `acq`.
+
+    See `ACQ_TAGGED`; its JSON sidecar is one too.
+    """
+    meta = parse_path(meta)
+    return meta.suffix in ACQ_TAGGED and "acq" in meta.entities
+
+
+def acq_required(
+    meta: object,
+    recordings: Iterable[object],
+    applies: Callable[..., bool] = applies_to,
+) -> bool:
+    """Whether a `photo`, `headshape` or `markers` file needs its `acq` matched.
+
+    The `acq` of such a file may name what it shows (`acq-NAS`, the
+    nasion) instead of the acquisition of a recording. So it applies only
+    to the recordings with its `acq` label (index-aware) when one of the
+    recordings it would apply to without comparing `acq` has that label,
+    and to all of those recordings otherwise. This says which: `recordings`
+    are the recordings (see `has_companions`) it may apply to, and
+    `applies(meta, data, acq=False)` tells whether it applies to one. A
+    file that is not `acq`-tagged (see `is_acq_tagged`) needs it.
+    """
+    meta = parse_path(meta)
+    label = meta.entities.get("acq")
+    if label is None or meta.suffix not in ACQ_TAGGED:
+        return True
+    for data in recordings:
+        data = parse_path(data)
+        other = data.entities.get("acq")
+        if (
+            other is not None and same_label("acq", label, other)
+            and data.has_companions and applies(meta, data, acq=False)
+        ):
+            return True
+    return False

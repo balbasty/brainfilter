@@ -50,7 +50,9 @@ async def test_awalk_companion_files(tmp_path):
     _make(tmp_path, SET_UP)
     root = AsyncBidsPath(str(tmp_path))
     for f in (BidsFilter(tasks="rest"), BidsFilter(sessions="2"),
-              BidsFilter(suffixes="pet"), BidsFilter(acq="crosstalk")):
+              BidsFilter(suffixes="pet"), BidsFilter(acq="crosstalk"),
+              BidsFilter(suffixes="photo"), BidsFilter(acq="b"),
+              BidsFilter(tasks="noise", sessions="1")):
         kept = await f.awalk(root)
         assert [p.relative_to(root).as_posix() for p in kept] == f.select(SET_UP)
 

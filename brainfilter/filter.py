@@ -17,37 +17,48 @@ Selection rules
 ---------------
 The input is a listing of files; see `BidsFilter.select` for directories.
 
-1. *Data files* are files inside `sub-*/` that are neither metadata nor
-   companion files (rule 2). They are kept if they pass every filter:
-   subjects, sessions, datatypes, suffixes, tasks, other entities, the
-   `include` patterns, the participants filter (on the subject's row of
-   `participants.tsv`) and the sidecar filters (on the merged sidecar of
-   the file). A file's subject and session are those its name gives, else
-   those of the `sub-<label>/` and `ses-<label>/` folders it is in. A table
-   that is a recording (`*_beh.tsv`, `*_motion.tsv`, `*_blood.tsv`) is a
-   data file, and so is a continuous recording (`*_physio.tsv.gz`). A data
-   file that is a directory (a CTF MEG `*_meg.ds/`, an OME-Zarr
-   `*.ome.zarr/`) is one data item: every file inside it is kept or skipped
-   with it, judged on the directory's name, datatype and sidecar.
-2. *Metadata files* (`.json`, `.tsv`, `.bval`, `.bvec`), wherever they are,
-   are kept if they apply to at least one kept data file under the BIDS
-   inheritance principle. So are the *companion files*, which describe
-   recordings without being metadata or recordings themselves: the
+1. *Data files* are the files inside `sub-*/` that are not metadata (rule
+   2). They are kept if they pass every filter: subjects, sessions,
+   datatypes, suffixes, tasks, other entities, the `include` patterns, the
+   participants filter (on the subject's row of `participants.tsv`) and
+   the sidecar filters (on the merged sidecar of the file). A file's
+   subject and session are those its name gives, else those of the
+   `sub-<label>/` and `ses-<label>/` folders it is in. A table that is a
+   recording (`*_beh.tsv`, `*_motion.tsv`, `*_blood.tsv`) is a data file,
+   and so is a continuous recording (`*_physio.tsv.gz`). A data file that
+   is a directory (a CTF MEG `*_meg.ds/`, an OME-Zarr `*.ome.zarr/`) is one
+   data item: every file inside it is kept or skipped with it, judged on
+   the directory's name, datatype and sidecar. So is every *companion*, a
+   file with a suffix of its own that describes the recordings it applies
+   to: the `events`, `channels`, `electrodes`, `coordsystem`, `optodes`,
+   `aslcontext` and other companion tables and files, the `scans` and
+   `sessions` tables, the `physio`, `stim` and `blood` recordings, the
    `*_photo` of a recording's set-up, the `*_headshape` and `*_markers` of
    a MEG session, and the MEG fine-calibration and crosstalk files
-   (`*_acq-calibration_meg.dat`, `*_acq-crosstalk_meg.fif`, which apply to
-   every MEG recording of their subject or session and are never data files
-   of their own, whatever their `acq`). So is a data file that is also a
-   companion of another (`*_physio.tsv.gz` of a `*_bold.nii.gz`,
-   `*_blood.tsv` of a `*_pet.nii.gz`) and does not pass the filters itself.
-   A metadata file applies to a data file from the data file's directory up
-   to its dataset root, the nearest directory of the listing above it that
-   holds a `dataset_description.json`; without one, only the metadata in
-   the data file's own directory applies. These are the files
+   (`*_acq-calibration_meg.dat`, `*_acq-crosstalk_meg.fif`). A filter that
+   names one (`suffixes="events"`, `acq="crosstalk"`) selects it, with its
+   own JSON sidecars and without the recordings it describes.
+2. *Metadata files* (`.json`, `.tsv`, `.bval` and `.bvec` files that are no
+   companions: `bold.json`, `events.json`, `dwi.bval`), wherever they are,
+   are kept if they apply to at least one kept data file under the BIDS
+   inheritance principle. Every companion is also kept with the kept
+   recordings it applies to, whether it passes the filters or not; the
+   MEG fine-calibration and crosstalk files apply to every MEG recording
+   of their subject or session, whatever its `acq`. A recording (a data
+   file that is not a companion, or a companion recording such as
+   `*_physio.tsv.gz`) brings along the metadata and the companions that
+   apply to it; any other data file (`*_events.tsv`, `*_photo.jpg`) its
+   JSON sidecars alone. A `photo`, `headshape` or `markers` file with an
+   `acq` applies only to the recordings with that `acq` label when one of
+   the recordings it would apply to otherwise has it; when none has it,
+   the label names what the file shows (`acq-NAS`, the nasion), and is not
+   compared. A metadata file applies to a data file from the data file's
+   directory up to its dataset root, the nearest directory of the listing
+   above it that holds a `dataset_description.json`; without one, only the
+   metadata in the data file's own directory applies. These are the files
    `path.sidecars` and `path.companions` find.
-3. A metadata file or a companion file that applies to no data file of
-   the listing at all (`beh/*_events.tsv` alone, `electrodes.tsv` of a
-   session with no recording, a `photo` whose `acq` no recording has) is
+3. A metadata file that applies to no data file of the listing at all
+   (`beh/*_beh.json` alone, `T1w.json` of a dataset with no `T1w`) is
    judged on what it names, when a `dataset_description.json` of the
    listing is in its folder or above it (without one, it is kept only by
    rule 2): it is kept if its subject, session, datatype, suffix and path
@@ -59,20 +70,25 @@ The input is a listing of files; see `BidsFilter.select` for directories.
    unless `Never` is there too. A sidecar filter is judged the same way, as
    a filter on a field it does not have, and the participants filter on its
    subject, when it has one. So an empty `BidsFilter()` keeps every file of
-   a dataset that rule 5 does not skip.
+   a dataset that rule 5 does not skip. A companion that describes no
+   recording (`electrodes.tsv` of a session with no recording) is a data
+   file, judged as any other by rule 1.
 4. Dataset-level files (`dataset_description.json`, `participants.tsv`,
    `README`, `CHANGES`, `.bidsignore`, ...), other top-level files that are
    not sidecars, and `phenotype/` are always kept. Top-level sidecars
-   (`T1w.json`, `task-rest_bold.json`) follow rules 2 and 3.
+   (`T1w.json`, `task-rest_bold.json`) and companion tables
+   (`task-rest_events.tsv`), which are outside every `sub-*/`, are metadata
+   files: they follow rules 2 and 3.
 5. `derivatives/`, `sourcedata/`, `code/` and `stimuli/` are skipped unless
    requested with `folders`. Hidden files and folders (`.datalad/`,
    `.gitattributes`, ...) and other top-level folders are always skipped;
    a hidden name inside a data directory (`.zattrs` in `*.ome.zarr/`) is
    part of the data file, and kept with it. The dataset's `.bidsignore`
    decides which files are data to select, never which metadata applies.
-   A data file it names is never selected, and metadata (or a companion
-   file) it names is kept only as the metadata of a kept data file (rule 2),
-   never on its own (rule 3). Dataset-level files (rule 4) are kept whether
+   A data file it names is never selected, and metadata it names is kept
+   only as the metadata of a kept data file (rule 2), never on its own
+   (rule 3); a companion it names is kept only with a kept recording it
+   applies to. Dataset-level files (rule 4) are kept whether
    it names them or not. So an ignored sidecar still applies to the data
    files it describes, its values count for the sidecar filters, and it
    comes along with them; an ignored `participants.tsv` is still read by the
@@ -143,12 +159,14 @@ from brainfilter._names import (
     SORTED_ENTITIES,
     TOP_LEVEL_FILES,
     ParsedPath,
+    acq_required,
     applies_to,
     data_directory,
     index_value,
-    is_companion_recording,
+    is_acq_tagged,
     parse_name,
     parse_path,
+    same_label,
 )
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
 from brainfilter.conditions import Condition, Or, Regex, default_full
@@ -520,9 +538,11 @@ class BidsFilter:
         still read).
     bidsignore
         Whether to honour the dataset's `.bidsignore`: the data files it
-        names are not selected, and the other files it names are kept only
-        as the metadata of a kept data file. It never changes which
-        metadata applies to a data file, nor the values it reads.
+        names are not selected (a companion, such as an events table, still
+        comes along with the recordings it describes), and the other files
+        it names are kept only as the metadata of a kept data file. It
+        never changes which metadata applies to a data file, nor the values
+        it reads.
     **kwargs
         Filters on a known BIDS entity (`acq="mprage"`, `run=[1, 2]`,
         `sub=...`, ...), and on a sidecar field for a keyword that starts
@@ -1078,9 +1098,9 @@ class _Plan:
     `finish` takes their contents and returns the kept paths, sorted.
 
     A file `.bidsignore` names is still sorted: an ignored data file is
-    never selected, but metadata still applies to it; ignored metadata
-    still applies to the data files it describes, and comes along with
-    them, but is never kept on its own (rule 3).
+    never selected, but metadata still applies to it; ignored metadata (or
+    an ignored companion) still applies to the data files it describes,
+    and comes along with them, but is never kept on its own.
     """
 
     def __init__(
@@ -1100,6 +1120,8 @@ class _Plan:
         self.kept: set[str] = set()
         self.ignore = ignore
         self.scopes = _Scopes()
+        self.required: dict[str, bool] = {}       # see `_required`
+        self.tagged: set[str] = set()             # see `unsure`
         self.listed = list(paths)
         for path in self.listed:
             self._sort(path)
@@ -1110,8 +1132,8 @@ class _Plan:
         self.chains: dict[str, tuple[str, ...]] = {}
         if f.sidecar:
             self.chains = _sidecar_chains(
-                [self.data[item] for item in self.passed], self.meta,
-                self.scopes,
+                [self.data[item] for item in self.passed],
+                [*self.meta, *self.data.values()], self.scopes,
             )
         self.reads = {rel for chain in self.chains.values() for rel in chain}
 
@@ -1144,30 +1166,93 @@ class _Plan:
             return False
         return f._passes(m, partial=True) and self._has_subject(m, partial=True)
 
-    def unsure(self, pruned: list[str]) -> list[ParsedPath]:
-        """Return the metadata files whose fate depends on pruned folders.
+    def _required(self, x: ParsedPath, all_data: dict) -> bool:
+        """Whether `x` applies only to recordings with its `acq` label.
 
-        Those that apply to no data file listed, would be kept for that
-        (rule 3), and are above a folder in `pruned`: if one applies to a
-        data file inside it, it is not kept after all.
+        See `acq_required`: `x` is a `photo`, `headshape` or `markers` file
+        (or its JSON), and `all_data` the index of every data item, of
+        which the recordings it may apply to are those it reaches.
+        """
+        if x.path not in self.required:
+            self.required[x.path] = acq_required(
+                x, all_data.get(x.directory, ()), self.scopes.applies_to
+            )
+        return self.required[x.path]
+
+    def _relates(
+        self, x: ParsedPath, d: ParsedPath, all_data: dict | None = None
+    ) -> bool:
+        """Whether file `x` comes along with data item `d`, when `d` is kept.
+
+        A recording (see `ParsedPath.has_companions`) brings the metadata
+        and the companions that apply to it (`applies_to`); any other data
+        item (`events.tsv`, `photo.jpg`) its JSON sidecars alone. An
+        `acq`-tagged `photo`, `headshape` or `markers` file needs its `acq`
+        matched only when `_required` says so, given `all_data`; without
+        `all_data`, its `acq` is not compared, which tells as well whether
+        it comes along with any recording at all.
+        """
+        if x.item == d.item:
+            return False
+        scopes = self.scopes
+        if not d.has_companions:
+            return (
+                x.extension == ".json" and x.suffix is not None
+                and scopes.applies_to(x, d, companions=False)
+            )
+        if is_acq_tagged(x) and (
+            all_data is None or not self._required(x, all_data)
+        ):
+            return scopes.applies_to(x, d, acq=False)
+        return scopes.applies_to(x, d)
+
+    def unsure(self, pruned: list[str]) -> list[ParsedPath]:
+        """Return the files whose fate depends on pruned folders.
+
+        Those above a folder in `pruned` that are either metadata that
+        applies to no data file listed and would be kept for that (rule
+        3), or an `acq`-tagged companion (see `_required`) that would come
+        along with a recording without its `acq` label, since no recording
+        listed has it: if a data file inside the folder is one it applies
+        to (has that label), it is not kept after all (it is not brought
+        along).
         """
         if not pruned:
             return []
-        all_data = self.scopes.index(self.data.values())
+        scopes = self.scopes
+        all_data = scopes.index(self.data.values())
         candidates = [
             m for m in self.meta
-            if not self.scopes.applies(m, all_data) and self._kept_alone(m)
+            if not scopes.applies(m, all_data, self._relates)
+            and self._kept_alone(m)
         ]
+        passed = scopes.index(self.data[item] for item in self.passed)
+        companions = [d for d in self.data.values() if d.is_companion]
+        for x in (*self.meta, *companions):
+            if (
+                x.item in self.passed or not is_acq_tagged(x)
+                or self._required(x, all_data)
+            ):
+                continue
+            if any(
+                d.has_companions and not _same_acq(x, d)
+                and scopes.applies_to(x, d, acq=False)
+                for d in passed.get(x.directory, ())
+            ):
+                candidates.append(x)
+                self.tagged.add(x.path)
         return [m for m in candidates
                 if any(_above_any([m], p) for p in pruned)]
 
     def settle(
         self, unsure: list[ParsedPath], paths: Iterable[str]
     ) -> list[ParsedPath]:
-        """Return the files of `unsure` that apply to no data file of `paths`.
+        """Return the files of `unsure` that no data file of `paths` settles.
 
         `paths` are the files of one more directory (or level) of the walk,
-        listed after every directory above them.
+        listed after every directory above them. A data file settles a
+        metadata file it applies to, and an `acq`-tagged companion that it
+        is a recording with the same `acq` of.
         """
         paths = list(paths)
         for path in paths:
@@ -1179,9 +1264,18 @@ class _Plan:
             if kind == "data":
                 unsure = [
                     m for m in unsure
-                    if not self.scopes.applies_to(m, d)  # type: ignore[arg-type]
+                    if not self._settles(m, d)  # type: ignore[arg-type]
                 ]
         return unsure
+
+    def _settles(self, m: ParsedPath, d: ParsedPath) -> bool:
+        """Whether data file `d` settles the fate of `m` (see `settle`)."""
+        if m.path in self.tagged:
+            return (
+                d.has_companions and _same_acq(m, d)
+                and self.scopes.applies_to(m, d, acq=False)
+            )
+        return self._relates(m, d)
 
     def _has_subject(self, name: ParsedPath, partial: bool = False) -> bool:
         """Whether a file's subject passes the participants filters.
@@ -1210,27 +1304,36 @@ class _Plan:
         scopes = self.scopes
         kept_data = scopes.index(self.data[item] for item in passed)
         all_data = scopes.index(self.data.values())
+        self.required.clear()
 
-        # A data file that is also a companion (`physio.tsv.gz` of a run)
-        # follows the data it describes, as its metadata does, even when
-        # `.bidsignore` names it.
+        def brought(x: ParsedPath) -> bool:
+            return scopes.applies(
+                x, kept_data, lambda x, d: self._relates(x, d, all_data)
+            )
+
+        # A companion (`events.tsv`, `physio.tsv.gz`, `photo.jpg`) follows
+        # the recordings it describes, as their metadata does, even when it
+        # does not pass the filters or `.bidsignore` names it.
         for item, d in self.data.items():
-            if (
-                item not in passed
-                and is_companion_recording(d.suffix, d.extension)
-                and scopes.applies(d, kept_data)
-            ):
+            if item not in passed and d.is_companion and brought(d):
                 kept.update(self.members.get(item, ()))
                 kept.update(self.ignored.get(item, ()))
         for m in self.meta:
-            if scopes.applies(m, kept_data) or (
-                not scopes.applies(m, all_data) and self._kept_alone(m)
+            if brought(m) or (
+                not scopes.applies(m, all_data, self._relates)
+                and self._kept_alone(m)
             ):
                 kept.add(m.path)
 
         if f.exclude:
             kept = {p for p in kept if p in _PROTECTED or not f.exclude(p)}
         return sorted(kept)
+
+
+def _same_acq(x: ParsedPath, d: ParsedPath) -> bool:
+    """Whether `d` has the `acq` label of `x`."""
+    label, other = x.entities.get("acq"), d.entities.get("acq")
+    return None not in (label, other) and same_label("acq", label, other)
 
 
 def _dataset_level(path: str) -> bool:
@@ -1263,9 +1366,9 @@ def _classify(
         return ("keep" if top in folders else "skip"), None
     name = parse_path(path)
     if top.startswith("sub-") and len(parts) > 1:
-        # A companion file (`photo.jpg`, a MEG crosstalk file) is no
-        # recording: it is kept as metadata is.
-        meta = name.is_metadata or name.is_companion_file
+        # A companion (`events.tsv`, `photo.jpg`, a MEG crosstalk file) is
+        # a data file too; its JSON sidecar (`events.json`) is metadata.
+        meta = name.is_metadata and not name.is_companion
         return ("meta" if meta else "data"), name
     if top == "phenotype":
         return "keep", None
@@ -1321,7 +1424,8 @@ class _Scopes:
         return self._cache[directory]
 
     def applies_to(
-        self, meta: ParsedPath, data: ParsedPath, companions: bool = True
+        self, meta: ParsedPath, data: ParsedPath, companions: bool = True,
+        acq: bool = True,
     ) -> bool:
         """Whether `meta` applies to `data` within the data file's dataset."""
         dirs, root = self.scope(data.directory)
@@ -1330,7 +1434,7 @@ class _Scopes:
         if root is not None and root.parts:
             # Judged relative to the dataset root, as `path.sidecars` does.
             meta, data = _rerooted(meta, root), _rerooted(data, root)
-        return applies_to(meta, data, companions=companions)
+        return applies_to(meta, data, companions=companions, acq=acq)
 
     def index(self, data: Iterable[ParsedPath]) -> dict:
         """Index data items by every directory inheritance reaches them from."""
@@ -1340,11 +1444,12 @@ class _Scopes:
                 by_dir.setdefault(parent, []).append(d)
         return by_dir
 
-    def applies(self, meta: ParsedPath, by_dir: dict) -> bool:
-        """Whether `meta` applies to a data item of an `index`."""
-        return any(
-            self.applies_to(meta, d) for d in by_dir.get(meta.directory, ())
-        )
+    def applies(
+        self, meta: ParsedPath, by_dir: dict,
+        relation: Callable[[ParsedPath, ParsedPath], bool],
+    ) -> bool:
+        """Whether `relation(meta, d)` holds for a data item `d` of an `index`."""
+        return any(relation(meta, d) for d in by_dir.get(meta.directory, ()))
 
 
 def _rerooted(name: ParsedPath, root: PurePosixPath) -> ParsedPath:
@@ -1358,9 +1463,11 @@ def _sidecar_chains(
     """Return the JSON sidecars of each data item, nearest first.
 
     The sidecars that apply to it (a `.json` with its suffix and a subset
-    of its entities, in its directory or above, up to its dataset root), as
-    `path.sidecars` finds them: nearer directories first, and within one
-    directory the sidecars with more entities.
+    of its entities, in its directory or above, up to its dataset root, but
+    the data item itself), as `path.sidecars` finds them: nearer
+    directories first, and within one directory the sidecars with more
+    entities. `meta` may hold data items too: a `coordsystem.json` is the
+    sidecar of the one below it.
     """
     by_dir: dict[PurePosixPath, list[ParsedPath]] = {}
     for m in meta:
@@ -1374,7 +1481,8 @@ def _sidecar_chains(
         for directory in scopes.scope(d.directory)[0]:
             chain.extend(
                 m.path for m in by_dir.get(directory, ())
-                if scopes.applies_to(m, d, companions=False)
+                if m.item != d.item
+                and scopes.applies_to(m, d, companions=False)
             )
         chains[d.item] = tuple(chain)
     return chains

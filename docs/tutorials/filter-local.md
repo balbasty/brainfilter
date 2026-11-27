@@ -341,8 +341,9 @@ filter needs to know what the folder holds. A metadata file that it names
 still describes the recordings it applies to: an ignored sidecar, events table
 or `.bval` file counts for a filter on sidecar values, and comes along with
 the recordings it describes, exactly as `path.sidecars` finds it. Ignored
-metadata is never kept on its own account, though, so it is left out when it
-describes no kept recording. Dataset-level files, such as `participants.tsv`,
+metadata, or an ignored companion such as an events table, is never kept on
+its own account, though, so it is left out when it describes no kept
+recording. Dataset-level files, such as `participants.tsv`,
 `README` and `phenotype/`, are kept whether `.bidsignore` names them or not,
 and an ignored `participants.tsv` is still read by a filter on participants.
 
@@ -403,11 +404,13 @@ recordings and none was selected, while the same file appears in the result for
 A few rules follow BIDS rather than the file extension. Tables that are
 recordings in their own right (`*_beh.tsv`, `*_physio.tsv.gz`) are treated as
 data, and a recording stored as a folder, such as a CTF `*_meg.ds` or an
-OME-Zarr store, is kept or skipped as one unit. Files that describe how a
-recording was made without being recordings, such as a `*_photo.jpg` of the
-electrodes, the `*_headshape.pos` of a MEG session and its crosstalk and
-fine-calibration files, are kept with the recordings they describe, as
-metadata is. The
+OME-Zarr store, is kept or skipped as one unit. A file with a suffix of its
+own that describes other recordings, such as an events table, a
+`*_photo.jpg` of the electrodes, the `*_headshape.pos` of a MEG session and
+its crosstalk and fine-calibration files, is kept with the recordings it
+describes, as metadata is, and is also a file a filter can select on its
+own: `suffixes="events"` keeps the events tables (with their JSON files)
+without the images, and `acq="crosstalk"` the crosstalk files. The
 [`BidsFilter`][brainfilter.BidsFilter] reference gives the complete rules.
 
 ## Filtering a listing you already have

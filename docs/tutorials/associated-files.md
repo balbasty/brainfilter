@@ -183,6 +183,34 @@ sub-01/pet/sub-01_trc-FDG_recording-manual_blood.tsv
 sub-01/sub-01_scans.tsv
 ```
 
+A photo, a head shape or a set of markers may have an acquisition label
+that names what it shows rather than how a recording was acquired: the
+landmark a photo was taken of (`acq-NAS`, the nasion), the kind of
+digitisation of a head shape (`acq-HEAD`), or markers measured before or
+after the recording (`acq-pre`, `acq-post`, as MNE-BIDS writes them). So
+such a file is matched by its label only when one of the recordings it
+would describe has the same label. When none has it, the label describes the
+file itself, and the file applies to every recording it matches on its
+other entities. Here no recording has `acq-NAS`, so the photo of the nasion
+comes along with both recordings, while the head shape labelled `acq-a`
+belongs to the recording of that acquisition alone.
+
+```pycon
+>>> from brainfilter import BidsFilter
+>>> listing = [
+...     "dataset_description.json",
+...     "sub-01/meg/sub-01_task-rest_acq-a_meg.fif",
+...     "sub-01/meg/sub-01_task-rest_acq-b_meg.fif",
+...     "sub-01/meg/sub-01_acq-NAS_photo.jpg",
+...     "sub-01/meg/sub-01_acq-a_headshape.pos",
+... ]
+>>> for path in BidsFilter(acq="b").select(listing):
+...     print(path)
+dataset_description.json
+sub-01/meg/sub-01_acq-NAS_photo.jpg
+sub-01/meg/sub-01_task-rest_acq-b_meg.fif
+```
+
 A diffusion image has its gradient tables among its companions.
 
 ```pycon
@@ -193,9 +221,11 @@ sub-01/dwi/sub-01_dwi.bvec
 sub-01/sub-01_scans.tsv
 ```
 
-Only a data file has companions. A sidecar, a table, a photo or a directory
+Only a recording has companions. A sidecar, a table, a photo or a directory
 has none, and its `companions` is an empty tuple. A MEG crosstalk file has
-none either, since it describes recordings rather than being one.
+none either, since it describes recordings rather than being one. A filter
+selects such a file when it names it, as the next section shows, but it
+brings only its own sidecars along, never the recordings it describes.
 
 ```pycon
 >>> func["sub-01_task-rest_run-1_events.tsv"].companions
@@ -226,9 +256,7 @@ task-rest_events.json
 ```
 
 The files of a MEG set-up come along with the recordings they describe in
-the same way. A filter never selects them on their own, so asking for the
-crosstalk file by its acquisition label keeps nothing while its recording is
-not kept, and selecting the MEG recordings brings it along.
+the same way, so selecting the MEG recordings brings them along.
 
 ```pycon
 >>> for path in ds.filter(datatypes="meg"):
@@ -241,12 +269,28 @@ sub-01/meg/sub-01_photo.jpg
 sub-01/meg/sub-01_task-auditory_channels.tsv
 sub-01/meg/sub-01_task-auditory_meg.fif
 sub-01/sub-01_scans.tsv
->>> [path.name for path in ds.filter(acq="crosstalk")]
-['dataset_description.json']
 ```
 
-A blood recording is data as well as a companion, so a filter keeps it with
-its PET scan and also selects it by its own suffix, without the scan.
+A companion is also a file in its own right, and a filter that names it
+selects it, with its own sidecars and without the recordings it describes.
+Asking for the crosstalk file by its acquisition label keeps that file
+alone, and asking for the events keeps the events of both runs.
+
+```pycon
+>>> [path.name for path in ds.filter(acq="crosstalk")]
+['dataset_description.json', 'sub-01_acq-crosstalk_meg.fif']
+>>> for path in ds.filter(suffixes="events"):
+...     print(path.relative_to(ds))
+dataset_description.json
+sub-01/func/sub-01_task-rest_run-1_events.tsv
+sub-01/func/sub-01_task-rest_run-2_events.tsv
+task-rest_events.json
+```
+
+The `events.json` at the root comes along because it is the sidecar of both
+events files, while the runs they describe stay behind. The same holds for a
+blood recording, which a filter keeps with its PET scan and also selects by
+its own suffix, without the scan.
 
 ```pycon
 >>> for path in ds.filter(suffixes="blood"):
