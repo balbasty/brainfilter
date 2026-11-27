@@ -5,10 +5,7 @@
     .ink{fill:#2b1b13} .ink-s{fill:none;stroke:#2b1b13}
     .cream{fill:#f6ecdd} .paper{fill:#f1e2cb} .crema{fill:#c98b4e} .fixed-ink{fill:#2b1b13}
     .glass{fill:#e6eceb} .coffee{fill:#6b3e26}
-    @media (prefers-color-scheme: dark) {
-      .ink{fill:#f6ecdd} .ink-s{stroke:#f6ecdd} .cream{fill:#2b1b13} .paper{fill:#cfb28c}
-      .glass{fill:#2a3438}
-    }
+    @media (prefers-color-scheme: dark) { .ink{fill:#f6ecdd} .ink-s{stroke:#f6ecdd} .cream{fill:#2b1b13} .paper{fill:#cfb28c} .glass{fill:#2a3438} }
   </style>
   <defs>
     <clipPath id="server-inside"><path d="M168 258 C120 304 112 374 124 444 C128 474 148 484 180 484 H316 C348 484 368 474 372 444 C384 374 376 304 328 258 Z"/></clipPath>

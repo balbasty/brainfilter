@@ -4,10 +4,7 @@
     .ink{fill:#2b1b13} .ink-s{fill:none;stroke:#2b1b13}
     .cream{fill:#f6ecdd} .paper{fill:#f1e2cb} .crema{fill:#c98b4e} .fixed-ink{fill:#2b1b13}
     .glass{fill:#e6eceb} .coffee{fill:#6b3e26}
-    @media (prefers-color-scheme: dark) {
-      .ink{fill:#f6ecdd} .ink-s{stroke:#f6ecdd} .cream{fill:#2b1b13} .paper{fill:#cfb28c}
-      .glass{fill:#2a3438}
-    }
+    @media (prefers-color-scheme: dark) { .ink{fill:#f6ecdd} .ink-s{stroke:#f6ecdd} .cream{fill:#2b1b13} .paper{fill:#cfb28c} .glass{fill:#2a3438} }
   </style>
   <defs>
     <mask id="glyph" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
