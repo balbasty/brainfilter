@@ -4,7 +4,8 @@ A [`BidsFilter`][brainfilter.BidsFilter] describes which part of a BIDS dataset 
 want. This tutorial builds filters for the situations that come up most often:
 picking subjects and sessions, picking a kind of recording, matching on the
 entities in a file name, on the values in the sidecars and on the
-participants table, and cutting a selection down with patterns. The
+participants table, cutting a selection down with patterns, and combining
+filters. The
 examples use the small dataset from [First steps](../getting-started/first-steps.md)
 (the collapsed script on that page creates it), opened as `ds`.
 
@@ -319,6 +320,113 @@ sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
 last, to everything that survived, sidecars included. The only file that
 `exclude` never removes is `dataset_description.json`, because a dataset
 without it is no longer a BIDS dataset.
+
+## Combining filters
+
+The keywords of one filter all have to agree: a file is kept only if it
+passes every one of them. To ask for one thing or another, or for one thing
+but not another, combine filters with the operators `|` (or), `&` (and) and
+`~` (not). Each filter keeps its own keywords, and the combination is a
+filter in its own right, which `walk()`, `select()` and `ds.filter()` accept
+like any other. Here are the T1-weighted images of subject 1 together with
+the resting-state recordings of every subject, which no single filter can
+ask for.
+
+```pycon
+>>> anatomy = BidsFilter(sub=1, suffix="T1w")
+>>> rest = BidsFilter(task="rest")
+>>> images(ds.filter(anatomy | rest))
+sub-01/ses-1/anat/sub-01_ses-1_acq-mprage_run-01_T1w.nii.gz
+sub-01/ses-1/anat/sub-01_ses-1_acq-mprage_run-02_T1w.nii.gz
+sub-01/ses-1/func/sub-01_ses-1_task-rest_bold.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
+sub-10/ses-1/func/sub-10_ses-1_task-rest_bold.nii.gz
+sub-10/ses-2/func/sub-10_ses-2_task-rest_bold.nii.gz
+```
+
+`Not` turns one value around, and `~` a whole filter. That says what no
+value can: below are the T2-weighted images of every session but the second
+session of subject 10, a pair of labels that `Not` on `sub` or on `ses`
+alone would not single out.
+
+```pycon
+>>> images((BidsFilter(suffix="T2w") & ~BidsFilter(sub=10, ses=2)).walk(ds))
+sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
+sub-10/ses-1/anat/sub-10_ses-1_acq-fse_T2w.nii.gz
+```
+
+The operators follow Python's precedence, `~` before `&` before `|`, and a
+combination prints as it is written, with the parentheses it needs.
+
+```pycon
+>>> BidsFilter(datatype="func") & ~(BidsFilter(task="rest") | BidsFilter(sub=10))
+BidsFilter(datatype='func') & ~(BidsFilter(task='rest') | BidsFilter(sub=10))
+```
+
+The operators decide which recordings are kept. The files that describe
+those recordings follow afterwards, once, as they do for a single filter.
+Below, the top-level `task-rest_bold.json` describes recordings that each
+side keeps, and it appears once; a sidecar that describes only recordings
+the combination leaves out does not appear at all.
+
+```pycon
+>>> files = (BidsFilter(sub=1, task="rest") | BidsFilter(sub=2, task="rest")).walk(ds)
+>>> print(*[p.relative_to(ds).as_posix() for p in files], sep="\n")
+README
+dataset_description.json
+participants.tsv
+sub-01/ses-1/func/sub-01_ses-1_task-rest_bold.nii.gz
+sub-01/ses-1/func/sub-01_ses-1_task-rest_events.tsv
+sub-01/ses-1/sub-01_ses-1_scans.tsv
+sub-01/sub-01_sessions.tsv
+sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-rest_events.tsv
+sub-02/ses-1/sub-02_ses-1_scans.tsv
+sub-02/sub-02_sessions.tsv
+task-rest_bold.json
+```
+
+Filters on sidecar values and on the participants table combine in the same
+way. The filter below keeps the recordings of the male participant and the
+*n*-back recordings of subject 10, whose sidecars set a repetition time of
+1.5 seconds. Each sidecar is read once, however many filters ask about it,
+and only when its values can change the answer.
+
+```pycon
+>>> male = BidsFilter(participants={"sex": "M"})
+>>> images((male | BidsFilter(sub=10, RepetitionTime=1.5)).walk(ds))
+sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
+sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
+sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
+sub-10/ses-1/func/sub-10_ses-1_task-nback_bold.nii.gz
+sub-10/ses-2/func/sub-10_ses-2_task-nback_bold.nii.gz
+```
+
+`exclude` belongs to the filter it is written in. It removes files from what
+that filter keeps, and leaves alone what the other side of a `|` keeps. In
+the first combination below, only the filter that drops JSON files brings
+`task-rest_bold.json` along, so it is left out; in the second, the other
+side brings it too, and it stays.
+
+```pycon
+>>> no_json = BidsFilter(sub=1, task="rest", exclude="*.json")
+>>> "task-rest_bold.json" in [p.name for p in (no_json | BidsFilter(sub=1, suffix="T2w")).walk(ds)]
+False
+>>> "task-rest_bold.json" in [p.name for p in (no_json | BidsFilter(sub=2, task="rest")).walk(ds)]
+True
+```
+
+Under `&`, the `exclude` of every side applies. A filter with `exclude`
+cannot be turned around with `~`, because what it removes has no opposite;
+write the `exclude` on a filter outside the `~` instead, as in
+`~BidsFilter(task="rest") & BidsFilter(exclude="*.tsv")`. The two keywords
+that say how the dataset is read, `folders` and `bidsignore` (both described
+below), apply to a combination as a whole: give them on any one of its
+filters, or the same on several. Two filters that give different values are
+an error.
 
 ## Optional folders
 

@@ -97,6 +97,23 @@ The input is a listing of files; see `BidsFilter.select` for directories.
 6. Last, the `exclude` patterns remove any kept file but
    `dataset_description.json`.
 
+Combining filters
+-----------------
+`f | g`, `f & g` and `~f` combine the verdicts of the filters on each data
+file (rule 1); the metadata and companions of the kept data files follow
+once (rule 2), and a metadata file judged on its own name (rule 3) is kept
+when the expression of each filter's verdict on it keeps it. `exclude`
+(rule 6) removes a file from what its own filter keeps: a file is kept when
+the expression keeps it with the verdict of every filter whose `exclude`
+names it turned to `False` -- the verdicts on the data item it is, or on a
+kept data item it comes along with -- and a dataset-level file (rule 4) is
+kept unless the expression of "not excluded" fails, a `~` keeping it.
+`~` refuses a filter with `exclude`. `folders` and `bidsignore` hold for
+the whole combination. A walk skips a subject or session folder only when
+the whole expression keeps none of its files: `|` when every side keeps
+none, `&` when one side does, and `~` when its filter keeps every file of
+the folder (one that filters on nothing but the folder's labels).
+
 Matching values
 ---------------
 Each label filter takes a plain value (matched exactly), several values
@@ -617,6 +634,25 @@ class BidsFilter:
     dataset root. A glob must match the whole path (`fnmatch`); a regex is
     found anywhere in it (`re.search`) unless anchored.
 
+    Filters combine with `|` (or), `&` (and) and `~` (not) into a filter
+    of their own, which `walk`, `select` and `ds.filter` take like any
+    other: `BidsFilter(acq={"a", "b"}) & (BidsFilter(run=1) |
+    BidsFilter(ses=2))`, `BidsFilter(datatype="func") &
+    ~BidsFilter(task="rest")`. The operators decide which data files are
+    kept, from what each filter says about each of them; the metadata and
+    companions of the kept data files then come along once, as for one
+    filter. A metadata file that applies to no data file of the dataset is
+    kept when the combination keeps it, each filter judging it on its own
+    name, so `~` turns that verdict around as well: `~BidsFilter(acq="a")`
+    drops a sidecar without `acq` that describes nothing, which
+    `BidsFilter(acq=Not("a"))` keeps. `exclude` removes files from what
+    its own filter keeps: in `f | g`, a file that `f` excludes is kept when
+    `g` keeps it, while in `f & g` the excludes of both apply. It has no
+    opposite, so `~` refuses a filter that has one. `folders` and
+    `bidsignore` apply to the whole combination, which takes the value its
+    filters give; two different values are an error. `~~f` is `f`, and a
+    combination prints as it is written.
+
     Parameters
     ----------
     datatype, suffix, extension
@@ -628,10 +664,13 @@ class BidsFilter:
         Patterns matched against the path relative to the dataset root
         (a string is a glob, a `re.Pattern` a regex; a list is any-of).
         `include` selects data files; `exclude` removes any kept file but
-        `dataset_description.json`.
+        `dataset_description.json` (in a combination, any file this filter
+        keeps).
     folders
         Optional top-level folders to keep, among `derivatives`,
-        `sourcedata`, `code` and `stimuli`. They are kept whole.
+        `sourcedata`, `code` and `stimuli`. They are kept whole. `None`
+        (the default) keeps none, or, in a combination, those another of
+        its filters gives.
     entities
         Filters on any other entity, `{key: value}`.
     sidecar
@@ -650,7 +689,8 @@ class BidsFilter:
         comes along with the recordings it describes), and the other files
         it names are kept only as the metadata of a kept data file. It
         never changes which metadata applies to a data file, nor the values
-        it reads.
+        it reads. `None` (the default) honours it, or, in a combination,
+        follows another of its filters.
     **kwargs
         Filters on a known BIDS entity by its key (`sub=1`, `ses="pre"`,
         `task="rest"`, `acq="mprage"`, `run={1, 2}`, ...), and on a sidecar
@@ -681,13 +721,36 @@ class BidsFilter:
         extension: object = None,
         include: object = None,
         exclude: object = None,
-        folders: Iterable[str] = (),
+        folders: Iterable[str] | None = None,
         entities: Mapping | None = None,
         sidecar: Mapping | None = None,
         participants: Mapping | None = None,
-        bidsignore: bool = True,
+        bidsignore: bool | None = None,
         **kwargs: object,
     ) -> None:
+        # A generator is read once: read it here, for the filter and its repr.
+        datatype, suffix, extension, include, exclude = map(
+            _read_once, (datatype, suffix, extension, include, exclude)
+        )
+        kwargs = {k: _read_once(v) for k, v in kwargs.items()}
+        if entities is not None:
+            entities = {k: _read_once(v) for k, v in entities.items()}
+        if folders is not None and not isinstance(folders, str):
+            folders = list(folders)
+        self._args = [
+            *((k, v) for k, v in kwargs.items() if not k[:1].isupper()),
+            *((k, v) for k, v in (
+                ("datatype", datatype), ("suffix", suffix),
+                ("extension", extension),
+            ) if v is not None),
+            *((k, v) for k, v in kwargs.items() if k[:1].isupper()),
+            *((k, v) for k, v in (
+                ("include", include), ("exclude", exclude),
+                ("entities", entities), ("sidecar", sidecar),
+                ("participants", participants), ("folders", folders),
+                ("bidsignore", bidsignore),
+            ) if v is not None),
+        ]
         fields = {k: v for k, v in kwargs.items() if k[:1].isupper()}
         kwargs = {k: v for k, v in kwargs.items() if k not in fields}
         _refuse_capitalised_keywords(fields)
@@ -741,16 +804,115 @@ class BidsFilter:
         self.exclude = _patterns(exclude)
         self.sidecar = _value_matchers(on_sidecar, "sidecar")
         self.participants = _value_matchers(participants or {}, "participants")
-        self.bidsignore = bool(bidsignore)
-        if isinstance(folders, str):
-            folders = [folders]
-        self.folders = frozenset(folders)
-        unknown = self.folders - set(OPTIONAL_FOLDERS)
-        if unknown:
-            raise ValueError(
-                f"Unknown optional folders: {', '.join(sorted(unknown))}; "
-                f"expected some of {', '.join(OPTIONAL_FOLDERS)}"
-            )
+        # The options on how the dataset is read, as given (see `_Combined`).
+        self._options: dict[str, object] = {}
+        if bidsignore is not None:
+            self._options["bidsignore"] = bool(bidsignore)
+        if folders is not None:
+            if isinstance(folders, str):
+                folders = [folders]
+            self._options["folders"] = frozenset(folders)
+            unknown = self._options["folders"] - set(OPTIONAL_FOLDERS)
+            if unknown:
+                raise ValueError(
+                    f"Unknown optional folders: {', '.join(sorted(unknown))}; "
+                    f"expected some of {', '.join(OPTIONAL_FOLDERS)}"
+                )
+        self.bidsignore = self._options.get("bidsignore", True)
+        self.folders = self._options.get("folders", frozenset())
+        # The expression a walk evaluates: this filter alone.
+        self._leaves: tuple[BidsFilter, ...] = (self,)
+        self._node: object = 0
+
+    def __repr__(self) -> str:
+        args = ", ".join(f"{k}={v!r}" for k, v in self._args)
+        return f"BidsFilter({args})"
+
+    # -- combinations --------------------------------------------------------
+    def __and__(self, other: object) -> BidsFilter:
+        if not isinstance(other, BidsFilter):
+            return NotImplemented
+        return _Combined("&", (self, other))
+
+    def __or__(self, other: object) -> BidsFilter:
+        if not isinstance(other, BidsFilter):
+            return NotImplemented
+        return _Combined("|", (self, other))
+
+    def __invert__(self) -> BidsFilter:
+        return _Combined("~", (self,))
+
+    @property
+    def _reads_participants(self) -> bool:
+        return any(leaf.participants for leaf in self._leaves)
+
+    @property
+    def _reads_sidecars(self) -> bool:
+        return any(leaf.sidecar for leaf in self._leaves)
+
+    def _subject_sets(self, rows: list[Mapping]) -> list[set[str] | None]:
+        """Return, for each filter of the expression, the subjects it keeps.
+
+        `None` for a filter without participants filters.
+        """
+        return [
+            leaf._subjects_from(rows) if leaf.participants else None
+            for leaf in self._leaves
+        ]
+
+    # -- one filter of an expression -----------------------------------------
+    def _by_name(
+        self, name: ParsedPath, subjects: set[str] | None,
+    ) -> bool | None:
+        """Whether this filter keeps a data item, from its name alone.
+
+        `None` when only its sidecar can tell.
+        """
+        if not (self._passes(name) and _has_subject(name, subjects)):
+            return False
+        return None if self.sidecar else True
+
+    def _alone(self, m: ParsedPath, subjects: set[str] | None) -> bool:
+        """Whether this filter keeps a metadata file judged on its name.
+
+        For selection rule 3, the dataset aside: see `_Plan._kept_alone`.
+        """
+        return (
+            all(test.lenient for test in self.sidecar.values())
+            and self._passes(m, partial=True)
+            and _has_subject(m, subjects, partial=True)
+        )
+
+    def _holds(
+        self, sub: str, ses: str | None, subjects: set[str] | None,
+    ) -> bool | None:
+        """Whether this filter keeps the files of a subject (or session) folder.
+
+        `False` when it keeps none of them, `True` when it keeps all of
+        them (it filters on nothing but the folder's labels and, given
+        `subjects`, on `participants.tsv`), and `None` when that depends on
+        the files. On a valid dataset, every file in
+        `sub-<label>/` has that subject, and every file in its
+        `ses-<label>/` that session too.
+        """
+        match = self.entities.get("sub")
+        if match is not None and not match(sub):
+            return False
+        if subjects is not None and sub not in subjects:
+            return False
+        names = {"sub"}
+        if ses is not None:
+            match = self.entities.get("ses")
+            if match is not None and not match(ses):
+                return False
+            names.add("ses")
+        if (
+            set(self.entities) <= names and not self.parts
+            and self.include is None and not self.sidecar
+            and (subjects is not None or not self.participants)
+        ):
+            return True
+        return None
 
     # -- single files --------------------------------------------------------
     def keep_data(self, path: object) -> bool:
@@ -761,9 +923,17 @@ class BidsFilter:
         directory's name and datatype. The subject and session of a file
         are those its name gives, else those of the `sub-<label>/` and
         `ses-<label>/` folders it is in. The sidecar and participants
-        filters read files, and are not applied here.
+        filters read files, and are not applied here: on a combination of
+        filters, this says whether the file may be kept, `False` only when
+        its name rules it out.
         """
-        return self._passes(parse_path(path))
+        name = parse_path(path)
+        values: list[bool | None] = []
+        for leaf in self._leaves:
+            passes = leaf._passes(name)
+            unsure = passes and (leaf.sidecar or leaf.participants)
+            values.append(None if unsure else passes)
+        return _evaluate(self._node, values) is not False
 
     def _passes(self, name: ParsedPath, partial: bool = False) -> bool:
         """Whether a parsed path passes every filter on its name.
@@ -793,17 +963,14 @@ class BidsFilter:
         """Whether a subject (`"01"` or `"sub-01"`) passes the subject filters.
 
         Only the `sub` filter is applied; the participants filters read
-        `participants.tsv`, and are not.
+        `participants.tsv`, and are not. On a combination of filters, this
+        says whether a file of the subject may be kept.
         """
         label = str(label)
         if label.startswith("sub-"):
             label = label[4:]
-        match = self.entities.get("sub")
-        return not match or match(label)
-
-    def _keep_session(self, label: str) -> bool:
-        match = self.entities.get("ses")
-        return not match or match(label)
+        values = [leaf._holds(label, None, None) for leaf in self._leaves]
+        return _evaluate(self._node, values) is not False
 
     # -- listings ------------------------------------------------------------
     def select(self, paths: Iterable[T], root: object = None) -> list[T]:
@@ -854,7 +1021,7 @@ class BidsFilter:
         for path in paths:
             rel = _relative(path, root)
             items.setdefault(rel, path)
-        if self.sidecar and not all(map(_readable, items.values())):
+        if self._reads_sidecars and not all(map(_readable, items.values())):
             raise TypeError(
                 "a sidecar filter reads the sidecars of the listing: pass "
                 "path objects that can be read to select(), with the "
@@ -863,7 +1030,7 @@ class BidsFilter:
         base = None
         if isinstance(root, str) or _readable(root):
             base = in_family(root, BidsPath)
-        if self.participants and base is None:
+        if self._reads_participants and base is None:
             raise TypeError(
                 "a participants filter reads participants.tsv: pass the "
                 "dataset root= to select(), as a path that can be read, or "
@@ -883,9 +1050,9 @@ class BidsFilter:
                     text = ""
                 ignore = _BidsIgnore.parse(text)
         subjects = None
-        if self.participants:
+        if self._reads_participants:
             assert base is not None
-            subjects = self._subjects_from(self._participants(base, None))
+            subjects = self._subject_sets(self._participants(base, None))
         plan = _Plan(self, items, ignore, subjects)
         contents = {rel: _read_json(items[rel]) for rel in plan.reads}
         return [items[rel] for rel in plan.finish(contents)]
@@ -933,15 +1100,15 @@ class BidsFilter:
                     state.ignore = _BidsIgnore.parse(
                         (root / _BIDSIGNORE).read_text(encoding="utf-8")
                     )
-                if self.participants:
-                    state.subjects = self._subjects_from(
+                if self._reads_participants:
+                    state.subjects = self._subject_sets(
                         self._participants(root, _PARTICIPANTS in names)
                     )
             dirnames[:] = [d for d in dirnames if self._descend(parts, d, state)]
             for filename in filenames:
                 path = dirpath / filename
                 found[path.relative_to(root).as_posix()] = path
-        if self.participants and not state.started:
+        if self._reads_participants and not state.started:
             self._participants(root, False)
         plan = _Plan(self, found, state.ignore, state.subjects)
         unsure = plan.unsure(state.pruned)
@@ -1051,7 +1218,7 @@ class BidsFilter:
         """Read `.bidsignore` and `participants.tsv` from the root listing."""
         names = {child.name for child, is_dir, _ in children if not is_dir}
         read_ignore = self.bidsignore and _BIDSIGNORE in names
-        read_rows = bool(self.participants) and _PARTICIPANTS in names
+        read_rows = self._reads_participants and _PARTICIPANTS in names
         text, rows = await asyncio.gather(
             (root / _BIDSIGNORE).read_text(encoding="utf-8")
             if read_ignore else _nothing(),
@@ -1059,10 +1226,10 @@ class BidsFilter:
         )
         if read_ignore:
             state.ignore = _BidsIgnore.parse(text)
-        if self.participants:
+        if self._reads_participants:
             if not read_rows:
                 raise _no_participants(root)
-            state.subjects = self._subjects_from(rows)
+            state.subjects = self._subject_sets(rows)
 
     def _participants(self, root: BidsPath, listed: bool | None) -> list[dict]:
         """Read the rows of `participants.tsv` for the participants filters.
@@ -1155,23 +1322,200 @@ class BidsFilter:
             key = "sub"
         elif len(parts) == 1 and _is_entity_directory(parts[0], "sub"):
             key = "ses"
-        if key is None or not prune or self._may_hold(name, key, state):
+        if key is None or not prune or self._may_hold(name, key, state, parts):
             return True
         if state is not None:
             state.pruned.append("/".join((*parts, name)))
         return False
 
-    def _may_hold(self, name: str, key: str, state: _Walk | None) -> bool:
-        """Whether a `sub-`/`ses-` folder may hold a file the filters keep."""
+    def _may_hold(
+        self, name: str, key: str, state: _Walk | None,
+        parts: tuple[str, ...] = (),
+    ) -> bool:
+        """Whether a `sub-`/`ses-` folder may hold a file the filters keep.
+
+        `parts` is the folder's parent (the subject folder of a session).
+        On a combination, the folder may hold one unless the expression
+        keeps none of its files whatever they are: `|` when every operand
+        keeps none, `&` when one does, `~` when its operand keeps them all.
+        """
         if not _is_entity_directory(name, key):
             return True
         label = parse_name(name).entities[key]
-        if key == "ses":
-            return self._keep_session(label)
-        if not self.keep_subject(label):
-            return False
+        if key == "sub":
+            sub, ses = label, None
+        else:
+            sub, ses = parse_name(parts[0]).entities["sub"], label
         subjects = None if state is None else state.subjects
-        return subjects is None or label in subjects
+        values = [
+            leaf._holds(sub, ses, None if subjects is None else subjects[i])
+            for i, leaf in enumerate(self._leaves)
+        ]
+        return _evaluate(self._node, values) is not False
+
+
+_OPERATORS = {"&": "and", "|": "or", "~": "not"}
+_PRECEDENCE = {"|": 1, "&": 2, "~": 3}
+
+
+class _Combined(BidsFilter):
+    """Filters combined with `&`, `|` and `~`: a `BidsFilter` of its own.
+
+    It keeps the operands, for its repr, and compiles them into the
+    expression a selection evaluates: `_leaves`, the distinct plain filters
+    in it, and `_node`, an index into `_leaves` or `(operator, children)`.
+    `f & g & h` is one `&` of three operands, and `~~f` is `f`.
+    """
+
+    def __init__(self, op: str, operands: tuple[BidsFilter, ...]) -> None:
+        if op == "~":
+            if any(leaf.exclude is not None for leaf in operands[0]._leaves):
+                raise ValueError(
+                    "~ cannot turn around a BidsFilter with exclude=: exclude "
+                    "removes files from what a filter keeps, and has no "
+                    "opposite. Give exclude= to a filter outside the ~, as in "
+                    "~BidsFilter(task='rest') & BidsFilter(exclude=...)"
+                )
+        else:
+            operands = tuple(
+                inner for operand in operands for inner in (
+                    operand._operands
+                    if isinstance(operand, _Combined) and operand._op == op
+                    else (operand,)
+                )
+            )
+        self._op = op
+        self._operands = operands
+        leaves: list[BidsFilter] = []
+        self._node = _compile(self, leaves, {})
+        self._leaves = tuple(leaves)
+        self._options = _agreed_options(self._leaves)
+        self.bidsignore = self._options.get("bidsignore", True)
+        self.folders = self._options.get("folders", frozenset())
+
+    def __invert__(self) -> BidsFilter:
+        if self._op == "~":
+            return self._operands[0]
+        return super().__invert__()
+
+    def __reduce__(self) -> tuple:
+        return _combined, (self._op, self._operands)
+
+    def __repr__(self) -> str:
+        def shown(operand: BidsFilter) -> str:
+            text = repr(operand)
+            if (
+                isinstance(operand, _Combined)
+                and _PRECEDENCE[operand._op] < _PRECEDENCE[self._op]
+            ):
+                return f"({text})"
+            return text
+
+        if self._op == "~":
+            return "~" + shown(self._operands[0])
+        return f" {self._op} ".join(map(shown, self._operands))
+
+
+# A combination is a `BidsFilter` to the user, in messages too.
+_Combined.__name__ = _Combined.__qualname__ = "BidsFilter"
+
+
+def _combined(op: str, operands: tuple[BidsFilter, ...]) -> _Combined:
+    """Build a combination again (for pickle, which finds it by this name)."""
+    return _Combined(op, operands)
+
+
+def _compile(
+    f: BidsFilter, leaves: list[BidsFilter], index: dict[int, int],
+) -> object:
+    """Return the node of `f`, adding the plain filters in it to `leaves`."""
+    if isinstance(f, _Combined):
+        children = tuple(_compile(o, leaves, index) for o in f._operands)
+        return (_OPERATORS[f._op], children)
+    if id(f) not in index:
+        index[id(f)] = len(leaves)
+        leaves.append(f)
+    return index[id(f)]
+
+
+def _agreed_options(leaves: Iterable[BidsFilter]) -> dict[str, object]:
+    """Return the options on how the dataset is read that the filters give.
+
+    A filter that leaves one out takes the value the others give; two
+    filters that give different values are an error.
+    """
+    options: dict[str, object] = {}
+    for leaf in leaves:
+        for key, value in leaf._options.items():
+            if key in options and options[key] != value:
+                given = sorted(map(_shown_option, (options[key], value)))
+                raise ValueError(
+                    f"BidsFilter got {key}={given[0]} and {key}={given[1]} "
+                    f"in one combination: {key}= applies to the whole "
+                    "dataset, so give it on one filter, or the same on each"
+                )
+            options[key] = value
+    return options
+
+
+def _shown_option(value: object) -> str:
+    if isinstance(value, frozenset):
+        return repr(sorted(value))
+    return repr(value)
+
+
+def _evaluate(
+    node: object, values: list[bool | None], negation: bool | None = None,
+) -> bool | None:
+    """Evaluate an expression of `_Combined` on the answers of its filters.
+
+    `values[i]` answers for `_leaves[i]`, `None` when it is not known yet;
+    the result is `None` when it depends on one of those. With `negation`,
+    every `~` answers that, whatever its operand.
+    """
+    if isinstance(node, int):
+        return values[node]
+    op, children = node  # type: ignore[misc]
+    if op == "not":
+        if negation is not None:
+            return negation
+        value = _evaluate(children[0], values)
+        return None if value is None else not value
+    stop = op == "or"       # the answer that decides an `or` (an `and`)
+    result: bool | None = not stop
+    for child in children:
+        value = _evaluate(child, values, negation)
+        if value is stop:
+            return stop
+        if value is None:
+            result = None
+    return result
+
+
+def _has_subject(
+    name: ParsedPath, subjects: set[str] | None, partial: bool = False,
+) -> bool:
+    """Whether a file's subject is one of `subjects` (`None`: all of them).
+
+    The subject is the name's, else its folder's. With `partial` (a
+    metadata file judged on its own name), a file without one passes.
+    """
+    if subjects is None:
+        return True
+    label = _with_directory_entities(name).get("sub")
+    if label is None:
+        return partial
+    return label in subjects
+
+
+def _read_once(value: object) -> object:
+    """Read a filter value that can be read once (a generator) into a list."""
+    if isinstance(value, Not):
+        inner = _read_once(value.value)
+        return value if inner is value.value else Not(inner)
+    if _is_many(value) and iter(value) is value:  # type: ignore[call-overload]
+        return list(value)  # type: ignore[call-overload]
+    return value
 
 
 class _Walk:
@@ -1180,7 +1524,8 @@ class _Walk:
     def __init__(self) -> None:
         self.started = False
         self.ignore: _BidsIgnore | None = None
-        self.subjects: set[str] | None = None
+        # per filter of the expression, the subjects `participants.tsv` keeps
+        self.subjects: list[set[str] | None] | None = None
         self.pruned: list[str] = []      # the folders left out: label, ignore
 
 
@@ -1202,6 +1547,23 @@ class _Plan:
     never selected, but metadata still applies to it; ignored metadata (or
     an ignored companion) still applies to the data files it describes,
     and comes along with them, but is never kept on its own.
+
+    A combination of filters (`_Combined`) is one selection too. Each of
+    its filters (`leaves`) judges a data item, and the expression (`node`)
+    of their answers decides whether it is kept; the metadata of the kept
+    data items then follows once, as for one filter. Rule 3 combines each
+    filter's verdict on the metadata file the same way. `subjects` holds,
+    per filter, the subjects its participants filters keep (`None` for a
+    filter without them).
+
+    `exclude` belongs to the filter it is given to: it removes a file from
+    what that filter keeps. A file is kept when the expression keeps it
+    with each filter's answer turned to `False` where that filter's
+    `exclude` names the file: a data file on its data item's answers, a
+    metadata file or a companion on those of a kept data item it comes
+    along with, a file judged by rule 3 on the rule 3 verdicts, and a
+    dataset-level file on `True` for every filter (a `~` keeps it). A
+    filter under `~` has no `exclude`.
     """
 
     def __init__(
@@ -1209,10 +1571,16 @@ class _Plan:
         f: BidsFilter,
         paths: Iterable[str],
         ignore: _BidsIgnore | None = None,
-        subjects: set[str] | None = None,
+        subjects: list[set[str] | None] | None = None,
     ) -> None:
         self.filter = f
-        self.subjects = subjects
+        self.leaves = f._leaves
+        self.node = f._node
+        self.subjects = (
+            [None] * len(self.leaves) if subjects is None else list(subjects)
+        )
+        self.excludes = any(leaf.exclude for leaf in self.leaves)
+        self._exclusions: dict[str, list[bool] | None] = {}
         self.data: dict[str, ParsedPath] = {}     # data item -> how it parses
         self.members: dict[str, list[str]] = {}   # data item -> its files
         self.ignored: dict[str, list[str]] = {}   # ... and its ignored files
@@ -1226,14 +1594,32 @@ class _Plan:
         self.listed = list(paths)
         for path in self.listed:
             self._sort(path)
-        self.passed = {
-            item for item, d in self.data.items()
-            if self.members.get(item) and f._passes(d) and self._has_subject(d)
-        }
+        # The answers of each filter on every data item the expression may
+        # keep, `None` where only its sidecar can tell.
+        self.answers: dict[str, list[bool | None]] = {}
+        for item, d in self.data.items():
+            if not self.members.get(item):
+                continue
+            answers = [
+                leaf._by_name(d, subjects)
+                for leaf, subjects in zip(self.leaves, self.subjects)
+            ]
+            if _evaluate(self.node, answers) is not False:
+                self.answers[item] = answers
+        self.passed = set(self.answers)
+        # The sidecars are read for a data item whose fate they decide, and,
+        # with an `exclude`, wherever a filter's answer is open: which
+        # filters keep an item decides which of its files are excluded.
+        unread = [
+            item for item, answers in self.answers.items()
+            if None in answers and (
+                self.excludes or _evaluate(self.node, answers) is None
+            )
+        ]
         self.chains: dict[str, tuple[str, ...]] = {}
-        if f.sidecar:
+        if unread:
             self.chains = _sidecar_chains(
-                [self.data[item] for item in self.passed],
+                [self.data[item] for item in unread],
                 [*self.meta, *self.data.values()], self.scopes,
             )
         self.reads = {rel for chain in self.chains.values() for rel in chain}
@@ -1254,18 +1640,56 @@ class _Plan:
             files = self.ignored if ignored else self.members
             files.setdefault(name.item, []).append(path)  # type: ignore
 
-    def _kept_alone(self, m: ParsedPath) -> bool:
-        """Whether a metadata file that applies to no data file is kept."""
-        f = self.filter
+    def _kept_alone(self, m: ParsedPath, exclude: bool = True) -> bool:
+        """Whether a metadata file that applies to no data file is kept.
+
+        With `exclude`, as the selection keeps it; without, before the
+        `exclude` patterns remove it.
+        """
         if m.path in self.ignored_meta:
             return False
         if self.scopes.scope(m.directory)[1] is None:
             # Outside every dataset root, a metadata file reaches only its
             # own folder's data files, so it is never kept on its own.
             return False
-        if not all(test.lenient for test in f.sidecar.values()):
-            return False
-        return f._passes(m, partial=True) and self._has_subject(m, partial=True)
+        answers = [
+            leaf._alone(m, subjects)
+            for leaf, subjects in zip(self.leaves, self.subjects)
+        ]
+        if exclude:
+            return self._keeps(answers, m.path)
+        return _evaluate(self.node, answers) is True
+
+    def _excluded(self, path: str) -> list[bool] | None:
+        """Which filters' `exclude` names `path`; `None` when none does."""
+        if not self.excludes or path in _PROTECTED:
+            return None
+        if path not in self._exclusions:
+            hits = [bool(leaf.exclude and leaf.exclude(path))
+                    for leaf in self.leaves]
+            self._exclusions[path] = hits if any(hits) else None
+        return self._exclusions[path]
+
+    def _keeps(self, answers: list[bool | None], path: str) -> bool:
+        """Whether the expression keeps `path`, given the filters' answers.
+
+        Each filter whose `exclude` names the file answers `False`.
+        """
+        hits = self._excluded(path)
+        if hits is not None:
+            answers = [a and not h for a, h in zip(answers, hits)]
+        return _evaluate(self.node, answers) is True
+
+    def _kept_anyway(self, path: str) -> bool:
+        """Whether a file kept whatever the filters (rule 4) is kept.
+
+        Every filter keeps it but those whose `exclude` names it, and a
+        `~` keeps it too.
+        """
+        hits = self._excluded(path)
+        if hits is None:
+            return True
+        return _evaluate(self.node, [not h for h in hits], negation=True)
 
     def _required(self, x: ParsedPath, all_data: dict) -> bool:
         """Whether `x` applies only to recordings with its `acq` label.
@@ -1325,13 +1749,19 @@ class _Plan:
         candidates = [
             m for m in self.meta
             if not scopes.applies(m, all_data, self._relates)
-            and self._kept_alone(m)
+            and self._kept_alone(m, exclude=False)
         ]
         passed = scopes.index(self.data[item] for item in self.passed)
+        # A companion kept whatever its sidecar is kept whatever is pruned;
+        # one a sidecar filter may still drop is brought along or not.
+        decided = {
+            item for item, answers in self.answers.items()
+            if _evaluate(self.node, answers) is True
+        }
         companions = [d for d in self.data.values() if d.is_companion]
         for x in (*self.meta, *companions):
             if (
-                x.item in self.passed or not is_acq_tagged(x)
+                x.item in decided or not is_acq_tagged(x)
                 or self._required(x, all_data)
             ):
                 continue
@@ -1378,56 +1808,53 @@ class _Plan:
             )
         return self._relates(m, d)
 
-    def _has_subject(self, name: ParsedPath, partial: bool = False) -> bool:
-        """Whether a file's subject passes the participants filters.
-
-        The subject is the name's, else its folder's. With `partial` (a
-        metadata file judged on its own name), a file without one passes.
-        """
-        if self.subjects is None:
-            return True
-        label = _with_directory_entities(name).get("sub")
-        if label is None:
-            return partial
-        return label in self.subjects
-
     def finish(self, contents: Mapping[str, object]) -> list[str]:
         """Return the kept paths, sorted, given the sidecars in `reads`."""
-        f, kept = self.filter, set(self.kept)
-        passed = self.passed
-        if f.sidecar:
-            passed = {
-                item for item in passed
-                if _sidecar_passes(f, [contents[r] for r in self.chains[item]])
-            }
-        for item in passed:
-            kept.update(self.members[item])
+        kept = {path for path in self.kept if self._kept_anyway(path)}
+        # The kept data items, with the answers of each filter on them.
+        passed: dict[str, list[bool | None]] = {}
+        for item, answers in self.answers.items():
+            if item in self.chains:
+                chain = [contents[r] for r in self.chains[item]]
+                answers = [
+                    _sidecar_passes(leaf, chain) if answer is None else answer
+                    for leaf, answer in zip(self.leaves, answers)
+                ]
+            if _evaluate(self.node, answers):
+                passed[item] = answers
+        for item, answers in passed.items():
+            kept.update(
+                p for p in self.members[item] if self._keeps(answers, p)
+            )
         scopes = self.scopes
         kept_data = scopes.index(self.data[item] for item in passed)
         all_data = scopes.index(self.data.values())
         self.required.clear()
 
-        def brought(x: ParsedPath) -> bool:
-            return scopes.applies(
-                x, kept_data, lambda x, d: self._relates(x, d, all_data)
+        def brought(x: ParsedPath, path: str) -> bool:
+            """Whether file `path` of `x` comes along with a kept data item."""
+            return any(
+                self._relates(x, d, all_data)
+                and self._keeps(passed[d.item], path)
+                for d in kept_data.get(x.directory, ())
             )
 
         # A companion (`events.tsv`, `physio.tsv.gz`, `photo.jpg`) follows
         # the recordings it describes, as their metadata does, even when it
         # does not pass the filters or `.bidsignore` names it.
         for item, d in self.data.items():
-            if item not in passed and d.is_companion and brought(d):
-                kept.update(self.members.get(item, ()))
-                kept.update(self.ignored.get(item, ()))
+            if not d.is_companion or (item in passed and not self.excludes):
+                continue
+            files = self.members.get(item, [])
+            if item not in passed:
+                files = [*files, *self.ignored.get(item, ())]
+            kept.update(p for p in files if p not in kept and brought(d, p))
         for m in self.meta:
-            if brought(m) or (
+            if brought(m, m.path) or (
                 not scopes.applies(m, all_data, self._relates)
                 and self._kept_alone(m)
             ):
                 kept.add(m.path)
-
-        if f.exclude:
-            kept = {p for p in kept if p in _PROTECTED or not f.exclude(p)}
         return sorted(kept)
 
 
