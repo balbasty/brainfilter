@@ -14,7 +14,7 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-  "bagof-paths >= 0.4",
+  "bagof-paths >= 0.4.1",
   # Never and Required on Python 3.10, for the presence filters
   "typing_extensions >= 4.1",
 ]
