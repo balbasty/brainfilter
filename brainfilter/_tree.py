@@ -12,9 +12,10 @@ These mixins give `BidsPath` and its file classes a dict-like surface:
   first, up to the dataset root (or, with no dataset root above it, those
   in its own directory), and its `sidecar` is their merged content;
 - a data file's `companions` are the other files that apply to it under
-  the same rules (`events.tsv`, `physio.tsv.gz`, a `.bval`, ...),
-  `companion(name)` one of them (or an image paired with it, `sbref`,
-  `m0scan`), and its `fieldmaps` the fieldmaps of its subject meant for it.
+  the same rules (`events.tsv`, `physio.tsv.gz`, a `.bval`, a MEG
+  `headshape.pos`, ...), `companion(name)` one of them (or an image paired
+  with it, `sbref`, `m0scan`, `mrsref`), and its `fieldmaps` the
+  fieldmaps of its subject meant for it.
 
 On a writable path, `sidecar[key] = value`, `del sidecar[key]`,
 `sidecar.update()`, `table[column] = values`, `del table[column]`, any
@@ -818,20 +819,25 @@ class TreeMixin:
         compared by number), other than its `sidecars` themselves: the
         files with a companion suffix (`events`, `physio`, `stim`,
         `physioevents`, `channels`, `electrodes`, `coordsystem`, `optodes`,
-        `aslcontext`, `asllabeling`, `scans`, `sessions`) and their JSON
-        files, and the metadata files with this file's own suffix that are
-        not JSON (the `.bval` and `.bvec` of a `dwi` image). An
-        `electrodes`, `coordsystem` or `physio` file may also have a
-        `space` or `recording` entity that this file lacks. These are the
-        files a `BidsFilter` keeps with this file, besides its sidecars. A
-        single-band reference (`_sbref`) or an M0 scan (`_m0scan`) is a
-        data file of its own, not a companion; `companion("sbref")` finds
-        it.
+        `aslcontext`, `asllabeling`, `blood`, `photo`, `headshape`,
+        `markers`, `scans`, `sessions`) and their JSON files, and the
+        metadata files with this file's own suffix that are not JSON (the
+        `.bval` and `.bvec` of a `dwi` image). An `electrodes`,
+        `coordsystem`, `markers`, `physio` or `blood` file may also have a
+        `space` or `recording` entity that this file lacks. A MEG recording
+        also has the fine-calibration and crosstalk files of its subject or
+        session (`sub-01_acq-calibration_meg.dat`,
+        `sub-01_acq-crosstalk_meg.fif`), whatever its own `acq`. These are
+        the files a `BidsFilter` keeps with this file, besides its sidecars.
+        A single-band reference (`_sbref`), an M0 scan (`_m0scan`) or an MRS
+        reference scan (`_mrsref`) is a data file of its own, not a
+        companion; `companion("sbref")` finds it.
 
         Files in a nearer directory come first, and within one directory
         they are sorted by name. A file that is not a data file (a sidecar,
-        a table, a directory, a `README`) has none. Inside a transaction,
-        new files count. The directories are listed each time this is read.
+        a table, a photo, a directory, a `README`) has none. Inside a
+        transaction, new files count. The directories are listed each time
+        this is read.
         """
         return self._answer(search_companions(self))
 
@@ -842,20 +848,22 @@ class TreeMixin:
         dwi.companion("bval")                   # the .bval that applies
         bold.companion("events")                # its events.tsv
         eeg.companion("electrodes", space="CapTrak")
+        meg.companion("crosstalk")              # the session's crosstalk file
         bold.companion("sbref")                 # its single-band reference
         ```
 
         It is the file of `companions` with that suffix (or, for `bval`
-        and `bvec`, that extension) in the nearest directory that holds
-        one, so a file inherited from higher up is found too. A table or a
-        recording is the file itself (`events.tsv`, `physio.tsv.gz`), not
-        the JSON that describes it, which is among its own `sidecars`; a
-        `coordsystem` is a JSON file.
+        and `bvec`, that extension, and for `calibration` and `crosstalk`,
+        that `acq` label) in the nearest directory that holds one, so a
+        file inherited from higher up is found too. A table, a recording or
+        a photo is the file itself (`events.tsv`, `physio.tsv.gz`,
+        `blood.tsv`, `photo.jpg`), not the JSON that describes it, which is
+        among its own `sidecars`; a `coordsystem` is a JSON file.
 
-        An `sbref` or an `m0scan` is an image of its own, not a companion:
-        it is the `.nii.gz` (or `.nii`) image in this file's directory with
-        the same entities (index entities such as `run` compared by
-        number, so `run-1` is `run-01`) and that suffix.
+        An `sbref`, an `m0scan` or an `mrsref` is an image of its own, not
+        a companion: it is the `.nii.gz` (or `.nii`) image in this file's
+        directory with the same entities (index entities such as `run`
+        compared by number, so `run-1` is `run-01`) and that suffix.
 
         `None` when there is no such file, and for a file that is not a
         data file. Inside a transaction, new files count.
@@ -865,10 +873,12 @@ class TreeMixin:
         name
             A companion suffix (`events`, `physio`, `stim`, `physioevents`,
             `channels`, `electrodes`, `coordsystem`, `optodes`,
-            `aslcontext`, `asllabeling`, `scans`, `sessions`), a gradient
-            table (`bval`, `bvec`), or an image paired with this one
-            (`sbref` with a `bold`, `cbv`, `phase` or `dwi` image, `m0scan`
-            with an `asl` series).
+            `aslcontext`, `asllabeling`, `blood`, `photo`, `headshape`,
+            `markers`, `scans`, `sessions`), a gradient table (`bval`,
+            `bvec`), a MEG system file (`calibration`, `crosstalk`), or an
+            image paired with this one (`sbref` with a `bold`, `cbv`,
+            `phase` or `dwi` image, `m0scan` with an `asl` series, `mrsref`
+            with an `svs` or `mrsi` scan).
         **entities
             Entities the file must have, `key=label` (index entities
             compared by number); a label of `None` asks for a file without
@@ -879,8 +889,8 @@ class TreeMixin:
         ValueError
             If `name` is not one of these, or if the nearest directory
             that holds such a file holds more than one (two `electrodes`
-            files in different spaces): pass an entity that tells them
-            apart.
+            files in different spaces, two `blood` recordings): pass an
+            entity that tells them apart (`space=`, `recording=`).
         """
         entities = check_companion(name, entities)
         return self._answer(search_companion(self, name, entities))

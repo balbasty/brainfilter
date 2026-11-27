@@ -15,9 +15,16 @@ EEG = "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_eeg.edf"
 T1W = "sub-01/ses-1/anat/sub-01_ses-1_T1w.nii.gz"
 BOLD2 = "sub-01/ses-2/func/sub-01_ses-2_task-rest_bold.nii.gz"
 BOLD_NOSES = "sub-02/func/sub-02_task-rest_bold.nii.gz"
+MEG = "sub-01/ses-1/meg/sub-01_ses-1_task-rest_meg.fif"
+MEG_ACQ = "sub-01/ses-1/meg/sub-01_ses-1_task-rest_acq-b_meg.fif"
+PET = "sub-01/ses-1/pet/sub-01_ses-1_trc-FDG_pet.nii.gz"
+MICR = "sub-01/ses-1/micr/sub-01_ses-1_sample-A_BF.png"
 
 FUNC = "sub-01/ses-1/func/sub-01_ses-1_"
 FMAP = "sub-01/ses-1/fmap/sub-01_ses-1_"
+MEG_DIR = "sub-01/ses-1/meg/sub-01_ses-1_"
+PET_DIR = "sub-01/ses-1/pet/sub-01_ses-1_"
+MICR_DIR = "sub-01/ses-1/micr/sub-01_ses-1_"
 
 FILES = {
     "dataset_description.json": {"Name": "associated", "BIDSVersion": "1.10.0"},
@@ -62,6 +69,30 @@ FILES = {
     "sub-01/ses-1/eeg/sub-01_ses-1_task-rest_channels.tsv": "name\n",
     "sub-01/ses-1/eeg/sub-01_ses-1_space-CapTrak_electrodes.tsv": "name\n",
     "sub-01/ses-1/eeg/sub-01_ses-1_space-CapTrak_coordsystem.json": {},
+    # meg: two recordings, the files of the session's set-up
+    MEG: b"",
+    MEG_ACQ: b"",
+    f"{MEG_DIR}task-rest_meg.json": {},
+    f"{MEG_DIR}task-rest_channels.tsv": "name\n",
+    f"{MEG_DIR}acq-calibration_meg.dat": b"",
+    f"{MEG_DIR}acq-crosstalk_meg.fif": b"",
+    f"{MEG_DIR}headshape.pos": b"",
+    f"{MEG_DIR}photo.jpg": b"",
+    f"{MEG_DIR}acq-NAS_photo.jpg": b"",          # no recording has acq-NAS
+    f"{MEG_DIR}task-rest_markers.mrk": b"",
+    f"{MEG_DIR}task-other_markers.mrk": b"",      # another task
+    # pet: two blood recordings of the tracer
+    PET: b"",
+    f"{PET_DIR}trc-FDG_pet.json": {},
+    f"{PET_DIR}trc-FDG_recording-manual_blood.tsv": "time\n",
+    f"{PET_DIR}trc-FDG_recording-manual_blood.json": {},
+    f"{PET_DIR}trc-FDG_recording-auto_blood.tsv": "time\n",
+    f"{PET_DIR}trc-other_recording-manual_blood.tsv": "time\n",  # another
+    # micr: a photo of the sample, with its JSON
+    MICR: b"",
+    f"{MICR_DIR}sample-A_photo.jpg": b"",
+    f"{MICR_DIR}sample-A_photo.json": {},
+    f"{MICR_DIR}sample-B_photo.jpg": b"",         # another sample
     # anat
     T1W: b"",
     # fieldmaps of session 1
@@ -226,6 +257,44 @@ def test_eeg_channels_electrodes_coordsystem(ds):
     ]
 
 
+def test_meg_set_up_files(ds):
+    # the system files apply to every recording of the session, whatever
+    # its `acq`; a photo or a headshape to every recording too; markers to
+    # the recordings of their task
+    session = [
+        "sub-01/ses-1/sub-01_ses-1_scans.tsv",
+        "sub-01/ses-1/sub-01_ses-1_task-rest_events.tsv",
+        "sub-01/sub-01_sessions.tsv",
+        "task-rest_events.json",
+    ]
+    own = [
+        f"{MEG_DIR}acq-calibration_meg.dat",
+        f"{MEG_DIR}acq-crosstalk_meg.fif",
+        f"{MEG_DIR}headshape.pos",
+        f"{MEG_DIR}photo.jpg",
+        f"{MEG_DIR}task-rest_channels.tsv",
+        f"{MEG_DIR}task-rest_markers.mrk",
+    ]
+    assert _rel((ds / MEG).companions, ds) == own + session
+    assert _rel((ds / MEG_ACQ).companions, ds) == own + session
+
+
+def test_blood_recordings_of_a_pet_image(ds):
+    assert _rel((ds / PET).companions, ds)[:3] == [
+        f"{PET_DIR}trc-FDG_recording-auto_blood.tsv",
+        f"{PET_DIR}trc-FDG_recording-manual_blood.json",
+        f"{PET_DIR}trc-FDG_recording-manual_blood.tsv",
+    ]
+    assert f"{PET_DIR}trc-FDG_pet.json" not in _rel((ds / PET).companions, ds)
+
+
+def test_a_photo_of_a_sample_and_its_json(ds):
+    assert _rel((ds / MICR).companions, ds)[:2] == [
+        f"{MICR_DIR}sample-A_photo.jpg",
+        f"{MICR_DIR}sample-A_photo.json",
+    ]
+
+
 def test_companions_of_an_image_without_any(ds):
     assert _rel((ds / T1W).companions, ds) == [
         "sub-01/ses-1/sub-01_ses-1_scans.tsv", "sub-01/sub-01_sessions.tsv",
@@ -236,6 +305,10 @@ def test_companions_of_an_image_without_any(ds):
     "", "sub-01", "sub-01/ses-1/func", "README", "participants.tsv",
     "task-rest_bold.json", f"{FUNC}task-rest_run-1_events.tsv",
     "sub-01/ses-1/dwi/sub-01_ses-1_dwi.bval", "dataset_description.json",
+    # companion files are no data files
+    f"{MEG_DIR}acq-crosstalk_meg.fif", f"{MEG_DIR}acq-calibration_meg.dat",
+    f"{MEG_DIR}photo.jpg", f"{MEG_DIR}headshape.pos",
+    f"{MEG_DIR}task-rest_markers.mrk", f"{MICR_DIR}sample-A_photo.jpg",
 ])
 def test_not_a_data_file_has_none(ds, rel):
     path = ds / rel if rel else ds
@@ -246,6 +319,11 @@ def test_not_a_data_file_has_none(ds, rel):
 def test_a_recording_has_companions_too(ds):
     physio = ds / f"{FUNC}task-rest_run-1_stim.tsv.gz"
     assert f"{FUNC}task-rest_run-1_events.tsv" in _rel(physio.companions, ds)
+    # a blood recording's JSON is its sidecar
+    blood = ds / f"{PET_DIR}trc-FDG_recording-manual_blood.tsv"
+    assert _rel(blood.sidecars, ds) == [
+        f"{PET_DIR}trc-FDG_recording-manual_blood.json",
+    ]
 
 
 def test_without_a_dataset_root_only_the_own_directory(tmp_path):
@@ -424,6 +502,7 @@ def ads(request):
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("rel", [BOLD, DWI, ASL, EEG, T1W, BOLD2, BOLD_NOSES,
+                                 MEG, MEG_ACQ, PET, MICR, f"{MEG_DIR}photo.jpg",
                                  "sub-01", "task-rest_bold.json"])
 async def test_async_matches_sync(ads, tmp_path, rel):
     sync = BidsPath(str(tmp_path / "sync"))
@@ -535,18 +614,59 @@ def _random_dataset(rng):
                 files.append(f"{base}/beh/{pre}_task-x_beh.tsv")
             if pick() < .3:
                 files.append(f"{base}/anat/{pre}_T1w.nii.gz")
+            if pick() < .4:
+                meg = f"{base}/meg/{pre}"
+                for task in rng.sample(["rest", "x"], rng.randint(0, 2)):
+                    acq = rng.choice(["", "_acq-a"])
+                    files.append(f"{meg}_task-{task}{acq}_meg.fif")
+                    if pick() < .3:
+                        files.append(f"{meg}_task-{task}{acq}_meg.json")
+                    if pick() < .3:
+                        files.append(f"{meg}_task-{task}_markers.mrk")
+                for name, p in (("acq-calibration_meg.dat", .5),
+                                ("acq-crosstalk_meg.fif", .5),
+                                ("acq-calibration_meg.fif", .1),  # data
+                                ("headshape.pos", .4), ("photo.jpg", .3),
+                                ("acq-NAS_photo.jpg", .3),
+                                ("space-CapTrak_markers.sqd", .2)):
+                    if pick() < p:
+                        files.append(f"{meg}_{name}")
+            if pick() < .3:
+                pet = f"{base}/pet/{pre}"
+                trc = rng.choice(["", "_trc-FDG"])
+                if pick() < .8:
+                    files.append(f"{pet}{trc}_pet.nii.gz")
+                for name in ("recording-manual_blood.tsv",
+                             "recording-manual_blood.json",
+                             "recording-auto_blood.tsv"):
+                    if pick() < .5:
+                        files.append(f"{pet}{rng.choice([trc, '_trc-x'])}_{name}")
+            if pick() < .2:
+                mrs = f"{base}/mrs/{pre}"
+                files.append(f"{mrs}_{rng.choice(['svs', 'mrsi'])}.nii.gz")
+                if pick() < .5:
+                    files.append(f"{mrs}_mrsref.nii.gz")
+            if pick() < .2:
+                micr = f"{base}/micr/{pre}"
+                files.append(f"{micr}_sample-A_BF.png")
+                for name in ("sample-A_photo.jpg", "sample-A_photo.json",
+                             "sample-B_photo.tif"):
+                    if pick() < .5:
+                        files.append(f"{micr}_{name}")
     return sorted(set(files))
 
 
 def _is_data(rel):
+    from brainfilter._names import parse_path
+
     path = PureBidsPath(rel)
     return (
         rel.startswith("sub-") and path.suffix is not None
-        and not path.is_metadata
+        and not path.is_metadata and not parse_path(rel).is_companion_file
     )
 
 
-@pytest.mark.parametrize("seed", range(25))
+@pytest.mark.parametrize("seed", range(40))
 def test_companions_and_sidecars_are_what_the_filter_keeps(memory_store, seed):
     """For each data file, `companions` and `sidecars` together are exactly
     what `BidsFilter` keeps with it, beyond what it keeps whatever it selects.

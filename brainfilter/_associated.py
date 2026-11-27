@@ -11,9 +11,12 @@ back, so that one search serves the sync and the async surfaces (see
 - `search_companions`: the other files that come along with a data file
   under the same inheritance rules, as `BidsFilter` keeps them: its
   companion metadata (`events.tsv`, `channels.tsv`, `scans.tsv`, a `.bval`,
-  ...) and the companion recordings that apply to it (`physio.tsv.gz`).
-- `search_companion`: one of them by name (`events`, `bval`), or an image
-  paired with the data file (`sbref`, `m0scan`).
+  ...), the companion recordings that apply to it (`physio.tsv.gz`,
+  `blood.tsv`) and the companion files (`photo.jpg`, `headshape.pos`, a
+  MEG crosstalk file).
+- `search_companion`: one of them by name (`events`, `bval`,
+  `crosstalk`), or an image paired with the data file (`sbref`, `m0scan`,
+  `mrsref`).
 - `search_fieldmaps`: the fieldmaps of the subject that name a data file,
   through `IntendedFor` or `B0FieldIdentifier`/`B0FieldSource`.
 """
@@ -27,13 +30,16 @@ from brainfilter._names import (
     COMPANION_SUFFIXES,
     IMAGE_EXTENSIONS,
     JSON_COMPANIONS,
+    MEG_SYSTEM_FILES,
     METADATA_EXTENSIONS,
     PAIRED_IMAGES,
     applies_to,
     check_entity,
     data_directory,
+    is_companion_file,
     is_companion_recording,
     is_metadata,
+    meg_system_file,
     parse_name,
     same_label,
 )
@@ -93,11 +99,14 @@ def _is_data_file(path: Any) -> bool:  # noqa: ANN401
     """Whether `path` is named like a data file: neither metadata nor inside one.
 
     A BIDS file name (a suffix, and entities or an extension) that is not a
-    metadata file, and not a file inside a data file that is a directory
-    (`sub-01_meg.ds/`). Nothing is read.
+    metadata file, nor a companion file (`photo.jpg`, a MEG crosstalk file;
+    see `is_companion_file`), and not a file inside a data file that is a
+    directory (`sub-01_meg.ds/`). Nothing is read.
     """
     parsed = parse_name(path.name)
     if not parsed.is_file_name or is_metadata(parsed.suffix, parsed.extension):
+        return False
+    if is_companion_file(parsed.suffix, parsed.extension, parsed.entities):
         return False
     return data_directory(path.parts) is None
 
@@ -128,8 +137,9 @@ def search_companions(path: _P) -> _Search:
 
     A file of a directory the inheritance reaches (see `_levels`) is one
     when it applies to `path` (`applies_to`, companions included) and is
-    either a metadata file that is not one of its JSON sidecars, or a
-    recording with a companion suffix (`physio.tsv.gz`): the files
+    a metadata file that is not one of its JSON sidecars, a recording with
+    a companion suffix (`physio.tsv.gz`, `blood.tsv`), or a companion file
+    (`photo.jpg`, `headshape.pos`, a MEG crosstalk file): the files
     `BidsFilter` keeps along with `path`, but its sidecars. Nearer
     directories first, by name within one.
     """
@@ -158,7 +168,12 @@ def _companion_levels(path: _P) -> _Search:
             if is_metadata(parsed.suffix, parsed.extension):
                 if parsed.extension == ".json" and parsed.suffix == path.suffix:
                     continue        # a sidecar, which `sidecars` finds
-            elif not is_companion_recording(parsed.suffix, parsed.extension):
+            elif not (
+                is_companion_recording(parsed.suffix, parsed.extension)
+                or is_companion_file(
+                    parsed.suffix, parsed.extension, parsed.entities
+                )
+            ):
                 continue
             meta_rel = f"{rel_dir}/{name}".lstrip("/")
             if applies_to(meta_rel, data_rel):
@@ -173,7 +188,10 @@ def _companion_levels(path: _P) -> _Search:
 def companion_names() -> list[str]:
     """Return every name `companion` takes, sorted."""
     extensions = {e[1:] for e in METADATA_EXTENSIONS} - {"json", "tsv"}
-    return sorted(COMPANION_SUFFIXES | extensions | set(PAIRED_IMAGES))
+    return sorted(
+        COMPANION_SUFFIXES | extensions | set(PAIRED_IMAGES)
+        | set(MEG_SYSTEM_FILES)
+    )
 
 
 def check_companion(name: object, entities: dict) -> dict[str, str | None]:
@@ -203,7 +221,13 @@ def _wanted(name: str, path: Any, entities: dict) -> Any:  # noqa: ANN401
 
     def test(file: str) -> bool:
         parsed = parse_name(file)
-        if name in COMPANION_SUFFIXES:
+        if name in MEG_SYSTEM_FILES:
+            system = meg_system_file(
+                parsed.entities, parsed.suffix, parsed.extension
+            )
+            if system != name:
+                return False
+        elif name in COMPANION_SUFFIXES:
             if parsed.suffix != name:
                 return False
             is_json = parsed.extension == ".json"
@@ -253,9 +277,9 @@ def search_companion(path: _P, name: str, entities: dict) -> _Search:
     """Find one companion of a data file (`TreeMixin.companion`), or `None`.
 
     `name` and `entities` are checked by `check_companion`. A paired image
-    (`sbref`, `m0scan`) is looked for by `search_paired`; any other name in
-    `companions`: the files of the nearest directory that holds one, which
-    must hold only one.
+    (`sbref`, `m0scan`, `mrsref`) is looked for by `search_paired`; any
+    other name in `companions`: the files of the nearest directory that
+    holds one, which must hold only one.
     """
     if name in PAIRED_IMAGES:
         found = yield from search_paired(path, name, entities)
@@ -272,7 +296,7 @@ def search_companion(path: _P, name: str, entities: dict) -> _Search:
 
 
 def search_paired(path: _P, name: str, entities: dict) -> _Search:
-    """Find the `name` images paired with a data file (`sbref`, `m0scan`).
+    """Find the `name` images paired with a data file (`sbref`, `mrsref`, ...).
 
     Those in its own directory with the same entities (index entities
     compared by number) and an image extension, sorted by name; none when

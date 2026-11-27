@@ -17,41 +17,49 @@ Selection rules
 ---------------
 The input is a listing of files; see `BidsFilter.select` for directories.
 
-1. *Data files* are files inside `sub-*/` that are not metadata. They are
-   kept if they pass every filter: subjects, sessions, datatypes, suffixes,
-   tasks, other entities, the `include` patterns, the participants filter
-   (on the subject's row of `participants.tsv`) and the sidecar filters
-   (on the merged sidecar of the file). A file's subject and session are
-   those its name gives, else those of the `sub-<label>/` and
-   `ses-<label>/` folders it is in. A table that is a recording
-   (`*_beh.tsv`, `*_motion.tsv`, `*_blood.tsv`) is a data file, and so is
-   a continuous recording (`*_physio.tsv.gz`). A data file that is a
-   directory (a CTF MEG `*_meg.ds/`, an OME-Zarr `*.ome.zarr/`) is one
-   data item: every file inside it is kept or skipped with it, judged on
-   the directory's name, datatype and sidecar.
+1. *Data files* are files inside `sub-*/` that are neither metadata nor
+   companion files (rule 2). They are kept if they pass every filter:
+   subjects, sessions, datatypes, suffixes, tasks, other entities, the
+   `include` patterns, the participants filter (on the subject's row of
+   `participants.tsv`) and the sidecar filters (on the merged sidecar of
+   the file). A file's subject and session are those its name gives, else
+   those of the `sub-<label>/` and `ses-<label>/` folders it is in. A table
+   that is a recording (`*_beh.tsv`, `*_motion.tsv`, `*_blood.tsv`) is a
+   data file, and so is a continuous recording (`*_physio.tsv.gz`). A data
+   file that is a directory (a CTF MEG `*_meg.ds/`, an OME-Zarr
+   `*.ome.zarr/`) is one data item: every file inside it is kept or skipped
+   with it, judged on the directory's name, datatype and sidecar.
 2. *Metadata files* (`.json`, `.tsv`, `.bval`, `.bvec`), wherever they are,
    are kept if they apply to at least one kept data file under the BIDS
-   inheritance principle. So is a data file that is also a companion of
-   another (`*_physio.tsv.gz` of a `*_bold.nii.gz`) and does not pass the
-   filters itself. A metadata file applies to a data file from the data
-   file's directory up to its dataset root, the nearest directory of the
-   listing above it that holds a `dataset_description.json`; without one,
-   only the metadata in the data file's own directory applies. These are
-   the files `path.sidecars` and `path.companions` find.
-3. A metadata file that applies to no data file of the listing at all
-   (`beh/*_events.tsv` alone, `electrodes.tsv` of a session with no
-   recording) is judged on what it names, when a `dataset_description.json`
-   of the listing is in its folder or above it (without one, it is kept only
-   by rule 2): it is kept if its subject, session, datatype, suffix and path
-   pass the filters, and the entity
-   filters for the entities it has. An entity filter on an entity it does
-   not have passes if it admits a file without it: one with `Never` among
-   its values, or one made of values only (`acq="mprage"`). One that asks
-   for the entity to be there fails: `Any` or `Required`, alone or beside
-   values (`acq={Any, "mprage"}`), unless `Never` is there too. A sidecar
-   filter is judged the same way, as a filter on a field it does not have,
-   and the participants filter on its subject, when it has one. So an
-   empty `BidsFilter()` keeps every file of a dataset that rule 5 does not skip.
+   inheritance principle. So are the *companion files*, which describe
+   recordings without being metadata or recordings themselves: the
+   `*_photo` of a recording's set-up, the `*_headshape` and `*_markers` of
+   a MEG session, and the MEG fine-calibration and crosstalk files
+   (`*_acq-calibration_meg.dat`, `*_acq-crosstalk_meg.fif`, which apply to
+   every MEG recording of their subject or session and are never data files
+   of their own, whatever their `acq`). So is a data file that is also a
+   companion of another (`*_physio.tsv.gz` of a `*_bold.nii.gz`,
+   `*_blood.tsv` of a `*_pet.nii.gz`) and does not pass the filters itself.
+   A metadata file applies to a data file from the data file's directory up
+   to its dataset root, the nearest directory of the listing above it that
+   holds a `dataset_description.json`; without one, only the metadata in
+   the data file's own directory applies. These are the files
+   `path.sidecars` and `path.companions` find.
+3. A metadata file or a companion file that applies to no data file of
+   the listing at all (`beh/*_events.tsv` alone, `electrodes.tsv` of a
+   session with no recording, a `photo` whose `acq` no recording has) is
+   judged on what it names, when a `dataset_description.json` of the
+   listing is in its folder or above it (without one, it is kept only by
+   rule 2): it is kept if its subject, session, datatype, suffix and path
+   pass the filters, and the entity filters for the entities it has. An
+   entity filter on an entity it does not have passes if it admits a file
+   without it: one with `Never` among its values, or one made of values
+   only (`acq="mprage"`). One that asks for the entity to be there fails:
+   `Any` or `Required`, alone or beside values (`acq={Any, "mprage"}`),
+   unless `Never` is there too. A sidecar filter is judged the same way, as
+   a filter on a field it does not have, and the participants filter on its
+   subject, when it has one. So an empty `BidsFilter()` keeps every file of
+   a dataset that rule 5 does not skip.
 4. Dataset-level files (`dataset_description.json`, `participants.tsv`,
    `README`, `CHANGES`, `.bidsignore`, ...), other top-level files that are
    not sidecars, and `phenotype/` are always kept. Top-level sidecars
@@ -62,13 +70,13 @@ The input is a listing of files; see `BidsFilter.select` for directories.
    a hidden name inside a data directory (`.zattrs` in `*.ome.zarr/`) is
    part of the data file, and kept with it. The dataset's `.bidsignore`
    decides which files are data to select, never which metadata applies.
-   A data file it names is never selected, and metadata it names is kept
-   only as the metadata of a kept data file (rule 2), never on its own (rule
-   3). Dataset-level files (rule 4) are kept whether it names them or not.
-   So an ignored sidecar still applies to the data files it describes, its
-   values count for the sidecar filters, and it comes along with them; an
-   ignored `participants.tsv` is still read by the participants filters,
-   and kept.
+   A data file it names is never selected, and metadata (or a companion
+   file) it names is kept only as the metadata of a kept data file (rule 2),
+   never on its own (rule 3). Dataset-level files (rule 4) are kept whether
+   it names them or not. So an ignored sidecar still applies to the data
+   files it describes, its values count for the sidecar filters, and it
+   comes along with them; an ignored `participants.tsv` is still read by the
+   participants filters, and kept.
 6. Last, the `exclude` patterns remove any kept file but
    `dataset_description.json`.
 
@@ -1255,7 +1263,10 @@ def _classify(
         return ("keep" if top in folders else "skip"), None
     name = parse_path(path)
     if top.startswith("sub-") and len(parts) > 1:
-        return ("meta" if name.is_metadata else "data"), name
+        # A companion file (`photo.jpg`, a MEG crosstalk file) is no
+        # recording: it is kept as metadata is.
+        meta = name.is_metadata or name.is_companion_file
+        return ("meta" if meta else "data"), name
     if top == "phenotype":
         return "keep", None
     if len(parts) == 1:

@@ -164,26 +164,51 @@ METADATA_EXTENSIONS = frozenset({".json", ".tsv", ".bval", ".bvec"})
 # `.tsv` there (`channels`, `electrodes`, `optodes`, `events`, `aslcontext`,
 # `scans`, `sessions`) describes another file's recording. Continuous
 # recordings (`physio`, `stim`, ...) are `.tsv.gz`, which is not a metadata
-# extension, so they are data already.
+# extension, so they are data already. A `blood` recording is also a
+# companion of the PET images it was sampled with (see `COMPANION_SUFFIXES`).
 TABULAR_DATA_SUFFIXES = frozenset({"beh", "motion", "blood"})
 
-# Metadata suffixes that apply to data files with another suffix
+# Suffixes of the files that apply to data files with another suffix
 # (`sub-01_task-x_events.tsv` describes `sub-01_task-x_bold.nii.gz`): the
 # suffixes of the `channels`, `events` and `task` groups, `perf.aslcontext`,
-# `perf.asllabeling` and the `scans`/`sessions` tables, in `rules.files` of
-# the official BIDS 1.11.2 schema.
+# `perf.asllabeling`, `pet.blood`, the `photo` group, `meg.headshape`,
+# `meg.markers` and the `scans`/`sessions` tables, in `rules.files` of the
+# official BIDS 1.11.2 schema.
 COMPANION_SUFFIXES = frozenset({
     "scans", "sessions", "events", "physio", "physioevents", "stim",
     "channels", "electrodes", "coordsystem", "optodes", "aslcontext",
-    "asllabeling",
+    "asllabeling", "blood", "photo", "headshape", "markers",
 })
+
+# Companion suffixes whose files are neither metadata nor recordings: in
+# `rules.files.raw` of the official BIDS 1.11.2 schema, the `photo` of a
+# recording's set-up (`.jpg`, `.png`, `.tif`; eeg, emg, ieeg, meg, micr,
+# nirs), and the `headshape` (`.pos`, or any extension) and `markers`
+# (`.sqd`, `.mrk`) of a MEG session. Their extensions are no metadata
+# extensions, but they describe recordings and hold none, so the selection
+# treats them as it treats metadata. A `.json` among them (the `photo` of
+# a `micr` sample may have one) is metadata already.
+COMPANION_FILES = frozenset({"photo", "headshape", "markers"})
+
+# MEG files named like a recording that describe every MEG recording of
+# their subject or session: in `rules.files.raw.meg` of the official BIDS
+# 1.11.2 schema, the fine-calibration file (`calibration`:
+# `sub-<label>[_ses-<label>]_acq-calibration_meg.dat`) and the crosstalk
+# file (`crosstalk`: `..._acq-crosstalk_meg.fif`), whose `acquisition` is
+# fixed by an enum, with this extension each. They have no `task`, which
+# every MEG recording has. Each is a companion of those recordings, named
+# by its `acq` label, and not a data file of its own.
+MEG_SYSTEM_FILES = {"calibration": ".dat", "crosstalk": ".fif"}
 
 # Entities a companion file may have that the data file it describes cannot:
 # in `rules.files.raw` of the official BIDS 1.11.2 schema, `space` on
-# `electrodes`/`coordsystem` (EEG, iEEG, EMG recordings have none) and
-# `recording` on `physio`/`physioevents`/`stim` (MRI, MEG, motion and PET
-# recordings have none). They name the companion's own coordinate space or
-# recording, so a data file that lacks one is still described by it.
+# `electrodes`/`coordsystem`/`markers` (EEG, iEEG, EMG and MEG recordings
+# have none) and `recording` on `physio`/`physioevents`/`stim`/`blood` and
+# an EMG `photo` (MRI, MEG, motion and PET recordings have none). They name
+# the companion's own coordinate space or recording, so a data file that
+# lacks one is still described by it. The `acq` of a MEG system file (see
+# `MEG_SYSTEM_FILES`) is one too, and is never compared with the
+# recording's.
 COMPANION_ONLY_ENTITIES = frozenset({"space", "recording"})
 
 # Companion suffixes whose file is the JSON itself (`*_coordsystem.json`).
@@ -194,11 +219,14 @@ JSON_COMPANIONS = frozenset({"coordsystem"})
 # Images acquired with a data image and paired with it by name: the same
 # directory, the same entities, another suffix. In `rules.files.raw` of the
 # official BIDS 1.11.2 schema, `sbref` sits with the `func` images (`bold`,
-# `cbv`, `phase`) and with `dwi`, and `m0scan` with `asl` in `perf`. Each is
-# a data file of its own, so it is not one of the image's companions.
+# `cbv`, `phase`) and with `dwi`, `m0scan` with `asl` in `perf`, and the
+# reference scan `mrsref` with the `mrs` spectroscopy scans (`svs`, `mrsi`;
+# not with the localiser, `unloc`). Each is a data file of its own, so it
+# is not one of the image's companions.
 PAIRED_IMAGES: dict[str, frozenset[str]] = {
     "sbref": frozenset({"bold", "cbv", "phase", "dwi"}),
     "m0scan": frozenset({"asl"}),
+    "mrsref": frozenset({"svs", "mrsi"}),
 }
 
 # Extensions of the paired images (`objects.extensions` of the schema).
@@ -508,6 +536,18 @@ class ParsedPath(NamedTuple):
         """
         return is_metadata(self.suffix, self.extension)
 
+    @property
+    def is_companion_file(self) -> bool:
+        """Whether the name is a companion file (`photo.jpg`, ...).
+
+        A file that is not metadata but describes recordings without being
+        one; see `is_companion_file`. Never a file inside a directory-shaped
+        data file.
+        """
+        if self.item != self.path:
+            return False
+        return is_companion_file(self.suffix, self.extension, self.entities)
+
 
 def is_metadata(suffix: str | None, extension: str) -> bool:
     """Whether a name with this suffix and extension is a metadata file."""
@@ -520,11 +560,49 @@ def is_companion_recording(suffix: str | None, extension: str) -> bool:
     """Whether a file with this suffix and extension is a companion recording.
 
     A data file, not metadata, whose suffix is a companion suffix
-    (`*_physio.tsv.gz`, `*_stim.tsv.gz`, `*_asllabeling.jpg`; see
-    `COMPANION_SUFFIXES`): it comes along with the data files it applies
+    (`*_physio.tsv.gz`, `*_stim.tsv.gz`, `*_blood.tsv`, `*_asllabeling.jpg`;
+    see `COMPANION_SUFFIXES`) but not that of a companion file (see
+    `is_companion_file`): it comes along with the data files it applies
     to, as their metadata does.
     """
-    return suffix in COMPANION_SUFFIXES and not is_metadata(suffix, extension)
+    return (
+        suffix in COMPANION_SUFFIXES and suffix not in COMPANION_FILES
+        and not is_metadata(suffix, extension)
+    )
+
+
+def meg_system_file(
+    entities: dict, suffix: str | None, extension: str
+) -> str | None:
+    """Return `"calibration"` or `"crosstalk"` for a MEG system file, else `None`.
+
+    A name with the `meg` suffix, an `acq` label of `MEG_SYSTEM_FILES`
+    with the extension the schema gives it, and no `task`:
+    `sub-01_acq-crosstalk_meg.fif`, not `sub-01_task-x_acq-crosstalk_meg.fif`.
+    """
+    if suffix != "meg" or "task" in entities:
+        return None
+    acq = entities.get("acq")
+    if acq in MEG_SYSTEM_FILES and MEG_SYSTEM_FILES[acq] == extension:
+        return acq
+    return None
+
+
+def is_companion_file(
+    suffix: str | None, extension: str, entities: dict
+) -> bool:
+    """Whether a file that is not metadata describes recordings without being one.
+
+    A `photo`, `headshape` or `markers` file that is not metadata (see
+    `COMPANION_FILES`), or a MEG system file (see `meg_system_file`). The
+    selection treats it as metadata: it comes along with the data files
+    it applies to, and is never a data file of its own.
+    """
+    if is_metadata(suffix, extension):
+        return False
+    return suffix in COMPANION_FILES or (
+        meg_system_file(entities, suffix, extension) is not None
+    )
 
 
 def parse_path(path: object) -> ParsedPath:
@@ -568,6 +646,10 @@ def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
     `recording`; see `COMPANION_ONLY_ENTITIES`): `sub-01_space-CapTrak_
     electrodes.tsv` describes `sub-01_task-x_eeg.edf`.
 
+    A MEG system file (`sub-01_acq-crosstalk_meg.fif`; see
+    `meg_system_file`) is a companion of the MEG recordings (suffix `meg`,
+    none a system file itself), and its `acq` is not compared with theirs.
+
     Pass `companions=False` for a JSON sidecar's metadata: a companion's
     sidecar (`events.json`) describes the companion file, not the data.
 
@@ -580,12 +662,24 @@ def applies_to(meta: object, data: object, *, companions: bool = True) -> bool:
         meta.directory not in data.directory.parents
     ):
         return False
-    companion = meta.suffix != data.suffix
-    if companion and (not companions or meta.suffix not in COMPANION_SUFFIXES):
-        return False
+    system = meg_system_file(meta.entities, meta.suffix, meta.extension)
+    if system is not None:
+        if not companions or data.suffix != meta.suffix or meg_system_file(
+            data.entities, data.suffix, data.extension
+        ) is not None:
+            return False
+        companion = True
+    else:
+        companion = meta.suffix != data.suffix
+        if companion and (
+            not companions or meta.suffix not in COMPANION_SUFFIXES
+        ):
+            return False
     if meta.datatype and meta.datatype != data.datatype:
         return False
     for key, label in meta.entities.items():
+        if system is not None and key == "acq":
+            continue
         other = data.entities.get(key)
         if other is None:
             if not (companion and key in COMPANION_ONLY_ENTITIES):

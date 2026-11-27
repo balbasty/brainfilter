@@ -403,7 +403,11 @@ recordings and none was selected, while the same file appears in the result for
 A few rules follow BIDS rather than the file extension. Tables that are
 recordings in their own right (`*_beh.tsv`, `*_physio.tsv.gz`) are treated as
 data, and a recording stored as a folder, such as a CTF `*_meg.ds` or an
-OME-Zarr store, is kept or skipped as one unit. The
+OME-Zarr store, is kept or skipped as one unit. Files that describe how a
+recording was made without being recordings, such as a `*_photo.jpg` of the
+electrodes, the `*_headshape.pos` of a MEG session and its crosstalk and
+fine-calibration files, are kept with the recordings they describe, as
+metadata is. The
 [`BidsFilter`][brainfilter.BidsFilter] reference gives the complete rules.
 
 ## Filtering a listing you already have

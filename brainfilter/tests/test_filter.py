@@ -1,4 +1,5 @@
 import re
+import typing
 
 import pytest
 
@@ -418,6 +419,44 @@ def test_applies_to(meta, data, expected):
     # files inside a directory-shaped data file belong to it
     ("sub-01/meg/sub-01_task-x_meg.json",
      "sub-01/meg/sub-01_task-x_meg.ds/BadChannels", True),
+    # a photo, a headshape, markers or a blood recording is a companion
+    ("sub-01/eeg/sub-01_photo.jpg", "sub-01/eeg/sub-01_task-x_eeg.edf", True),
+    ("sub-01/emg/sub-01_recording-a_photo.png",
+     "sub-01/emg/sub-01_task-x_emg.edf", True),
+    ("sub-01/eeg/sub-01_acq-NAS_photo.jpg",
+     "sub-01/eeg/sub-01_task-x_eeg.edf", False),
+    ("sub-01/meg/sub-01_headshape.pos", "sub-01/meg/sub-01_task-x_meg.fif",
+     True),
+    ("sub-01/meg/sub-01_task-x_space-CapTrak_markers.mrk",
+     "sub-01/meg/sub-01_task-x_run-1_meg.fif", True),
+    ("sub-01/meg/sub-01_task-y_markers.mrk",
+     "sub-01/meg/sub-01_task-x_meg.fif", False),
+    ("sub-01/pet/sub-01_recording-manual_blood.tsv",
+     "sub-01/pet/sub-01_pet.nii.gz", True),
+    ("sub-01/pet/sub-01_trc-a_recording-manual_blood.json",
+     "sub-01/pet/sub-01_trc-b_pet.nii.gz", False),
+    # a MEG system file, of every MEG recording, whatever its `acq`
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+     "sub-01/meg/sub-01_task-x_meg.fif", True),
+    ("sub-01/meg/sub-01_acq-calibration_meg.dat",
+     "sub-01/meg/sub-01_task-x_acq-a_meg.fif", True),
+    ("sub-01/meg/sub-01_acq-calibration_meg.dat",
+     "sub-01/meg/sub-01_task-x_meg.ds/BadChannels", True),
+    ("sub-01/ses-1/meg/sub-01_ses-1_acq-crosstalk_meg.fif",
+     "sub-01/ses-1/meg/sub-01_ses-1_task-x_meg.fif", True),
+    ("sub-01/ses-1/meg/sub-01_ses-1_acq-crosstalk_meg.fif",
+     "sub-01/ses-2/meg/sub-01_ses-2_task-x_meg.fif", False),
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+     "sub-02/meg/sub-02_task-x_meg.fif", False),
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+     "sub-01/meg/sub-01_task-x_physio.tsv.gz", False),
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.fif",
+     "sub-01/meg/sub-01_acq-calibration_meg.dat", False),
+    # ... with the extension the schema gives it, and no task
+    ("sub-01/meg/sub-01_acq-crosstalk_meg.dat",
+     "sub-01/meg/sub-01_task-x_meg.fif", False),
+    ("sub-01/meg/sub-01_task-x_acq-crosstalk_meg.fif",
+     "sub-01/meg/sub-01_task-x_meg.fif", False),
 ])
 def test_applies_to_index_and_companion_entities(meta, data, expected):
     assert applies_to(meta, data) is expected
@@ -537,6 +576,135 @@ def test_recording_tables_are_data():
                  "sub-01/func/sub-01_task-x_events.tsv"):
         assert parse_path(path).is_metadata
         assert PureBidsPath(path).is_metadata
+
+
+def test_system_files_need_a_companion():
+    meta = "sub-01/meg/sub-01_acq-crosstalk_meg.fif"
+    data = "sub-01/meg/sub-01_task-x_meg.fif"
+    assert applies_to(meta, data)
+    assert not applies_to(meta, data, companions=False)   # not a sidecar
+
+
+# The files of a MEG session's set-up, a PET image with its blood recordings,
+# and a session holding set-up files alone.
+SET_UP = [
+    "dataset_description.json",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-rest_meg.fif",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-rest_meg.json",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-noise_acq-b_meg.fif",
+    "sub-01/ses-1/meg/sub-01_ses-1_acq-calibration_meg.dat",
+    "sub-01/ses-1/meg/sub-01_ses-1_acq-crosstalk_meg.fif",
+    "sub-01/ses-1/meg/sub-01_ses-1_headshape.pos",
+    "sub-01/ses-1/meg/sub-01_ses-1_photo.jpg",
+    "sub-01/ses-1/meg/sub-01_ses-1_acq-NAS_photo.jpg",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-rest_markers.mrk",
+    "sub-01/ses-1/meg/sub-01_ses-1_task-rest_channels.tsv",
+    "sub-01/ses-2/meg/sub-01_ses-2_acq-crosstalk_meg.fif",
+    "sub-01/ses-2/meg/sub-01_ses-2_headshape.pos",
+    "sub-01/pet/sub-01_trc-FDG_pet.nii.gz",
+    "sub-01/pet/sub-01_trc-FDG_recording-manual_blood.tsv",
+    "sub-01/pet/sub-01_trc-FDG_recording-manual_blood.json",
+    "sub-01/pet/sub-01_trc-FDG_recording-auto_blood.tsv",
+    "sub-01/pet/sub-01_trc-other_recording-auto_blood.tsv",
+]
+MEG1 = "sub-01/ses-1/meg/sub-01_ses-1_"
+MEG2 = "sub-01/ses-2/meg/sub-01_ses-2_"
+PET = "sub-01/pet/sub-01_trc-"
+
+
+def _named(*names):
+    return {"dataset_description.json", *names}
+
+
+SYSTEM = (f"{MEG1}acq-calibration_meg.dat", f"{MEG1}acq-crosstalk_meg.fif",
+          f"{MEG1}headshape.pos", f"{MEG1}photo.jpg")
+
+
+@pytest.mark.parametrize("kwargs, expected", [
+    # the set-up files come along with each recording of the session; the
+    # markers and channels of its task too
+    ({"tasks": "rest", "sessions": "1"}, _named(
+        *SYSTEM, f"{MEG1}task-rest_meg.fif", f"{MEG1}task-rest_meg.json",
+        f"{MEG1}task-rest_markers.mrk", f"{MEG1}task-rest_channels.tsv",
+        f"{MEG1}acq-NAS_photo.jpg",     # applies to none: judged on its name
+    )),
+    ({"tasks": "noise", "sessions": "1"}, _named(
+        *SYSTEM, f"{MEG1}task-noise_acq-b_meg.fif", f"{MEG1}acq-NAS_photo.jpg",
+    )),
+    ({"suffixes": "meg", "sessions": "1"}, _named(
+        *SYSTEM, f"{MEG1}task-rest_meg.fif", f"{MEG1}task-rest_meg.json",
+        f"{MEG1}task-noise_acq-b_meg.fif", f"{MEG1}task-rest_markers.mrk",
+        f"{MEG1}task-rest_channels.tsv",
+    )),
+    # a system file is no data file: `acq` never selects it, and a photo
+    # whose recordings are not kept is not kept
+    ({"acq": "calibration", "sessions": "1"}, _named()),
+    ({"acq": "crosstalk", "sessions": "1"}, _named()),
+    ({"suffixes": "photo", "sessions": "1"}, _named(f"{MEG1}acq-NAS_photo.jpg")),
+    # a session with set-up files alone: judged on their names (rule 3)
+    ({"sessions": "2"}, _named(
+        f"{MEG2}acq-crosstalk_meg.fif", f"{MEG2}headshape.pos",
+    )),
+    ({"sessions": "2", "suffixes": "meg"}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
+    ({"sessions": "2", "acq": "crosstalk"}, _named(       # `acq` is lenient
+        f"{MEG2}acq-crosstalk_meg.fif", f"{MEG2}headshape.pos",
+    )),
+    ({"sessions": "2", "acq": typing.Any}, _named(f"{MEG2}acq-crosstalk_meg.fif")),
+    # blood recordings come along with their PET image, and are data too
+    ({"suffixes": "pet"}, _named(
+        f"{PET}FDG_pet.nii.gz", f"{PET}FDG_recording-manual_blood.tsv",
+        f"{PET}FDG_recording-manual_blood.json",
+        f"{PET}FDG_recording-auto_blood.tsv",
+    )),
+    ({"suffixes": "blood", "recording": "auto"}, _named(
+        f"{PET}FDG_recording-auto_blood.tsv",
+        f"{PET}other_recording-auto_blood.tsv",
+    )),
+    ({"trc": "other"}, _named(
+        f"{PET}other_recording-auto_blood.tsv",
+        # the files without a tracer that apply to no recording
+        f"{MEG1}acq-NAS_photo.jpg", f"{MEG2}acq-crosstalk_meg.fif",
+        f"{MEG2}headshape.pos",
+    )),
+    ({"subjects": "02"}, _named()),
+])
+def test_select_companion_files(kwargs, expected):
+    assert set(BidsFilter(**kwargs).select(SET_UP)) == expected
+
+
+def test_walk_companion_files(tmp_path):
+    _make(tmp_path, SET_UP)
+    root = BidsPath(str(tmp_path))
+    for f in (BidsFilter(), BidsFilter(tasks="rest"), BidsFilter(sessions="2"),
+              BidsFilter(suffixes="pet"), BidsFilter(acq="crosstalk"),
+              BidsFilter(subjects="02")):
+        kept = [p.relative_to(root).as_posix() for p in f.walk(root)]
+        assert kept == f.select(SET_UP)
+
+
+def test_ignored_companion_files_are_never_kept_alone(tmp_path):
+    _make(tmp_path, SET_UP)
+    (tmp_path / ".bidsignore").write_text("*_acq-crosstalk_meg.fif\n")
+    root = BidsPath(str(tmp_path))
+    f = BidsFilter(tasks="rest", sessions={"1", "2"})
+    kept = [p.relative_to(root).as_posix() for p in f.walk(root)]
+    assert f"{MEG1}acq-crosstalk_meg.fif" in kept     # with its recording
+    assert f"{MEG2}acq-crosstalk_meg.fif" not in kept  # alone
+    assert f"{MEG2}headshape.pos" in kept
+
+
+def test_companion_files_parse_as_such():
+    for path in (f"{MEG1}acq-crosstalk_meg.fif", f"{MEG1}acq-calibration_meg.dat",
+                 f"{MEG1}photo.jpg", f"{MEG1}headshape.pos",
+                 f"{MEG1}task-rest_markers.mrk", "sub-01/micr/sub-01_photo.tif"):
+        assert parse_path(path).is_companion_file
+        assert not parse_path(path).is_metadata
+    for path in (f"{MEG1}task-rest_meg.fif", f"{MEG1}acq-crosstalk_meg.dat",
+                 f"{MEG1}task-rest_acq-crosstalk_meg.fif",
+                 f"{PET}FDG_recording-auto_blood.tsv",
+                 "sub-01/micr/sub-01_photo.json",       # metadata
+                 "sub-01/meg/sub-01_task-x_meg.ds/sub-01_photo.jpg"):
+        assert not parse_path(path).is_companion_file
 
 
 # Data files that are directories: CTF MEG, a MEG directory with no
