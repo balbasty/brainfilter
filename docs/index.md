@@ -1,4 +1,7 @@
-# brainfilter
+<h1 class="wordmark">
+  <img src="images/brainfilter-wordmark-light.svg#only-light" alt="brainfilter">
+  <img src="images/brainfilter-wordmark-dark.svg#only-dark" alt="brainfilter">
+</h1>
 
 brainfilter reads, filters and edits [BIDS](https://bids.neuroimaging.io)
 neuroimaging datasets wherever they are stored: on local disk, in an S3 or

@@ -1,1 +1,12 @@
-/* brainfilter docs: no overrides yet. */
+/* brainfilter docs. */
+
+/* The wordmark (logo and name) as the title of the home page; the theme
+   shows the image of its palette (#only-light / #only-dark). */
+.md-typeset h1.wordmark {
+  margin: 0.4em 0 1em;
+  text-align: center;
+}
+.md-typeset h1.wordmark img {
+  width: 22rem;
+  max-width: 100%;
+}

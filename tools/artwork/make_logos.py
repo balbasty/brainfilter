@@ -53,18 +53,22 @@ def drop(cx: float, cy: float, h: float, cls: str) -> str:
             f'A{r} {r} 0 0 1 {cx - r} {cy + h/2 - r} '
             f'C{cx - r} {cy + h/2 - 1.55*r} {cx - r*0.35} {cy - h/2 + h*0.28} {cx} {cy - h/2}Z"/>')
 
-DARK = f'''@media (prefers-color-scheme: dark) {{
-      .ink{{fill:{CREAM}}} .ink-s{{stroke:{CREAM}}} .cream{{fill:{INK}}} .paper{{fill:{PAPER_DARK}}}
-      .glass{{fill:{GLASS_DARK}}}
-    }}'''
+DARK_RULES = (f'.ink{{fill:{CREAM}}} .ink-s{{stroke:{CREAM}}} .cream{{fill:{INK}}} '
+              f'.paper{{fill:{PAPER_DARK}}} .glass{{fill:{GLASS_DARK}}}')
+DARK = f'@media (prefers-color-scheme: dark) {{ {DARK_RULES} }}'
 
-def style(extra: str = '', themed: bool = True) -> str:
-    """Return the palette as a <style> element (themed: swap it in dark mode)."""
+def style(extra: str = '', themed: bool = True, dark: bool = False) -> str:
+    """
+    Return the palette as a <style> element.
+
+    themed: swap it in dark mode (prefers-color-scheme); dark: always use the
+    dark palette (for pages that pick an image per scheme themselves).
+    """
     return f'''<style>
     .ink{{fill:{INK}}} .ink-s{{fill:none;stroke:{INK}}}
     .cream{{fill:{CREAM}}} .paper{{fill:{PAPER}}} .crema{{fill:{CREMA}}} .fixed-ink{{fill:{INK}}}
     .glass{{fill:{GLASS}}} .coffee{{fill:{COFFEE}}}
-    {DARK if themed else ''}{extra}
+    {DARK_RULES if dark else DARK if themed else ''}{extra}
   </style>'''
 
 
@@ -219,8 +223,14 @@ def _wordmark_text(text: str) -> tuple[int, float, list[float], str]:
     raise KeyError(text)
 
 
-def brainfilter_wordmark(themed: bool = True) -> str:
-    """Draw the logo, and "brainfilter" in the ink of the logo."""
+def brainfilter_wordmark(themed: bool = True, dark: bool = False) -> str:
+    """
+    Draw the logo, and "brainfilter" in the ink of the logo.
+
+    themed: follow prefers-color-scheme (the README); dark: the dark palette
+    only (with themed=False: the light palette only), for the docs site,
+    whose palette toggle does not follow prefers-color-scheme.
+    """
     # the logo, cropped to its drawing (paper filter to server)
     lx, ly, lw, lh = 80, 22, 356, 484
     H = 240                                  # height of the logo
@@ -233,8 +243,8 @@ def brainfilter_wordmark(themed: bool = True) -> str:
     logo = logo.replace("url(#server-inside)", "url(#wm-server-inside)")
     logo = logo.replace(' role="img" aria-labelledby="title"', "")
     logo = re.sub(r'<title id="title">[^<]*</title>', "", logo)
-    if themed:                               # the logo follows the palette
-        logo = re.sub(r"<style>.*?</style>", "", logo, flags=re.S)
+    # the logo follows the palette of the wordmark
+    logo = re.sub(r"<style>.*?</style>", "", logo, flags=re.S)
     # the name, as large as in the brainspresso wordmark
     upm, advance, (x0, y0, x1, y1), d = _wordmark_text("brainfilter")
     size = 116                               # font size
@@ -251,7 +261,7 @@ def brainfilter_wordmark(themed: bool = True) -> str:
   <title id="title">brainfilter</title>
   {ATTR}
   <!-- Lettering: Inter ExtraBold (rsms.me/inter, SIL OFL 1.1), as outlines. -->
-  {style(themed=themed)}
+  {style(themed=themed, dark=dark)}
   {logo}
   <path class="ink" transform="translate({tx:.2f} {base:.2f}) scale({k:.5f})" d="{d}"/>
 </svg>
@@ -261,6 +271,10 @@ def brainfilter_wordmark(themed: bool = True) -> str:
 if __name__ == "__main__":
     for name, make in (("brainfilter-logo", brainfilter),
                        ("brainfilter-wordmark", brainfilter_wordmark),
+                       ("brainfilter-wordmark-light",
+                        lambda: brainfilter_wordmark(themed=False)),
+                       ("brainfilter-wordmark-dark",
+                        lambda: brainfilter_wordmark(themed=False, dark=True)),
                        ("brainfilter-icon", brainfilter_icon)):
         (Path(OUT) / f"{name}.svg").write_text(make())
     # the site icon as a theme icon, used as the logo of the docs header

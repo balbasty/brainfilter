@@ -7,12 +7,15 @@ Sources of the brainfilter artwork. The generated files are in
 |------|------|
 | `docs/images/brainfilter-logo.svg` | The logo: a pour-over with the BIDS mark on its filter |
 | `docs/images/brainfilter-wordmark.svg` | The logo and the name (the heading of the README) |
+| `docs/images/brainfilter-wordmark-light.svg`, `-dark.svg` | The wordmark in one palette each: the title of the docs home page, which shows the one of its palette (`#only-light` / `#only-dark`) |
 | `docs/images/brainfilter-icon.svg` | The site icon, the favicon of the docs site (one colour, legible at 16-32 px) |
 | `docs/images/brainfilter-favicon-32.png`, `brainfilter-icon-180.png` | PNG fallbacks of the site icon (favicon, Apple touch icon) |
 | `overrides/.icons/brainfilter/icon.svg` | The site icon as a theme icon, the logo of the docs header (`brainfilter/icon`) |
 
 The SVGs in `docs/images/` follow `prefers-color-scheme` (light-on-dark in
-dark mode); the theme icon takes the colour of the text around it.
+dark mode), except the `-light` and `-dark` wordmarks: the palette toggle of
+the docs site does not follow `prefers-color-scheme`. The theme icon takes
+the colour of the text around it.
 
 ## Regenerating
 
