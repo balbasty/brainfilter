@@ -1,10 +1,10 @@
 """Select a subset of a BIDS dataset from its file listing.
 
-A [`Filter`][brainfilter.Filter] works on paths relative to the
+A [`BidsFilter`][brainfilter.BidsFilter] works on paths relative to the
 dataset root, so it applies to any listing (OpenNeuro, S3, a local
 directory, ...) before anything is downloaded::
 
-    >>> f = Filter(subjects=["01"], datatypes="anat", acq="mprage")
+    >>> f = BidsFilter(subjects=["01"], datatypes="anat", acq="mprage")
     >>> f.select(listing)                       # relative path strings
     >>> f.walk("s3://openneuro.org/ds000224")   # list a dataset, then select
     >>> await f.awalk("s3://openneuro.org/ds000224")  # ... asynchronously
@@ -15,7 +15,7 @@ the sidecars of the data files that pass every other filter, each once.
 
 Selection rules
 ---------------
-The input is a listing of files; see `Filter.select` for directories.
+The input is a listing of files; see `BidsFilter.select` for directories.
 
 1. *Data files* are files inside `sub-*/` that are not metadata. They are
    kept if they pass every filter: subjects, sessions, datatypes, suffixes,
@@ -51,7 +51,7 @@ The input is a listing of files; see `Filter.select` for directories.
    values (`acq={Any, "mprage"}`), unless `Never` is there too. A sidecar
    filter is judged the same way, as a filter on a field it does not have,
    and the participants filter on its subject, when it has one. So an
-   empty `Filter()` keeps every file of a dataset that rule 5 does not skip.
+   empty `BidsFilter()` keeps every file of a dataset that rule 5 does not skip.
 4. Dataset-level files (`dataset_description.json`, `participants.tsv`,
    `README`, `CHANGES`, `.bidsignore`, ...), other top-level files that are
    not sidecars, and `phenotype/` are always kept. Top-level sidecars
@@ -145,7 +145,7 @@ from brainfilter._names import (
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
 from brainfilter.conditions import Condition, Or, Regex, default_full
 
-__all__ = ["Filter"]
+__all__ = ["BidsFilter"]
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -156,7 +156,7 @@ _PROTECTED = frozenset({"dataset_description.json"})
 # Never ignored by `.bidsignore`.
 _NEVER_IGNORED = frozenset({"dataset_description.json", ".bidsignore"})
 
-# Filter keywords that are entity filters under another name.
+# BidsFilter keywords that are entity filters under another name.
 _ALIASES = {"subjects": "sub", "sessions": "ses", "tasks": "task"}
 
 _PARTICIPANTS = "participants.tsv"
@@ -252,7 +252,7 @@ class _LabelMatch:
         for item in values:
             if item is None and keyword is not None:
                 raise TypeError(
-                    f"Filter got None among the values of {keyword}=: None "
+                    f"BidsFilter got None among the values of {keyword}=: None "
                     f"is no filter there; use typing.Never for the files "
                     f"that have no such label"
                 )
@@ -387,7 +387,7 @@ def _value_matchers(given: Mapping, what: str) -> dict[str, _ValueMatch]:
     tests = {}
     for key, value in given.items():
         if not isinstance(key, str):
-            raise TypeError(f"Filter got a {what} filter on {key!r}: a name "
+            raise TypeError(f"BidsFilter got a {what} filter on {key!r}: a name "
                             "must be a string")
         if isinstance(value, (set, frozenset)) and not value:
             continue
@@ -408,7 +408,7 @@ def _patterns(value: object) -> Condition | None:
     return Or(*values)
 
 
-# The keywords of `Filter` itself, beside the entities.
+# The keywords of `BidsFilter` itself, beside the entities.
 _KEYWORDS = (
     "subjects", "exclude_subjects", "sessions", "datatypes", "suffixes",
     "tasks", "include", "exclude", "folders", "entities", "sidecar",
@@ -434,18 +434,18 @@ def _meant_keyword(name: str) -> str | None:
 
 
 def _refuse_capitalised_keywords(fields: Mapping[str, object]) -> None:
-    """Refuse a sidecar keyword that is a `Filter` keyword with a capital."""
+    """Refuse a sidecar keyword that is a `BidsFilter` keyword with a capital."""
     for name in fields:
         meant = _meant_keyword(name)
         if meant is not None:
             raise TypeError(
-                f"Filter got {name}=, which looks like {meant}= with a "
+                f"BidsFilter got {name}=, which looks like {meant}= with a "
                 f"capital letter: write {meant}=, or, to filter on a sidecar "
                 f"field named {name!r}, sidecar={{{name!r}: ...}}"
             )
 
 
-class Filter:
+class BidsFilter:
     """Filters applied to a BIDS listing. Empty filters select everything.
 
     Label filters (subjects, sessions, tasks, datatypes, suffixes, other
@@ -519,7 +519,7 @@ class Filter:
         Filters on a known BIDS entity (`acq="mprage"`, `run=[1, 2]`,
         `sub=...`, ...), and on a sidecar field for a keyword that starts
         with a capital letter (`RepetitionTime=2.0`). A capitalised keyword
-        that is a keyword of `Filter` or an entity (`Subjects=`, `Acq=`) is
+        that is a keyword of `BidsFilter` or an entity (`Subjects=`, `Acq=`) is
         refused as a misspelling; give such a field in `sidecar`.
 
     Notes
@@ -560,7 +560,7 @@ class Filter:
         unknown = set(kwargs) - set(SORTED_ENTITIES)
         if unknown:
             raise TypeError(
-                f"Filter got unknown keywords {', '.join(sorted(unknown))}; "
+                f"BidsFilter got unknown keywords {', '.join(sorted(unknown))}; "
                 "filter on another entity with entities={key: value}, and on "
                 "a sidecar field with a keyword that starts with a capital "
                 "letter or with sidecar={field: value}"
@@ -568,7 +568,7 @@ class Filter:
         given = dict(entities or {})
         for name, value in kwargs.items():
             if name in given:
-                raise TypeError(f"Filter got two filters for entity {name!r}")
+                raise TypeError(f"BidsFilter got two filters for entity {name!r}")
             given[name] = value
         keywords: dict[str, str] = {}   # entity -> the label keyword given
         for name, key in _ALIASES.items():
@@ -578,7 +578,7 @@ class Filter:
                 continue
             if key in given:
                 raise TypeError(
-                    f"Filter got both {name}= and a filter on entity {key!r}"
+                    f"BidsFilter got both {name}= and a filter on entity {key!r}"
                 )
             given[key] = value
             keywords[key] = name
@@ -586,7 +586,7 @@ class Filter:
         for name, value in fields.items():
             if name in on_sidecar:
                 raise TypeError(
-                    f"Filter got two filters for sidecar field {name!r}"
+                    f"BidsFilter got two filters for sidecar field {name!r}"
                 )
             on_sidecar[name] = value
 
@@ -1077,7 +1077,7 @@ class _Plan:
 
     def __init__(
         self,
-        f: Filter,
+        f: BidsFilter,
         paths: Iterable[str],
         ignore: _BidsIgnore | None = None,
         subjects: set[str] | None = None,
@@ -1368,7 +1368,7 @@ def _sidecar_chains(
     return chains
 
 
-def _sidecar_passes(f: Filter, contents: list[Mapping]) -> bool:
+def _sidecar_passes(f: BidsFilter, contents: list[Mapping]) -> bool:
     """Whether the merged content of a chain of sidecars passes `f`."""
     for key, test in f.sidecar.items():
         value = _ABSENT

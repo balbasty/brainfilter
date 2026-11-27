@@ -7,7 +7,7 @@ below it that it matches. A repetition time written once at the root applies to
 every `bold` image of the dataset, and a subject's sidecar can override it for
 that subject alone. brainfilter implements this principle in one place, and the
 same rules decide two things: what `sidecars` and `sidecar` return for a file,
-and which metadata files a [`Filter`](../api/filtering.md#brainfilter.Filter)
+and which metadata files a [`BidsFilter`](../api/filtering.md#brainfilter.BidsFilter)
 keeps along with the data files it selects.
 
 ## Which sidecars apply to a file
@@ -178,7 +178,7 @@ directory above becomes a dataset.
 
 ## What a filter keeps
 
-A [`Filter`](../api/filtering.md#brainfilter.Filter) works on a list of file
+A [`BidsFilter`](../api/filtering.md#brainfilter.BidsFilter) works on a list of file
 names, and it needs the same rules to know which metadata files belong with
 the data files it keeps. A metadata file is kept when it applies to at least
 one kept data file, so a filter that selects `run-1` of subject `01` also keeps
@@ -197,7 +197,7 @@ has no `space` in its name. The `sidecar` property leaves companions out, since
 an `events.json` describes the events table and not the image.
 
 ```pycon
->>> from brainfilter import Filter
+>>> from brainfilter import BidsFilter
 >>> listing = [
 ...     "dataset_description.json", "participants.tsv",
 ...     "bold.json", "task-rest_bold.json", "task-other_bold.json", "T1w.json",
@@ -211,7 +211,7 @@ an `events.json` describes the events table and not the image.
 ...     "sub-02/func/sub-02_task-rest_run-1_bold.nii.gz",
 ...     "sub-02/sub-02_task-rest_bold.json",
 ... ]
->>> for name in Filter(subjects="01", tasks="rest", run="01").select(listing):
+>>> for name in BidsFilter(subjects="01", tasks="rest", run="01").select(listing):
 ...     print(name)
 bold.json
 dataset_description.json

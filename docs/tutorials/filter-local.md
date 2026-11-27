@@ -1,6 +1,6 @@
 # Filtering a local dataset
 
-A [`Filter`][brainfilter.Filter] describes which part of a BIDS dataset you
+A [`BidsFilter`][brainfilter.BidsFilter] describes which part of a BIDS dataset you
 want. This tutorial builds filters for the situations that come up most often:
 picking subjects and sessions, picking a kind of recording, matching on the
 entities in a file name, on the values in the sidecars and on the
@@ -9,7 +9,7 @@ examples use the small dataset from [First steps](../getting-started/first-steps
 (the collapsed script on that page creates it), opened as `ds`.
 
 ```pycon
->>> from brainfilter import BidsPath, Filter
+>>> from brainfilter import BidsPath, BidsFilter
 >>> ds = BidsPath("ds")
 ```
 
@@ -17,7 +17,7 @@ A filter never changes the dataset, and it holds no reference to one. It is a
 set of rules, and `walk()` applies them: it lists the dataset and returns the
 files that pass. Since the examples below each try a new set of rules once,
 `ds.filter(...)`, which builds the filter from the same keywords and walks the
-dataset with it, would do as well; the tutorial spells out `Filter` because
+dataset with it, would do as well; the tutorial spells out `BidsFilter` because
 the filter itself is the subject. To keep the output short, the examples below print only the
 image files that were selected, through a small helper. Later in the tutorial
 the helper is dropped, to look at everything that comes along with the images.
@@ -34,9 +34,9 @@ The `subjects` and `sessions` keywords take a label, or a list of labels. A
 label can be written with or without its `sub-` or `ses-` prefix.
 
 ```pycon
->>> images(Filter(subjects="01", datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(subjects="01", datatypes="anat", suffixes="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
->>> images(Filter(subjects=["sub-01", "sub-02"], datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(subjects=["sub-01", "sub-02"], datatypes="anat", suffixes="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 ```
@@ -47,9 +47,9 @@ Labels in BIDS are text, and a subject called `01` is not the same text as
 `sub-1a`. A string, in contrast, matches exactly.
 
 ```pycon
->>> images(Filter(subjects=1, datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(subjects=1, datatypes="anat", suffixes="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
->>> images(Filter(subjects="1", datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(subjects="1", datatypes="anat", suffixes="T2w").walk(ds))
 ```
 
 The second call prints nothing, because the dataset has no subject whose label
@@ -61,14 +61,14 @@ Sessions work in the same way, and combine with subjects. The filter below asks
 for the second session of subjects 1 and 10, and only subject 10 has one.
 
 ```pycon
->>> images(Filter(subjects=[1, 10], sessions=2, suffixes="T2w").walk(ds))
+>>> images(BidsFilter(subjects=[1, 10], sessions=2, suffixes="T2w").walk(ds))
 sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
 ```
 
 To keep everyone except a few subjects, use `exclude_subjects`:
 
 ```pycon
->>> images(Filter(exclude_subjects=[1, 10], datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(exclude_subjects=[1, 10], datatypes="anat", suffixes="T2w").walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 ```
 
@@ -80,12 +80,12 @@ take a value or a list, and `tasks` selects on the `task-` entity of
 functional recordings.
 
 ```pycon
->>> images(Filter(subjects=2, datatypes="func").walk(ds))
+>>> images(BidsFilter(subjects=2, datatypes="func").walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(Filter(subjects=2, tasks="rest").walk(ds))
+>>> images(BidsFilter(subjects=2, tasks="rest").walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(Filter(subjects=2, suffixes=["T1w", "T2w"]).walk(ds))
+>>> images(BidsFilter(subjects=2, suffixes=["T1w", "T2w"]).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
@@ -104,10 +104,10 @@ Any other entity of the BIDS specification can be given as a keyword of its
 own name, such as `acq`, `run`, `echo`, `dir` or `space`.
 
 ```pycon
->>> images(Filter(subjects=2, datatypes="anat", acq="mprage").walk(ds))
+>>> images(BidsFilter(subjects=2, datatypes="anat", acq="mprage").walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
->>> images(Filter(subjects=2, datatypes="anat", run=[2]).walk(ds))
+>>> images(BidsFilter(subjects=2, datatypes="anat", run=[2]).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
 ```
 
@@ -119,7 +119,7 @@ and an integer matches by value, as it does for subjects.
 Keywords are checked when the filter is built, so a misspelled entity fails
 immediately instead of silently selecting nothing. For an entity that is not
 part of the specification, pass a dictionary:
-`Filter(entities={"myentity": "value"})`.
+`BidsFilter(entities={"myentity": "value"})`.
 
 ## Globs and regexes
 
@@ -129,10 +129,10 @@ accepts the usual wildcards, and a regular expression is given as a compiled
 
 ```pycon
 >>> from brainfilter import Glob
->>> images(Filter(datatypes="anat", suffixes="T2w", subjects=Glob("0*")).walk(ds))
+>>> images(BidsFilter(datatypes="anat", suffixes="T2w", subjects=Glob("0*")).walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
->>> images(Filter(subjects=2, datatypes="anat", acq=Glob("mp*"), run=1).walk(ds))
+>>> images(BidsFilter(subjects=2, datatypes="anat", acq=Glob("mp*"), run=1).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 ```
 
@@ -144,10 +144,10 @@ nothing else; it does not match `01`, and it certainly does not match `10`.
 
 ```pycon
 >>> import re
->>> images(Filter(subjects=re.compile("0[12]"), datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(subjects=re.compile("0[12]"), datatypes="anat", suffixes="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
->>> images(Filter(subjects=re.compile("1"), datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(subjects=re.compile("1"), datatypes="anat", suffixes="T2w").walk(ds))
 ```
 
 When a partial match is what you want, say so with `Regex(..., full=False)`,
@@ -155,7 +155,7 @@ which finds the pattern anywhere in the label.
 
 ```pycon
 >>> from brainfilter import Regex
->>> images(Filter(subjects=Regex("1", full=False), datatypes="anat", suffixes="T2w").walk(ds))
+>>> images(BidsFilter(subjects=Regex("1", full=False), datatypes="anat", suffixes="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-1/anat/sub-10_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
@@ -177,11 +177,11 @@ with no run number, and then those with one.
 
 ```pycon
 >>> from typing import Any, Never
->>> images(Filter(subjects=2, run=Never).walk(ds))
+>>> images(BidsFilter(subjects=2, run=Never).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(Filter(subjects=2, run=Any).walk(ds))
+>>> images(BidsFilter(subjects=2, run=Any).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
 ```
@@ -196,7 +196,7 @@ can sit in a set beside ordinary values. The filter below keeps the images that 
 acquisition label, together with those acquired with the `fse` sequence.
 
 ```pycon
->>> images(Filter(subjects=2, acq={Never, "fse"}).walk(ds))
+>>> images(BidsFilter(subjects=2, acq={Never, "fse"}).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
@@ -214,9 +214,9 @@ recordings take their repetition time of 2 seconds from the top-level
 own that say 1.5.
 
 ```pycon
->>> images(Filter(subjects=2, RepetitionTime=1.5).walk(ds))
+>>> images(BidsFilter(subjects=2, RepetitionTime=1.5).walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
->>> images(Filter(subjects=2, RepetitionTime=2).walk(ds))
+>>> images(BidsFilter(subjects=2, RepetitionTime=2).walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
 ```
 
@@ -226,10 +226,10 @@ expresses a condition, and the markers of the previous section ask whether a
 field is there at all.
 
 ```pycon
->>> images(Filter(subjects=2, EchoTime=lambda echo: echo < 0.01).walk(ds))
+>>> images(BidsFilter(subjects=2, EchoTime=lambda echo: echo < 0.01).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
->>> images(Filter(subjects=2, RepetitionTime=Never).walk(ds))
+>>> images(BidsFilter(subjects=2, RepetitionTime=Never).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-02_T1w.nii.gz
@@ -245,7 +245,7 @@ times; to accept one of several values, put them in a set, as in
 `PhaseEncodingDirection={"j", "j-"}`. And `None` matches a field whose value
 is the JSON `null`, while `Never` matches one that is absent. A field whose
 name is not a valid keyword goes in a dictionary instead:
-`Filter(sidecar={"Field-Name": 1})`.
+`BidsFilter(sidecar={"Field-Name": 1})`.
 
 A sidecar filter decides which recordings are kept, and the metadata that
 goes with them follows as usual. The sidecars are read only for the
@@ -259,10 +259,10 @@ values take the same forms as for sidecars, and they are compared with the
 typed values of the table, so the ages below are numbers.
 
 ```pycon
->>> images(Filter(participants={"age": lambda age: age > 28}, suffixes="T2w").walk(ds))
+>>> images(BidsFilter(participants={"age": lambda age: age > 28}, suffixes="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
->>> images(Filter(participants={"sex": "F"}, suffixes="T2w").walk(ds))
+>>> images(BidsFilter(participants={"sex": "F"}, suffixes="T2w").walk(ds))
 sub-01/ses-1/anat/sub-01_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-1/anat/sub-10_ses-1_acq-fse_T2w.nii.gz
 sub-10/ses-2/anat/sub-10_ses-2_acq-fse_T2w.nii.gz
@@ -284,10 +284,10 @@ relative to the dataset root. A string is a glob, which must match the entire
 path, and a compiled regex is searched for anywhere in it.
 
 ```pycon
->>> images(Filter(subjects=2, include="*/func/*").walk(ds))
+>>> images(BidsFilter(subjects=2, include="*/func/*").walk(ds))
 sub-02/ses-1/func/sub-02_ses-1_task-nback_bold.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
->>> images(Filter(subjects=2, exclude=re.compile("run-02|task-nback")).walk(ds))
+>>> images(BidsFilter(subjects=2, exclude=re.compile("run-02|task-nback")).walk(ds))
 sub-02/ses-1/anat/sub-02_ses-1_acq-fse_T2w.nii.gz
 sub-02/ses-1/anat/sub-02_ses-1_acq-mprage_run-01_T1w.nii.gz
 sub-02/ses-1/func/sub-02_ses-1_task-rest_bold.nii.gz
@@ -306,7 +306,7 @@ default selection to the raw data. Other top-level folders and hidden files,
 such as `.datalad`, are never listed.
 
 ```pycon
->>> files = Filter(subjects=1, datatypes="anat", suffixes="T2w", folders="derivatives").walk(ds)
+>>> files = BidsFilter(subjects=1, datatypes="anat", suffixes="T2w", folders="derivatives").walk(ds)
 >>> print(*[p.relative_to(ds).as_posix() for p in files if "derivatives" in p.parts], sep="\n")
 derivatives/fmriprep/dataset_description.json
 derivatives/fmriprep/sub-01/anat/sub-01_desc-preproc_T1w.nii.gz
@@ -379,7 +379,7 @@ and brainfilter adds those without being asked. Here is the complete result for
 the *n*-back recording of one subject.
 
 ```pycon
->>> files = Filter(subjects=1, tasks="nback").walk(ds)
+>>> files = BidsFilter(subjects=1, tasks="nback").walk(ds)
 >>> print(*[p.relative_to(ds).as_posix() for p in files], sep="\n")
 README
 dataset_description.json
@@ -404,7 +404,7 @@ A few rules follow BIDS rather than the file extension. Tables that are
 recordings in their own right (`*_beh.tsv`, `*_physio.tsv.gz`) are treated as
 data, and a recording stored as a folder, such as a CTF `*_meg.ds` or an
 OME-Zarr store, is kept or skipped as one unit. The
-[`Filter`][brainfilter.Filter] reference gives the complete rules.
+[`BidsFilter`][brainfilter.BidsFilter] reference gives the complete rules.
 
 ## Filtering a listing you already have
 
@@ -418,7 +418,7 @@ file, a database or a previous call.
 ...     "sub-01/anat/sub-01_acq-mprage_run-1_T1w.nii.gz",
 ...     "sub-02/anat/sub-02_acq-mprage_run-1_T1w.nii.gz",
 ... ]
->>> Filter(subjects="01", datatypes="anat", acq=Glob("mp*"), run=[1, 2]).select(listing)
+>>> BidsFilter(subjects="01", datatypes="anat", acq=Glob("mp*"), run=[1, 2]).select(listing)
 ['sub-01/anat/sub-01_acq-mprage_run-1_T1w.nii.gz']
 ```
 
@@ -438,7 +438,7 @@ when it is a path object or when `root` is given.
 
 ## Where to go next
 
-The [`Filter`][brainfilter.Filter] reference lists every keyword and the
+The [`BidsFilter`][brainfilter.BidsFilter] reference lists every keyword and the
 complete selection rules. Reading the selected files, and the sidecars that go
 with them, is covered by [Reading sidecars and tables](read-metadata.md), and
 running the same filter against a dataset in the cloud only changes the path

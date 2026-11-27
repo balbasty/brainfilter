@@ -18,7 +18,7 @@ PUBLIC = [
     "BidsEntities",
     "BidsNameError",
     "BidsPath",
-    "Filter",
+    "BidsFilter",
     "Glob",
     "PureBidsPath",
     "ReadOnlyError",
@@ -47,7 +47,7 @@ def test_top_level_names_are_the_submodules_own():
 
     assert brainfilter.BidsPath is bidspath.BidsPath
     assert brainfilter.Glob is conditions.Glob
-    assert brainfilter.Filter is filter.Filter
+    assert brainfilter.BidsFilter is filter.BidsFilter
     assert brainfilter.Transaction is transaction.Transaction
     assert brainfilter.Version is versioning.Version
     assert isinstance(brainfilter.__version__, str)

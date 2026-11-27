@@ -81,7 +81,7 @@ class Regex(Regexish):
     with `full=False` it matches a value it is found anywhere in
     (`re.Pattern.search`). The default, `full=None`, leaves the choice to
     where the regex is used: it searches, except where a whole value is
-    expected, such as a label filter of `brainfilter.Filter`.
+    expected, such as a label filter of `brainfilter.BidsFilter`.
     """
 
     def __init__(

@@ -2,7 +2,7 @@
 import pytest
 
 from brainfilter.bidspath import AsyncBidsPath, BidsPath, PureBidsPath
-from brainfilter.filter import Filter
+from brainfilter.filter import BidsFilter
 
 FILES = {
     "dataset_description.json": "{}",
@@ -74,7 +74,7 @@ def test_filter_keywords_and_instance(ds):
         "sub-2/ses-1/func/sub-2_ses-1_task-rest_bold.nii.gz"
     ]
     assert all(isinstance(p, BidsPath) for p in got)
-    f = Filter(subjects="2", suffixes="bold")
+    f = BidsFilter(subjects="2", suffixes="bold")
     assert ds.filter(f) == f.walk(ds) == got
 
 
@@ -88,8 +88,8 @@ def test_filter_derivatives(ds):
 
 
 @pytest.mark.parametrize("args,kwargs", [
-    ((Filter(),), {"subjects": 1}),
-    ((Filter(), Filter()), {}),
+    ((BidsFilter(),), {"subjects": 1}),
+    ((BidsFilter(), BidsFilter()), {}),
     (("sub-01",), {}),
 ])
 def test_filter_bad_arguments(ds, args, kwargs):
@@ -127,9 +127,9 @@ async def test_async(ads):
     assert _rel(got, ads) == [
         "sub-2/ses-1/func/sub-2_ses-1_task-rest_bold.nii.gz"
     ]
-    assert await ads.filter(Filter(subjects="2", suffixes="bold")) == got
+    assert await ads.filter(BidsFilter(subjects="2", suffixes="bold")) == got
     with pytest.raises(TypeError):
-        await ads.filter(Filter(), subjects=1)
+        await ads.filter(BidsFilter(), subjects=1)
     assert await ads.subjects() == ["2", "10"]
     assert await ads.sessions() == ["1", "2", "10"]
     assert await (ads / "sub-2").sessions() == ["1", "2"]

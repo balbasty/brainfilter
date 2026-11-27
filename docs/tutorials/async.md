@@ -198,7 +198,7 @@ worker joins the transaction. The rules are laid out in
 `await ds.filter(...)` is the asynchronous counterpart of `filter()`. It
 lists the dataset one level at a time, with all the directories of a level
 listed at once, and returns the files to keep as `AsyncBidsPath` objects, with
-the mode of the dataset. A `Filter` that is reused does the same through its
+the mode of the dataset. A `BidsFilter` that is reused does the same through its
 `awalk()` method, and `await ds.subjects()` and `await ds.sessions()` list
 the labels, the subjects' sessions all at once.
 

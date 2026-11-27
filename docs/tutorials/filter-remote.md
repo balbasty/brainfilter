@@ -23,7 +23,7 @@ for S3 is [s3fs](https://s3fs.readthedocs.io). Its `anon` option turns off
 authentication.
 
 ```pycon
->>> from brainfilter import BidsPath, Filter
+>>> from brainfilter import BidsPath, BidsFilter
 >>> ds = BidsPath("s3://openneuro.org/ds000001", storage_options={"anon": True})
 >>> ds
 BidsPath('s3://openneuro.org/ds000001')
@@ -60,7 +60,7 @@ Suppose a study needs the T1-weighted image of the first three participants.
 The filter is the same one that would be used on a local disk:
 
 ```pycon
->>> f = Filter(subjects=[1, 2, 3], datatypes="anat", suffixes="T1w")
+>>> f = BidsFilter(subjects=[1, 2, 3], datatypes="anat", suffixes="T1w")
 >>> kept = f.walk(ds)
 >>> print(*[p.relative_to(ds).as_posix() for p in kept], sep="\n")
 CHANGES
@@ -127,7 +127,7 @@ sub-03/anat/sub-03_T1w.nii.gz
 ```
 
 Only now did the images cross the network. The result can be opened with a
-local `BidsPath` and filtered again, with the same `Filter`, whenever the
+local `BidsPath` and filtered again, with the same `BidsFilter`, whenever the
 selection needs to be narrowed further.
 
 If a library needs the file by name but you would rather not keep a copy, the
@@ -138,18 +138,18 @@ temporary location for the length of a `with` block.
 
 Listing is the part of the workflow that costs time on a remote store, so it is
 worth doing once. Instead of calling `walk()` for every filter, list the
-dataset a single time with an empty `Filter`, which keeps every file of the
+dataset a single time with an empty `BidsFilter`, which keeps every file of the
 raw dataset, and apply each filter to that listing with `select()`. The
 `root` argument tells `select()` which part of each path to compare, so the
 paths do not have to be converted to strings first.
 
 ```pycon
->>> files = Filter().walk(ds)
+>>> files = BidsFilter().walk(ds)
 >>> len(files)
 133
->>> len(Filter(datatypes="anat").select(files, root=ds))
+>>> len(BidsFilter(datatypes="anat").select(files, root=ds))
 36
->>> len(Filter(tasks="balloonanalogrisktask", run=1).select(files, root=ds))
+>>> len(BidsFilter(tasks="balloonanalogrisktask", run=1).select(files, root=ds))
 37
 ```
 
@@ -185,12 +185,12 @@ lists the folders of each level concurrently:
 
 ```python
 import asyncio
-from brainfilter import AsyncBidsPath, Filter
+from brainfilter import AsyncBidsPath, BidsFilter
 
 
 async def main():
     ds = AsyncBidsPath("s3://openneuro.org/ds000001", storage_options={"anon": True})
-    return await Filter(subjects=[1, 2, 3], datatypes="anat").awalk(ds)
+    return await BidsFilter(subjects=[1, 2, 3], datatypes="anat").awalk(ds)
 
 
 kept = asyncio.run(main())
@@ -208,5 +208,5 @@ Filtering a dataset on a different store only changes the URL and the
 server (see the caveat on listing in
 [Installation](../getting-started/installation.md#remote-backends)), and so
 on. The [Paths and backends](../concepts/paths-and-backends.md) page explains
-how a backend is chosen, and the [`Filter`][brainfilter.Filter] reference
+how a backend is chosen, and the [`BidsFilter`][brainfilter.BidsFilter] reference
 lists every condition available.
