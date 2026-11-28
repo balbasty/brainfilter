@@ -32,11 +32,30 @@ Inside a block, every write to a covered file is kept, whichever path object
 it goes through (one derived from the block's path, one built from a string,
 sync or async), and every read of the tree sees them: a file's keys and
 values, `as_dict()`, the directory listing (new files included), `sidecars`
-and `sidecar`. A write that raises leaves the file's content as it was.
-Leaving the block with an exception discards everything: nothing is
-written. Leaving it cleanly writes each changed file once. A file that was
-read but not changed is not written, and in a table that changed, the cells
-left unchanged keep their exact text.
+and `sidecar`, `companions` and `fieldmaps`, `subjects()` and `sessions()`,
+and `ds.filter()` with `BidsFilter.walk` and `awalk`, which list the new
+files with the folders that hold them and read the sidecars and
+`participants.tsv` as the block holds them. A write that raises leaves the
+file's content as it was. Leaving the block with an exception discards
+everything: nothing is written. Leaving it cleanly writes each changed file
+once. A file that was read but not changed is not written, and in a table
+that changed, the cells left unchanged keep their exact text.
+
+The members a path shares with `pathlib` read the store as it is, inside a
+block too: `iterdir`, `glob`, `rglob`, `walk`, `exists`, `stat`,
+`read_text`, `read_bytes` and `open` do not show a new file until the
+commit has written it, nor an edit before then. `BidsFilter.select` lists
+nothing: it reads the sidecars of the paths it is given as the block holds
+them, so a listing made with `rglob` misses the new files, and one made
+with `walk` has them.
+
+Inside a block, the search for a file's sidecars lists each directory
+below the block's root once, and uses that listing again for the rest of
+the block, with the files the block holds added, until brainfilter changes
+a store: a write through a path member (`mkdir`, `rename`, `copy`,
+`write_bytes`, ...) or a file written outside the block. A file that
+another program adds to one of those directories meanwhile is not seen, as
+a change another writer makes to a file the block holds is not.
 
 Inside a block, on a writable path, `sidecar[key]` (`await sidecar.get(key)`
 in the async family) returns the transaction's own value, and
@@ -165,7 +184,13 @@ from brainfilter._family import in_family
 from brainfilter._names import parse_name
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Iterator, Mapping
+    from collections.abc import (
+        AsyncIterator,
+        Callable,
+        Iterable,
+        Iterator,
+        Mapping,
+    )
     from types import TracebackType
 
     from brainfilter.bidspath import AsyncBidsPath, BidsPath
@@ -354,6 +379,64 @@ def pending_names(directory: object) -> set[str]:
         if tx._state == _OPEN:
             names |= tx._buffer.names_in(directory)
     return names
+
+
+def pending_tree(top: object) -> dict[tuple[str, ...], dict[str, bool]]:
+    """Return what the open transactions of this context hold below `top`.
+
+    `{parts: {name: is_directory}}`: for each directory below `top` (by its
+    parts relative to `top`, `()` for `top` itself), the names of the held
+    files with content in it, and of the directories above them, with
+    whether each is a directory. Empty outside every block, and for a
+    transaction opened in another thread or task.
+    """
+    tree: dict[tuple[str, ...], dict[str, bool]] = {}
+    open_here = [tx for tx in _ACTIVE.get() if tx._state == _OPEN]
+    if not open_here:
+        return tree
+    kind, place = _location(top)
+    for tx in open_here:
+        for (entry_kind, location), entry in list(tx._buffer._entries.items()):
+            if entry_kind != kind or place not in location.parents:
+                continue
+            if entry.absent():
+                continue
+            parts = location.relative_to(place).parts
+            for depth in range(len(parts)):
+                names = tree.setdefault(parts[:depth], {})
+                is_dir = depth < len(parts) - 1
+                names[parts[depth]] = names.get(parts[depth], False) or is_dir
+    return tree
+
+
+def pending_kinds(directory: object) -> dict[str, bool]:
+    """Return the children of `directory` the transactions open here hold.
+
+    `{name: is_directory}`, as `pending_tree` gives them for one directory.
+    """
+    return pending_tree(directory).get((), {})
+
+
+# -- what brainfilter changed ------------------------------------------------------
+
+# How many times a write through brainfilter has changed a store, in this
+# process: a JSON or TSV file written (at once or by a commit), or a path
+# member that changes the store called. What was remembered from a listing
+# at one count is not used at another. Guarded by `_CHANGES_LOCK`.
+_CHANGES_LOCK = threading.Lock()
+_changes = 0
+
+
+def changed() -> None:
+    """Count one change of a store made through brainfilter."""
+    global _changes
+    with _CHANGES_LOCK:
+        _changes += 1
+
+
+def changes() -> int:
+    """Return how many changes `changed` has counted so far."""
+    return _changes
 
 
 def entered(root: object) -> _TransactionBase:
@@ -863,6 +946,10 @@ class _TransactionBase:
         self._state = _NEW
         self._written: list = []
         self._location = _location(root)
+        # `location -> (changes, names)`: the directories below the root
+        # that a sidecar search listed in the block, as the store had them
+        # when `changes()` was `changes` (see `listed_names`).
+        self._listings: dict[object, tuple[int, frozenset[str]]] = {}
 
     @property
     def root(self) -> object:
@@ -885,6 +972,31 @@ class _TransactionBase:
         `..` is collapsed, and a local path resolved, before comparing.
         """
         return _within(_location(path), self._location)
+
+    def listed_names(self, directory: object) -> frozenset[str] | None:
+        """Return the names a sidecar search listed in `directory`, if known.
+
+        Only a directory this transaction covers is remembered, from the
+        first listing in the block until brainfilter changes a store (see
+        `changed`); `None` when it is not known. The files the block holds
+        are not among them.
+        """
+        listed = self._listings.get(_location(directory))
+        if listed is None or listed[0] != _changes:
+            return None
+        return listed[1]
+
+    def remember_names(
+        self, directory: object, count: int, names: Iterable[str]
+    ) -> None:
+        """Remember the names of `directory`, listed when `changes()` was `count`.
+
+        A directory the transaction does not cover is not remembered, nor
+        a listing made before the store last changed.
+        """
+        location = _location(directory)
+        if count == _changes and _within(location, self._location):
+            self._listings[location] = (count, frozenset(names))
 
     def _overlaps(self, other: _TransactionBase) -> bool:
         """Whether the two transactions cover a file in common (any family)."""
@@ -991,6 +1103,7 @@ class _TransactionBase:
         """Drop the held files, and let other contexts write the files."""
         self._buffer.end_live()
         self._buffer.clear()
+        self._listings.clear()
         self._state = _DONE
         with _REGISTRY_LOCK:
             _REGISTRY[:] = [t for t in _REGISTRY if t is not self]
@@ -1158,20 +1271,26 @@ def _doing(tx: _TransactionBase) -> str:
 
 def write_file(path: BidsPath, data: bytes) -> None:
     """Replace the file at `path` with `data`, in one step."""
-    parent = path.parent
-    if not parent.exists():
-        parent.mkdir(parents=True, exist_ok=True)
-    with path.staged() as staged:
-        staged.write_bytes(data)
+    try:
+        parent = path.parent
+        if not parent.exists():
+            parent.mkdir(parents=True, exist_ok=True)
+        with path.staged() as staged:
+            staged.write_bytes(data)
+    finally:
+        changed()
 
 
 async def awrite_file(path: AsyncBidsPath, data: bytes) -> None:
     """Replace the file at `path` with `data`, in one step (a coroutine)."""
-    parent = path.parent
-    if not await parent.exists():
-        await parent.mkdir(parents=True, exist_ok=True)
-    async with path.staged() as staged:
-        await staged.write_bytes(data)
+    try:
+        parent = path.parent
+        if not await parent.exists():
+            await parent.mkdir(parents=True, exist_ok=True)
+        async with path.staged() as staged:
+            await staged.write_bytes(data)
+    finally:
+        changed()
 
 
 class Transaction(_TransactionBase):

@@ -173,7 +173,7 @@ import json
 import pathlib
 import re
 import typing
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Iterator, Mapping
 from pathlib import PurePosixPath
 from typing import TypeVar
 
@@ -200,6 +200,7 @@ from brainfilter._names import (
 )
 from brainfilter.bidspath import AsyncBidsPath, BidsPath
 from brainfilter.conditions import Condition, Not, Or, Regex, default_full
+from brainfilter.transaction import pending_tree
 
 __all__ = ["BidsFilter"]
 
@@ -1082,6 +1083,13 @@ class BidsFilter:
         data file's own folder. Walk from the dataset root, or from a nested
         dataset with its own description, for full inheritance.
 
+        Inside a transaction (`with ds:`), the walk sees the dataset as the
+        block does: the files it holds that are not written yet are listed,
+        with the folders that hold them, and the sidecars and
+        `participants.tsv` are read with the block's edits. It keeps what
+        `select` would keep of that listing. Walked from another thread, or
+        from a task started outside the block, it sees the store.
+
         Raises
         ------
         FileNotFoundError
@@ -1091,7 +1099,8 @@ class BidsFilter:
         root = in_family(root, BidsPath)
         found: dict[str, BidsPath] = {}
         state = _Walk()
-        for dirpath, dirnames, filenames in root.walk():
+        state.pending = pending_tree(root)
+        for dirpath, dirnames, filenames in _walk_tree(root, state.pending):
             parts = PurePosixPath(dirpath.relative_to(root).as_posix()).parts
             if not parts and not state.started:
                 state.started = True
@@ -1115,7 +1124,9 @@ class BidsFilter:
         for pruned in sorted(state.pruned):
             if not _above_any(unsure, pruned):
                 continue
-            for dirpath, dirnames, filenames in (root / pruned).walk():
+            for dirpath, dirnames, filenames in _walk_tree(
+                root, state.pending, root / pruned
+            ):
                 parts = PurePosixPath(dirpath.relative_to(root).as_posix()).parts
                 dirnames[:] = [
                     d for d in dirnames if self._descend(parts, d, state, False)
@@ -1144,11 +1155,13 @@ class BidsFilter:
         coroutines. The listing goes one level at a time, every directory
         of a level at once, and lists no folder `walk` would not; the
         sidecars a sidecar filter reads are read at once too. The files
-        have the mode of `root`, as in `walk`.
+        have the mode of `root`, as in `walk`, and inside an `async with`
+        block the walk sees the files it holds, as `walk` does.
         """
         root = in_family(root, AsyncBidsPath)
         found: dict[str, AsyncBidsPath] = {}
         state = _Walk()
+        state.pending = pending_tree(root)
         await self._alist_below(root, [root], found, state)
         plan = _Plan(self, found, state.ignore, state.subjects)
         unsure = plan.unsure(state.pruned)
@@ -1182,8 +1195,12 @@ class BidsFilter:
         pruned folder `pruned` (pruning nothing by label) until no metadata
         file of `unsure` above it is left unsettled, and returns those left.
         """
+        def listing(directory: AsyncBidsPath) -> Awaitable[list[tuple]]:
+            parts = PurePosixPath(directory.relative_to(root).as_posix()).parts
+            return _alist(directory, state.pending.get(parts))
+
         while level:
-            listings = await _gather(_alist, level)
+            listings = await _gather(listing, level)
             if not state.started:
                 state.started = True
                 await self._aread_root(root, listings[0], state)
@@ -1527,6 +1544,10 @@ class _Walk:
         # per filter of the expression, the subjects `participants.tsv` keeps
         self.subjects: list[set[str] | None] | None = None
         self.pruned: list[str] = []      # the folders left out: label, ignore
+        # The files the blocks open in this context hold below the root,
+        # by directory (see `transaction.pending_tree`): listed with the
+        # store's own files.
+        self.pending: dict[tuple[str, ...], dict[str, bool]] = {}
 
 
 def _above_any(metadata: list[ParsedPath], directory: str) -> bool:
@@ -2393,17 +2414,85 @@ def _ignore_class(segment: str, i: int) -> tuple[str | None, int]:
     return "[" + body + "]", j + 1
 
 
-async def _alist(directory: AsyncBidsPath) -> list[tuple]:
+async def _alist(
+    directory: AsyncBidsPath, pending: Mapping[str, bool] | None = None
+) -> list[tuple]:
     """List a directory: `(child, is_dir, is_symlink)` for each child.
 
     Both answers come from the listing; a symbolic link to a directory is
-    not descended into, as in `walk`.
+    not descended into, as in `walk`. `pending` is what a block open here
+    holds in it, `{name: is_dir}` (see `transaction.pending_tree`): those
+    the store does not have yet are listed too, and a directory the store
+    does not have at all lists them alone.
     """
     children = []
-    async for child in directory.iterdir():
-        is_link = await child.pathinfo.is_symlink()
-        children.append((child, await child.pathinfo.is_dir(), is_link))
+    try:
+        async for child in directory.iterdir():
+            is_link = await child.pathinfo.is_symlink()
+            children.append((child, await child.pathinfo.is_dir(), is_link))
+    except OSError:
+        if not pending:
+            raise
+        children = []
+    if pending:
+        names = {child.name for child, _, _ in children}
+        children.extend(
+            (directory / name, is_dir, False)
+            for name, is_dir in sorted(pending.items()) if name not in names
+        )
     return children
+
+
+def _walk_tree(
+    root: BidsPath,
+    pending: Mapping[tuple[str, ...], Mapping[str, bool]],
+    top: BidsPath | None = None,
+) -> Iterator[tuple[BidsPath, list[str], list[str]]]:
+    """Walk `top` (by default `root`) top-down, as `top.walk()` does.
+
+    `pending` is what the blocks open here hold below `root`, by directory
+    relative to it (see `transaction.pending_tree`). The files and folders
+    the store does not have yet are listed with those it has, and a folder
+    that only a block holds is walked too, after the store's; folders left
+    out of `dirnames` are not walked, whichever they are. Without
+    `pending`, it is `top.walk()` itself.
+    """
+    top = root if top is None else top
+    if not pending:
+        yield from top.walk()
+        return
+    visited = set()
+    only_pending: list[tuple[str, ...]] = []
+    for dirpath, dirnames, filenames in top.walk():
+        parts = PurePosixPath(dirpath.relative_to(root).as_posix()).parts
+        visited.add(parts)
+        held = pending.get(parts)
+        if not held:
+            yield dirpath, dirnames, filenames
+            continue
+        stored = {*dirnames, *filenames}
+        new_dirs = sorted(n for n, d in held.items() if d and n not in stored)
+        shown = [*dirnames, *new_dirs]
+        files = [*filenames, *sorted(
+            n for n, d in held.items() if not d and n not in stored
+        )]
+        yield dirpath, shown, files
+        # `shown` is what the caller kept: the store walks its own folders.
+        dirnames[:] = [d for d in shown if d not in new_dirs]
+        only_pending.extend((*parts, d) for d in shown if d in new_dirs)
+    start = PurePosixPath(top.relative_to(root).as_posix()).parts
+    if start not in visited and start in pending:
+        # `top` itself is not on the store yet.
+        only_pending.insert(0, start)
+    while only_pending:
+        parts = only_pending.pop(0)
+        held = pending.get(parts, {})
+        dirpath = root
+        for name in parts:
+            dirpath = dirpath / name
+        dirnames = sorted(n for n, d in held.items() if d)
+        yield dirpath, dirnames, sorted(n for n, d in held.items() if not d)
+        only_pending[:0] = [(*parts, d) for d in dirnames]
 
 
 def _relative(path: object, root: object) -> str:

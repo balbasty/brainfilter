@@ -81,6 +81,7 @@ from brainfilter.transaction import (
     _Buffer,
     active_for,
     entered,
+    pending_kinds,
     pending_names,
 )
 
@@ -457,6 +458,108 @@ def _with_pending(
     return sorted(listed, key=lambda child: child.name)
 
 
+def _known_description(directory: object) -> bool | None:
+    """Whether `directory` holds a `dataset_description.json`, if known here.
+
+    Known when a transaction open here holds one there, or remembers the
+    directory's listing (see `Transaction.listed_names`); `None` otherwise.
+    """
+    if DATASET_DESCRIPTION in pending_names(directory):
+        return True
+    tx = active_for(directory)
+    names = None if tx is None else tx.listed_names(directory)
+    return None if names is None else DATASET_DESCRIPTION in names
+
+
+# -- the sidecars a table remembers -------------------------------------------
+
+class _Remembered:
+    """The sidecars a table found, kept on its path object between reads.
+
+    They are used again by the same object while `changes()` is what it
+    was when they were found, so a write through brainfilter (to any file,
+    in any thread) makes the next read search again. A copy of the object
+    made with `copy.copy` shares it; a pickled or deep-copied one starts
+    without.
+    """
+
+    __slots__ = ("count", "owner", "sidecars")
+
+    def __init__(self, count: int, owner: str, sidecars: tuple) -> None:
+        self.count = count
+        self.owner = owner
+        self.sidecars = sidecars
+
+    def __reduce__(self) -> tuple:
+        return (_forgotten, ())
+
+
+def _forgotten() -> None:
+    """Read a pickled `_Remembered` back as nothing remembered."""
+    return None
+
+
+def _remembered_sidecars(path: Any) -> tuple | None:  # noqa: ANN401
+    """Return the sidecars `path` remembers, if they are still current."""
+    memo = getattr(path, "_sidecar_memo", None)
+    if (
+        isinstance(memo, _Remembered)
+        and memo.count == _transaction.changes()
+        and memo.owner == str(path)
+    ):
+        return memo.sidecars
+    return None
+
+
+def _remember_sidecars(path: Any, count: int, sidecars: tuple) -> None:  # noqa: ANN401
+    """Keep `sidecars` on `path`, found when `changes()` was `count`."""
+    try:
+        path._sidecar_memo = _Remembered(count, str(path), sidecars)
+    except AttributeError:
+        # A path class without the slot remembers nothing.
+        pass
+
+
+def _remembered_sidecar(path: Any) -> SidecarChain:  # noqa: ANN401
+    """Return the merged sidecar of a table, for a typed read outside a block.
+
+    The sidecars the same path object found last time are read again, but
+    not searched for again (no directory is listed), until brainfilter
+    changes a store; if one of them is gone, they are searched for again.
+    """
+    sidecars = _remembered_sidecars(path)
+    if sidecars is not None:
+        try:
+            contents = [sidecar.as_dict() for sidecar in sidecars]
+        except FileNotFoundError:
+            pass
+        else:
+            return SidecarChain(*contents, sidecars=sidecars, owner=path)
+    count = _transaction.changes()
+    chain = path.sidecar
+    _remember_sidecars(path, count, chain.sidecars)
+    return chain
+
+
+async def _aremembered_sidecar(path: Any) -> AsyncSidecarChain:  # noqa: ANN401
+    """Return what `_remembered_sidecar` does, as a coroutine."""
+    sidecars = _remembered_sidecars(path)
+    if sidecars is not None:
+        contents = await asyncio.gather(
+            *(s.as_dict() for s in sidecars), return_exceptions=True
+        )
+        if not any(isinstance(c, FileNotFoundError) for c in contents):
+            # If several cannot be read, the nearest one's error.
+            for content in contents:
+                if isinstance(content, BaseException):
+                    raise content
+            return AsyncSidecarChain(*contents, sidecars=sidecars, owner=path)
+    count = _transaction.changes()
+    chain = await path.sidecar
+    _remember_sidecars(path, count, chain.sidecars)
+    return chain
+
+
 # -- the merged sidecar ----------------------------------------------------------
 
 class SidecarChain(ChainMap):
@@ -628,6 +731,7 @@ class TreeMixin:
     directory each time they are called; nothing is cached. Inside a
     transaction, the files it holds are listed too, before they are written,
     and `dataset[name] = content` creates or replaces a JSON or TSV file.
+    `iterdir()`, `glob()` and `walk()` list the store itself, without them.
     """
 
     __slots__ = ()
@@ -658,7 +762,8 @@ class TreeMixin:
 
         The labels are those of the `sub-<label>` directories directly
         below this path, without the `sub-` prefix. Numeric labels are
-        sorted as numbers.
+        sorted as numbers. Inside a transaction, a folder that holds a new
+        file counts before the file is written.
         """
         return _sorted_labels(_entity_labels(self, "sub"))
 
@@ -667,15 +772,13 @@ class TreeMixin:
 
         On a subject directory, the labels of its `ses-<label>`
         directories; on a dataset, every label any subject has, once.
+        Inside a transaction, a folder that holds a new file counts.
         """
         if _entity_label(self.name, "sub") is not None:
             return _sorted_labels(_entity_labels(self, "ses"))
         labels: set[str] = set()
-        for child in self.iterdir():
-            if _entity_label(child.name, "sub") is not None and (
-                child.pathinfo.is_dir()
-            ):
-                labels.update(_entity_labels(child, "ses"))
+        for child in _entity_dirs(self, "sub"):
+            labels.update(_entity_labels(child, "ses"))
         return _sorted_labels(labels)
 
     # -- transactions --------------------------------------------------------
@@ -791,7 +894,14 @@ class TreeMixin:
         `dataset_description.json`. If no ancestor holds one, only the
         sidecars in this file's own directory count. Within one directory,
         a sidecar with more entities comes first. Inside a transaction, new
-        sidecars count. The directories are listed each time this is read.
+        sidecars count.
+
+        The directories up to the dataset root are listed each time this is
+        read; inside a transaction, each directory below its root is listed
+        once per block (see `brainfilter.Transaction`). Above the nearest
+        `sub-<label>` folder, a directory is only checked for a
+        `dataset_description.json` until one has it, so a file outside every
+        dataset does not list the folders above it.
         """
         return self._answer(search_sidecars(self))
 
@@ -933,6 +1043,10 @@ class TreeMixin:
             while True:
                 if kind == "list":
                     answer = self._list_names(target)
+                elif kind == "list-sidecars":
+                    answer = self._sidecar_names(target)
+                elif kind == "probe":
+                    answer = self._has_description(target)
                 else:
                     answer = target.as_dict()
                 kind, target = search.send(answer)
@@ -947,6 +1061,37 @@ class TreeMixin:
         except OSError:
             return pending
 
+    @staticmethod
+    def _sidecar_names(directory: TreeMixin) -> set[str]:
+        """List `directory` for the sidecar search; once per block inside one.
+
+        Inside a block that covers `directory`, the listing is remembered
+        for the rest of the block (see `Transaction.listed_names`); the
+        files the block holds are added each time.
+        """
+        tx = active_for(directory)
+        if tx is None:
+            return TreeMixin._list_names(directory)
+        names = tx.listed_names(directory)
+        if names is None:
+            count = _transaction.changes()
+            try:
+                names = {child.name for child in directory.iterdir()}
+            except (FileNotFoundError, NotADirectoryError):
+                names = set()
+            except OSError:
+                return pending_names(directory)
+            tx.remember_names(directory, count, names)
+        return set(names) | pending_names(directory)
+
+    @staticmethod
+    def _has_description(directory: TreeMixin) -> bool:
+        """Whether `directory` holds a `dataset_description.json`."""
+        known = _known_description(directory)
+        if known is not None:
+            return known
+        return (directory / DATASET_DESCRIPTION).exists()
+
 
 class _ContentMixin:
     """What a JSON and a TSV file share: loading, and writes."""
@@ -958,8 +1103,12 @@ class _ContentMixin:
     if TYPE_CHECKING:
         def read_text(self, encoding: str | None = None) -> str: ...  # noqa: D102
 
-    def _descriptions(self) -> Mapping | None:
-        """Return what types the content when parsed (a table's columns)."""
+    def _descriptions(self, reading: bool = False) -> Mapping | None:
+        """Return what types the content when parsed (a table's columns).
+
+        With `reading`, for a read outside every block, which may use the
+        sidecars this path found last time (see `_remembered_sidecar`).
+        """
         return None
 
     def _load(self, buffer: _Buffer, create: bool) -> _Entry:
@@ -1018,7 +1167,9 @@ class _ContentMixin:
         if entry is not None:
             return _detached(entry.content)
         text = self.read_text(encoding=_ENCODING)
-        return _content.parse(self._kind, text, self._descriptions())
+        return _content.parse(
+            self._kind, text, self._descriptions(reading=True)
+        )
 
     def _change(self, change: Callable[[_Entry], None]) -> None:
         """Apply `change` to the content: written now, or kept by a transaction.
@@ -1185,6 +1336,16 @@ class TSVContentMixin(_ContentMixin):
     unchanged keep their exact text. Inside a block, `table[column]` is a
     `LiveColumn` over the transaction's own table, so a value set in it
     (`table["age"][0] = 31`) is saved too; every other read is a copy.
+
+    A table remembers which sidecars describe it. Outside a block, the
+    typed reads of one path object (`table[column]`, `as_dict()`,
+    `as_list()`, `as_dataframe()`, ...) search for its sidecars once and
+    read those files again at each read, until brainfilter next changes a
+    store: any write through brainfilter, to any file, makes the next read
+    search again. A sidecar removed meanwhile is noticed at once. One that
+    another program adds is found by a new path object (`dataset / name`),
+    or after brainfilter's next write. `sidecars` and `sidecar` search each
+    time they are read.
     """
 
     __slots__ = ()
@@ -1193,7 +1354,9 @@ class TSVContentMixin(_ContentMixin):
     if TYPE_CHECKING:
         sidecar: SidecarChain
 
-    def _descriptions(self) -> Mapping | None:
+    def _descriptions(self, reading: bool = False) -> Mapping | None:
+        if reading and active_for(self) is None:
+            return _remembered_sidecar(self)
         return self.sidecar
 
     def _table(self, raw: bool = False) -> Table:
@@ -1253,7 +1416,9 @@ class TSVContentMixin(_ContentMixin):
             text = _content.dump_tsv(entry.content)
         else:
             text = self.read_text(encoding=_ENCODING)
-        return _content.tsv_dataframe(text, kwargs, self._descriptions())
+        return _content.tsv_dataframe(
+            text, kwargs, self._descriptions(reading=True)
+        )
 
     # -- mapping of columns --------------------------------------------------
     def __getitem__(self, column: str) -> list | LiveColumn:
@@ -1337,7 +1502,8 @@ class AsyncTreeMixin:
     `ds[name]`, `await ds.has(name)` for `name in ds`, `await ds.keys()`,
     `values()`, `items()`, `get()`, and `async for name in ds`. Each call
     lists the directory again; nothing is cached. Inside a transaction
-    (`async with ds:`) the files it holds are listed too.
+    (`async with ds:`) the files it holds are listed too; `iterdir()`,
+    `glob()` and `walk()` list the store itself, without them.
     """
 
     __slots__ = ()
@@ -1531,6 +1697,10 @@ class AsyncTreeMixin:
             while True:
                 if kind == "list":
                     answer = await self._list_names(target)
+                elif kind == "list-sidecars":
+                    answer = await self._sidecar_names(target)
+                elif kind == "probe":
+                    answer = await self._has_description(target)
                 else:
                     answer = await target.as_dict()
                 kind, target = search.send(answer)
@@ -1556,6 +1726,32 @@ class AsyncTreeMixin:
         except OSError:
             return pending
 
+    @staticmethod
+    async def _sidecar_names(directory: AsyncTreeMixin) -> set[str]:
+        """List `directory` for the sidecar search (see `TreeMixin`'s)."""
+        tx = active_for(directory)
+        if tx is None:
+            return await AsyncTreeMixin._list_names(directory)
+        names = tx.listed_names(directory)
+        if names is None:
+            count = _transaction.changes()
+            try:
+                names = {child.name async for child in directory.iterdir()}
+            except (FileNotFoundError, NotADirectoryError):
+                names = set()
+            except OSError:
+                return pending_names(directory)
+            tx.remember_names(directory, count, names)
+        return set(names) | pending_names(directory)
+
+    @staticmethod
+    async def _has_description(directory: AsyncTreeMixin) -> bool:
+        """Whether `directory` holds a `dataset_description.json`."""
+        known = _known_description(directory)
+        if known is not None:
+            return known
+        return await (directory / DATASET_DESCRIPTION).exists()
+
 
 class _AsyncContentMixin:
     """The coroutine counterpart of `_ContentMixin`."""
@@ -1567,7 +1763,7 @@ class _AsyncContentMixin:
     if TYPE_CHECKING:
         async def read_text(self, encoding: str | None = None) -> str: ...  # noqa: D102
 
-    async def _descriptions(self) -> Mapping | None:
+    async def _descriptions(self, reading: bool = False) -> Mapping | None:
         return None
 
     async def _load(self, buffer: _Buffer, create: bool) -> _Entry:
@@ -1615,7 +1811,9 @@ class _AsyncContentMixin:
         if entry is not None:
             return _detached(entry.content)
         text = await self.read_text(encoding=_ENCODING)
-        return _content.parse(self._kind, text, await self._descriptions())
+        return _content.parse(
+            self._kind, text, await self._descriptions(reading=True)
+        )
 
     async def _change(self, change: Callable[[_Entry], None]) -> None:
         require_writable(self, _WRITE)
@@ -1752,7 +1950,9 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
     if TYPE_CHECKING:
         sidecar: Awaitable[AsyncSidecarChain]
 
-    async def _descriptions(self) -> Mapping | None:
+    async def _descriptions(self, reading: bool = False) -> Mapping | None:
+        if reading and active_for(self) is None:
+            return await _aremembered_sidecar(self)
         return await self.sidecar
 
     async def _table(self, raw: bool = False) -> Table:
@@ -1796,7 +1996,7 @@ class AsyncTSVContentMixin(_AsyncContentMixin):
         else:
             text = await self.read_text(encoding=_ENCODING)
         return _content.tsv_dataframe(
-            text, kwargs, await self._descriptions()
+            text, kwargs, await self._descriptions(reading=True)
         )
 
     # -- mapping of columns --------------------------------------------------
@@ -1911,24 +2111,62 @@ def _sorted_labels(labels: Iterable[str]) -> list[str]:
     return sorted(labels)
 
 
+def _entity_dirs(directory: TreeMixin, key: str) -> list:
+    """Return the `<key>-<label>` directories in `directory`.
+
+    Inside a block, those it holds new files in are among them.
+    """
+    pending = pending_kinds(directory)
+    found = []
+    try:
+        found = [
+            child for child in directory.iterdir()
+            if _entity_label(child.name, key) is not None
+            and child.pathinfo.is_dir()
+        ]
+    except OSError:
+        # A directory that only the transaction holds so far.
+        if not pending:
+            raise
+    return _with_pending_dirs(directory, found, key, pending)
+
+
+def _with_pending_dirs(
+    directory: Any, found: list, key: str, pending: Mapping[str, bool]  # noqa: ANN401
+) -> list:
+    """Add to `found` the `<key>-<label>` directories only a block holds."""
+    names = {child.name for child in found}
+    found.extend(
+        directory / name for name, is_dir in sorted(pending.items())
+        if is_dir and name not in names
+        and _entity_label(name, key) is not None
+    )
+    return found
+
+
 def _entity_labels(directory: TreeMixin, key: str) -> set[str]:
     """Return the labels of the `<key>-<label>` directories in `directory`."""
     return {
-        label
-        for child in directory.iterdir()
-        if (label := _entity_label(child.name, key)) is not None
-        and child.pathinfo.is_dir()
+        _entity_label(child.name, key)  # type: ignore[misc]
+        for child in _entity_dirs(directory, key)
     }
 
 
 async def _aentity_dirs(directory: AsyncTreeMixin, key: str) -> list:
     """Return the `<key>-<label>` directories in `directory`."""
-    return [
-        child
-        async for child in directory.iterdir()
-        if _entity_label(child.name, key) is not None
-        and await child.pathinfo.is_dir()
-    ]
+    pending = pending_kinds(directory)
+    found = []
+    try:
+        found = [
+            child
+            async for child in directory.iterdir()
+            if _entity_label(child.name, key) is not None
+            and await child.pathinfo.is_dir()
+        ]
+    except OSError:
+        if not pending:
+            raise
+    return _with_pending_dirs(directory, found, key, pending)
 
 
 async def _aentity_labels(directory: AsyncTreeMixin, key: str) -> set[str]:

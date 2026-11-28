@@ -825,7 +825,8 @@ class BidsPath(TreeMixin, BidsPathMixin, Path):
     the block ends. See `brainfilter.Transaction`.
     """
 
-    __slots__ = ("_mode",)
+    # `_sidecar_memo`: the sidecars a table found last time (see `_tree`).
+    __slots__ = ("_mode", "_sidecar_memo")
 
 
 class BidsFile(BidsPath):
@@ -1228,7 +1229,8 @@ class AsyncBidsPath(AsyncTreeMixin, BidsPathMixin, AsyncPath):
     `async with dataset:`.
     """
 
-    __slots__ = ("_mode",)
+    # `_sidecar_memo`: the sidecars a table found last time (see `_tree`).
+    __slots__ = ("_mode", "_sidecar_memo")
 
 
 class AsyncBidsFile(AsyncBidsPath):

@@ -236,7 +236,10 @@ written, and a new file is created only once it has content, so the list is also
 a quick check that the transaction touched what you expected and nothing more.
 
 While the block is open, the files on disk have not changed yet. A read through
-brainfilter sees your edits; reading the raw text of the file does not.
+brainfilter sees your edits; reading the raw text of the file does not. Listings
+follow the same line: a new file is listed by `keys()`, `subjects()` and
+`ds.filter()` as soon as it is given content, but `glob()` and `iterdir()`
+list the store, where it appears when the block ends.
 
 ```pycon
 >>> path = ds["sub-01"]["func"]["sub-01_task-rest_bold.json"]

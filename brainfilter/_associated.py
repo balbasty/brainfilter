@@ -1,10 +1,14 @@
 """The files that belong with a data file: sidecars, companions, fieldmaps.
 
 Each search here does no I/O itself. It is a generator that yields what it
-needs, `("list", directory)` for the set of a directory's child names or
-`("read", file)` for the content of a JSON file, and is sent the answer
-back, so that one search serves the sync and the async surfaces (see
-`TreeMixin` and `AsyncTreeMixin`, which answer the requests).
+needs, `("list", directory)` for the set of a directory's child names (or
+`("list-sidecars", directory)`, the same for the sidecar search, which a
+transaction may answer from what it listed earlier in its block),
+`("probe", directory)` for whether a directory holds a
+`dataset_description.json`, or `("read", file)` for the content of a JSON
+file, and is sent the answer back, so that one search serves the sync and
+the async surfaces (see `TreeMixin` and `AsyncTreeMixin`, which answer the
+requests).
 
 - `search_sidecars`: the JSON sidecars of a file, nearest first (BIDS
   inheritance, up to the dataset root).
@@ -66,12 +70,35 @@ _P = TypeVar("_P")
 _Search = Generator[tuple[str, Any], Any, Any]
 
 
-def _list(directory: _P) -> _Search:
-    """Ask for the child names of `directory`."""
-    return (yield ("list", directory))
+def _list(directory: _P, kind: str = "list") -> _Search:
+    """Ask for the child names of `directory`.
+
+    `kind` is `"list"`, or `"list-sidecars"` for a listing the sidecar
+    search makes, which only reads the names of JSON files from it, and may
+    be answered from what a transaction remembers.
+    """
+    return (yield (kind, directory))
 
 
-def _levels(path: _P) -> _Search:
+def _probe(directory: _P) -> _Search:
+    """Ask whether `directory` holds a `dataset_description.json`."""
+    return (yield ("probe", directory))
+
+
+def _root_guess(parents: list[Any]) -> int:
+    """Return the index, in `parents`, of the likely dataset root.
+
+    The parent of the nearest `sub-<label>` folder above the file (BIDS
+    puts every subject folder at the top of its dataset); the file's own
+    directory (`0`) when no folder above it is a subject folder.
+    """
+    for index, directory in enumerate(parents[:-1]):
+        if _is_entity_directory(directory.name, "sub"):
+            return index + 1
+    return 0
+
+
+def _levels(path: _P, kind: str = "list") -> _Search:
     """List the directories BIDS inheritance reaches from `path`, once each.
 
     Returns `(levels, data_rel, rooted)`: `levels` holds `(directory,
@@ -79,19 +106,37 @@ def _levels(path: _P) -> _Search:
     the nearest that holds a `dataset_description.json` (`rooted`), or the
     file's own directory alone when there is none; `rel_dir` and `data_rel`
     are the directory and the file relative to the root (to the file's own
-    directory without one), as `applies_to` expects.
+    directory without one), as `applies_to` expects. `kind` is the kind of
+    listing asked for (see `_list`).
+
+    The directories are listed up to the likely root (see `_root_guess`),
+    each of which is needed if the root is there or above. Above it, each
+    directory is only asked whether it holds a description until one does,
+    so a file outside every dataset does not list the folders above it up
+    to the top of the store; the directories up to that root are listed
+    then.
     """
+    parents = list(path.parents)
+    guess = _root_guess(parents)
     listed: list[tuple[Any, set[str]]] = []
     rooted = False
-    for directory in path.parents:
-        names = yield from _list(directory)
+    for directory in parents[:guess + 1]:
+        names = yield from _list(directory, kind)
         listed.append((directory, names))
         if DATASET_DESCRIPTION in names:
             rooted = True
             break
     else:
-        # No dataset root: only the file's own directory counts. Its
-        # listing is the first one, so this costs no more I/O.
+        above = parents[guess + 1:]
+        for index, directory in enumerate(above):
+            if (yield from _probe(directory)):
+                rooted = True
+                for level in above[:index + 1]:
+                    listed.append((level, (yield from _list(level, kind))))
+                break
+    if not rooted:
+        # No dataset root: only the file's own directory counts, and its
+        # listing is the first one.
         listed = listed[:1]
     dirs = [d.name for d, _ in listed[:-1]]
     rel_dirs = ["/".join(reversed(dirs[i:])) for i in range(len(dirs))]
@@ -120,7 +165,7 @@ def search_sidecars(path: _P) -> _Search:
     """Find the sidecars of `path`, nearest first (see `TreeMixin.sidecars`)."""
     if path.suffix is None:
         return ()
-    levels, data_rel, _ = yield from _levels(path)
+    levels, data_rel, _ = yield from _levels(path, "list-sidecars")
     found = []
     for directory, names, rel_dir in levels:
         level = []
@@ -389,13 +434,24 @@ def _listing(directory: _P, cache: dict[str, set[str]]) -> _Search:
 
 
 def _cached(search: _Search, cache: dict[str, set[str]]) -> _Search:
-    """Run a search, answering each directory it lists from `cache`."""
+    """Run a search, answering each directory it lists from `cache`.
+
+    A question about a directory listed already (`"probe"`) is answered
+    from its listing too.
+    """
     try:
         kind, target = next(search)
         while True:
-            assert kind == "list"
-            names = yield from _listing(target, cache)
-            kind, target = search.send(names)
+            if kind == "probe":
+                key = str(target)
+                answer = (
+                    DATASET_DESCRIPTION in cache[key] if key in cache
+                    else (yield (kind, target))
+                )
+            else:
+                assert kind in ("list", "list-sidecars")
+                answer = yield from _listing(target, cache)
+            kind, target = search.send(answer)
     except StopIteration as done:
         return done.value
 
