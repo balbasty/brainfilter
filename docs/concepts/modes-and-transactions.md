@@ -256,6 +256,52 @@ is not seen, and the commit will replace it. A file that did not exist is create
 only once it has content, and a file that was read but not changed is not
 written.
 
+### What the reads in a block see
+
+Inside a block, brainfilter's own reads show the dataset as the block holds it.
+A new file appears in the directory listing (`keys()`, `in`, indexing) before
+it is written, and so do the folders that hold it. The searches of a file's
+`sidecars`, `companions` and `fieldmaps` find the new files too, and
+`subjects()` and `sessions()` count the new folders. A filter sees the same
+view: `ds.filter()`, `BidsFilter.walk` and `BidsFilter.awalk` list the new files
+with the store's, read every sidecar and `participants.tsv` with the block's
+edits, and keep what `select` would keep of that listing.
+
+The members that a path shares with `pathlib` are different. `iterdir()`,
+`glob()`, `rglob()`, `walk()`, `exists()` and `read_text()` read the store
+itself, inside a block as outside, so a new file is not there until the commit
+has written it.
+
+```pycon
+>>> with writer:
+...     t1w = writer / "sub-01" / "anat" / "sub-01_T1w.json"
+...     t1w.write({"RepetitionTime": 2.3})
+...     kept = writer.filter(RepetitionTime=2.3)
+...     print("sub-01/anat/sub-01_T1w.json" in [p.relative_to(writer).as_posix() for p in kept])
+...     print(writer.subjects(), list(writer.glob("sub-01/anat/*")))
+True
+['01'] []
+>>> [p.name for p in writer.glob("sub-01/anat/*")]
+['sub-01_T1w.json']
+```
+
+`BidsFilter.select` lists nothing itself. It reads the sidecars of the paths it
+is given as the block holds them, so it sees the new files only if they are in
+the listing it is given, such as one returned by `walk`.
+
+Within a block, the sidecar search lists each directory below the root of the
+block once, and uses that listing again for the rest of the block, with the
+block's new files added. It lists again after brainfilter has changed the store:
+a call to one of the path members that write (`mkdir`, `rename`, `copy`,
+`write_bytes` and the others above), or a file written outside the block. A
+file that another program adds to one of those directories in the meantime is
+not seen, just as a change that another writer makes to a file the block holds
+is not seen.
+
+These reads join the block under the same rule as writes, described next. A
+walk run in a plain thread does not see the block, and reads the store as it
+is.
+
 ### Who is inside the block
 
 A transaction holds for the thread or task that opened it, and for the tasks that

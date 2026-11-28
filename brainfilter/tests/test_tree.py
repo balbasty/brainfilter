@@ -330,22 +330,31 @@ def test_no_dataset_root_sidecar_write(tmp_path):
     }
 
 
-def test_no_dataset_root_lists_each_ancestor_once(memory_ds, monkeypatch):
+def test_no_dataset_root_lists_only_the_own_directory(memory_ds, monkeypatch):
     from fsspec.implementations.memory import MemoryFileSystem
 
     top = _populate_loose(BidsPath("memory://top"))
     data = top / LOOSE_DATA
-    calls = []
-    real = MemoryFileSystem.ls
+    calls, probed = [], []
+    real, exists = MemoryFileSystem.ls, BidsPath.exists
 
     def ls(self, path, *args, **kwargs):
         calls.append(path)
         return real(self, path, *args, **kwargs)
 
+    def probe(self, *args, **kwargs):
+        probed.append(str(self))
+        return exists(self, *args, **kwargs)
+
     monkeypatch.setattr(MemoryFileSystem, "ls", ls)
+    monkeypatch.setattr(BidsPath, "exists", probe)
     assert [s.name for s in data.sidecars] == ["sub-01_T1w.json", "T1w.json"]
-    # one walk up: each ancestor is listed once, to learn there is no root
-    assert len(calls) == len(set(calls)) == len(data.parents)
+    # The file's own directory is listed; each ancestor above it is only
+    # asked whether it holds a dataset_description.json, once.
+    assert [MemoryFileSystem._strip_protocol(c) for c in calls] == ["/top/loose"]
+    assert probed == [
+        str(d / "dataset_description.json") for d in data.parents[1:]
+    ]
 
 
 def test_each_directory_listed_once(memory_ds, monkeypatch):

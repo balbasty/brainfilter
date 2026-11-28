@@ -21,7 +21,7 @@ from collections.abc import Callable
 from typing import Any
 
 from brainfilter._family import in_family
-from brainfilter.transaction import refuse_raw_write
+from brainfilter.transaction import changed, refuse_raw_write
 
 __all__ = ["MODES", "ReadOnlyError", "check_mode", "guard_members",
            "is_read_only", "require_writable"]
@@ -152,14 +152,31 @@ def _guard(owner: type, name: str, real: Callable) -> Callable:
             for written in _destinations(name, path, destination):
                 refuse_raw_write(written, name, _ONTO[name])
 
+    # A member that writes, once called (or refused part way), may have
+    # changed what a listing gives: what was remembered from one is
+    # dropped (see `transaction.changed`). `open` for reading does not.
+    def writes(args: tuple, kwargs: dict) -> bool:
+        if name != "open":
+            return True
+        mode = argument(args, kwargs, "mode")
+        return isinstance(mode, str) and bool(_WRITING & set(mode))
+
     if inspect.iscoroutinefunction(real):
         async def member(self: Any, *args, **kwargs) -> Any:  # noqa: ANN401
             check(self, args, kwargs)
-            return await getattr(super(owner, self), name)(*args, **kwargs)
+            try:
+                return await getattr(super(owner, self), name)(*args, **kwargs)
+            finally:
+                if writes(args, kwargs):
+                    changed()
     else:
         def member(self: Any, *args, **kwargs) -> Any:  # noqa: ANN401
             check(self, args, kwargs)
-            return getattr(super(owner, self), name)(*args, **kwargs)
+            try:
+                return getattr(super(owner, self), name)(*args, **kwargs)
+            finally:
+                if writes(args, kwargs):
+                    changed()
 
     return functools.wraps(real)(member)
 

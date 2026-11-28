@@ -695,13 +695,13 @@ async def test_awalk_reads_and_lists_a_few_at_a_time(tmp_path, monkeypatch):
     running, most = 0, {}
 
     def counting(name, real):
-        async def call(path):
+        async def call(path, *args):
             nonlocal running
             running += 1
             most[name] = max(most.get(name, 0), running)
             await asyncio.sleep(0.001)
             try:
-                return await real(path)
+                return await real(path, *args)
             finally:
                 running -= 1
         return call

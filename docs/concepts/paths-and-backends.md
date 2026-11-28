@@ -202,6 +202,15 @@ remote file is a request, and `keys()` on a directory is a listing. A
 [`BidsFilter`](../tutorials/filter-local.md) lists a dataset once and decides before
 any file is downloaded, which is the reason it exists.
 
+A typed read of a table also looks for the sidecars that describe its columns,
+and that lists the folders between the table and the dataset root. A path object
+does this once and remembers the answer for its later reads, until brainfilter
+next writes to a store, so reading several columns through one object, as in
+`events["onset"]` followed by `events["duration"]`, lists those folders once.
+The sidecars themselves are read again each time, so an edit to one is always
+seen. A sidecar that another program adds in the meantime is found by a new
+path object, such as `ds / "sub-01" / ...` built again.
+
 ### Credentials and options
 
 Connection details go in `storage_options`, a dictionary that is passed
